@@ -113,14 +113,20 @@ sudo nala install -y \
     python3-venv picom qtile redshift onboard samba xdotool alacritty \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev\
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g \
-    kalk vlc qt5-style-kvantum thermald network-manager
-    
+    kalk vlc qt5-style-kvantum network-manager
+
+
 sudo nala install -y --no-install-recommends plasma-dialer spacebar plasma-discover
 
 #sudo cp -r ~/Alternix/onboard /usr/share/onboard
 #sudo cp ~/Alternix/configs/.alacritty.toml ~/
 
-sudo systemctl enable --now power-profiles-daemon
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# RPI NON-COMPATIBLE - Comment out:
+
+#sudo nala install thermald
+#sudo systemctl enable --now power-profiles-daemon
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 echo "[System] Installing Flatpaks.."
 
