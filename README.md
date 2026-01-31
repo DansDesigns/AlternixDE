@@ -1,6 +1,6 @@
 # Alternix
-A Linux-mobile desktop environment styled after Android & iOS
-![Alterni](https://github.com/DansDesigns/OSM-Phone/blob/main/OS%20Concepts/Alternix/screenshot-20251210-154950.png)
+A Linux Desktop Environment designed for touchscreen devices.
+![Alternix](https://github.com/DansDesigns/OSM-Phone/blob/main/OS%20Concepts/Alternix/screenshot-20251210-154950.png)
 
 to install:
 
@@ -59,9 +59,7 @@ edit the install-alternix.sh script to enable or disable packages, the following
 ```
 sudo flatpak install -y flathub com.github.joseexposito.touche
 
-sudo flatpak install -y flathub io.github.kolunmi.Bazaar --user
-
-sudo flatpak install -y flathub com.valvesoftware.Steam
+sudo flatpak install -y flathub io.github.kolunmi.Bazaar
 
 sudo flatpak install -y flathub net.retrodeck.retrodeck
 
