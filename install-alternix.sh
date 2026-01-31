@@ -141,11 +141,11 @@ echo "[System] Installing Flatpaks..."
 # Install flatpaks
 sudo flatpak install -y flathub com.github.joseexposito.touche
 sudo flatpak install -y flathub io.github.kolunmi.Bazaar
-sudo flatpak install -y flathub net.retrodeck.retrodeck
+#sudo flatpak install -y flathub net.retrodeck.retrodeck
 sudo flatpak install -y flathub org.kde.kweather
-sudo flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
-sudo flatpak install -y flathub io.github.swordpuffin.hunt
-sudo flatpak install -y flathub com.github.avojak.warble
+#sudo flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
+#sudo flatpak install -y flathub io.github.swordpuffin.hunt
+#sudo flatpak install -y flathub com.github.avojak.warble
 sudo flatpak install -y flathub org.kde.qrca
 
 
@@ -779,51 +779,51 @@ if ! id "lockscreen" >/dev/null 2>&1; then
     sudo adduser --disabled-password --gecos "" --shell /usr/sbin/nologin lockscreen
 fi
 
-## 2. Install supervisor daemon (osm-lockd)
-#sudo tee /usr/local/bin/osm-lockd >/dev/null <<'EOF'
-##!/bin/bash
-#
-#FLAG="/tmp/osm_unlock_success"
-#
-#while true; do
-#    # Clear flag before launching
-#    rm -f "$FLAG"
-#
-#    /usr/local/bin/osm-lockscreen
-#
-#    # If flag exists, stop (unlock was successful)
-#    if [ -f "$FLAG" ]; then
-#        rm -f "$FLAG"
-#        exit 0
-#    fi
-#
-#    # Otherwise restart the lockscreen after short delay
-#    sleep 0.05
-#done
-#EOF
-#
-#sudo chmod +x /usr/local/bin/osm-lockd
+# 2. Install supervisor daemon (osm-lockd)
+sudo tee /usr/local/bin/osm-lockd >/dev/null <<'EOF'
+#!/bin/bash
 
-## 3. Create systemd service
-#sudo tee /etc/systemd/system/osm-lockscreen.service >/dev/null <<'EOF'
-#[Unit]
-#Description=OSM-Phone Lockscreen Supervisor
-#After=graphical.target
-#
-#[Service]
-#Type=simple
-#User=lockscreen
-#ExecStart=/usr/local/bin/osm-lockd
-#Restart=always
-#RestartSec=0.05
-#
-#[Install]
-#WantedBy=graphical.target
-#EOF
-#
-#sudo systemctl daemon-reload
-#sudo systemctl enable osm-lockscreen.service
-#echo "[✓] Lockscreen security layer installed."
+FLAG="/tmp/osm_unlock_success"
+
+while true; do
+    # Clear flag before launching
+    rm -f "$FLAG"
+
+    /usr/local/bin/osm-lockscreen
+
+    # If flag exists, stop (unlock was successful)
+    if [ -f "$FLAG" ]; then
+        rm -f "$FLAG"
+        exit 0
+    fi
+
+    # Otherwise restart the lockscreen after short delay
+    sleep 0.05
+done
+EOF
+
+sudo chmod +x /usr/local/bin/osm-lockd
+
+# 3. Create systemd service
+sudo tee /etc/systemd/system/osm-lockscreen.service >/dev/null <<'EOF'
+[Unit]
+Description=OSM-Phone Lockscreen Supervisor
+After=graphical.target
+
+[Service]
+Type=simple
+User=lockscreen
+ExecStart=/usr/local/bin/osm-lockd
+Restart=always
+RestartSec=0.05
+
+[Install]
+WantedBy=graphical.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable osm-lockscreen.service
+echo "[✓] Lockscreen security layer installed."
 
 
 
@@ -982,28 +982,28 @@ rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
-# 10. Install grub theme & plymouth boot animation
+# 10. Install grub theme & plymouth boot animation - NOT RPI COMPATIBLE
 # ────────────────────────────────────────────────
-echo " "
-
-cd $HOME
-git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
-cd forest-dawn-grub-theme
-chmod +x install.sh
-sudo ./install.sh
-sudo update-grub
+#echo " "
+#
+#cd $HOME
+#git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
+#cd forest-dawn-grub-theme
+#chmod +x install.sh
+#sudo ./install.sh
+#sudo update-grub
 
 # ────────────────────────────────────────────────
 # 11. auto-cpufreq
 # ────────────────────────────────────────────────
-echo " "
-
-echo "- Installing auto-cpufreq..."
-cd $HOME
-git clone https://github.com/AdnanHodzic/auto-cpufreq.git
-cd auto-cpufreq
-sudo ./auto-cpufreq-installer
-sudo auto-cpufreq --install
+#echo " "
+#
+#echo "- Installing auto-cpufreq..."
+#cd $HOME
+#git clone https://github.com/AdnanHodzic/auto-cpufreq.git
+#cd auto-cpufreq
+#sudo ./auto-cpufreq-installer
+#sudo auto-cpufreq --install
 
 # ────────────────────────────────────────────────
 # 12. Finish + prompt
