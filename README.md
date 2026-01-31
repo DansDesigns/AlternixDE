@@ -1,6 +1,6 @@
 # Alternix
 A Linux Desktop Environment designed for touchscreen devices.
-![Alternix](https://github.com/DansDesigns/OSM-Phone/blob/main/OS%20Concepts/Alternix/screenshot-20251210-154950.png)
+![Alternix Desktop](https://github.com/DansDesigns/OSM-Phone/blob/main/OS%20Concepts/Alternix/desktop.png)
 
 to install:
 
