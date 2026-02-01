@@ -220,7 +220,7 @@ mkdir -p "$CONFIG_DST"
 if [ -d "$CONFIG_SRC" ]; then
     # Move everything (folders AND files) into ~/.config
     echo "• Moving configs from $CONFIG_SRC → $CONFIG_DST"
-    cp "$CONFIG_SRC/"* "$CONFIG_DST/"
+    cp -r "$CONFIG_SRC/"* "$CONFIG_DST/"
     echo "• Configs installed."
     #echo " "
 else
@@ -241,7 +241,7 @@ echo "[Config] Installing Fonts..."
 
 if [ -d "$ALT_ROOT/Alternix/fonts" ]; then
     sudo mkdir -p /usr/local/share/fonts/alternix
-    sudo cp "$ALT_ROOT/Alternix/fonts/"* /usr/local/share/fonts/alternix/
+    sudo cp -r "$ALT_ROOT/Alternix/fonts/"* /usr/local/share/fonts/alternix/
     sudo fc-cache -f
     echo "• Fonts installed successfully."
 else
@@ -259,7 +259,7 @@ WALL_DST="$HOME/Pictures/wallpapers"
 mkdir -p "$WALL_DST"
 
 if [ -d "$ALT_ROOT/Alternix/wallpapers" ]; then
-    cp "$ALT_ROOT/Alternix/wallpapers/"* "$WALL_DST/"
+    cp -r "$ALT_ROOT/Alternix/wallpapers/"* "$WALL_DST/"
     echo "• Wallpapers installed to $WALL_DST"
 else
     echo "• No wallpapers folder found, skipping."
