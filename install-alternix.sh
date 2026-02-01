@@ -118,8 +118,7 @@ sudo nala install -y \
 
 sudo nala install -y --no-install-recommends plasma-dialer spacebar plasma-discover
 
-#sudo cp -r ~/Alternix/onboard /usr/share/onboard
-#sudo cp ~/Alternix/configs/.alacritty.toml ~/
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # RPI NON-COMPATIBLE - Comment out:
@@ -214,12 +213,14 @@ echo "[Config] Installing user configs..."
 CONFIG_SRC="$ALT_ROOT/Alternix/configs"
 CONFIG_DST="$HOME/.config"
 
+sudo mv "$ALT_ROOT/Alternix/configs/.alacritty.toml" ~/
+
 mkdir -p "$CONFIG_DST"
 
 if [ -d "$CONFIG_SRC" ]; then
     # Move everything (folders AND files) into ~/.config
     echo "• Moving configs from $CONFIG_SRC → $CONFIG_DST"
-    cp "$CONFIG_SRC/"* "$CONFIG_DST/" 2>/dev/null || true
+    cp "$CONFIG_SRC/"* "$CONFIG_DST/"
     echo "• Configs installed."
     #echo " "
 else
@@ -227,9 +228,9 @@ else
 fi
 
 
+sudo cp -r "$ALT_ROOT/Alternix/onboard" /usr/share/onboard
 
-cd "$ALT_ROOT/Alternix/decky"
-cp decky_installer.desktop ~
+cp "$ALT_ROOT/Alternix/decky/decky_installer.desktop" ~/
 
 
 # ────────────────────────────────────────────────
@@ -238,7 +239,7 @@ cp decky_installer.desktop ~
 echo " "
 echo "[Config] Installing Fonts..."
 
-if [ -d "$ALT_ROOT/fonts" ]; then
+if [ -d "$ALT_ROOT/Alternix/fonts" ]; then
     sudo mkdir -p /usr/local/share/fonts/alternix
     sudo cp "$ALT_ROOT/Alternix/fonts/"* /usr/local/share/fonts/alternix/
     sudo fc-cache -f
