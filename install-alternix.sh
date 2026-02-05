@@ -48,9 +48,11 @@ echo ""
 echo "User setup complete. Username set to: $TARGET_USER"
 echo ""
 
-#echo "-[System] Installing XLibre.."
-#chmod +x install_xlibre.sh
-#sudo ./install_xlibre.sh
+
+# ------------------- UNCOMMENT for non-RPi --------------
+echo "-[System] Installing XLibre.."
+chmod +x install_xlibre.sh
+sudo ./install_xlibre.sh
 
 # ────────────────────────────────────────────────
 # 1. Install apps & dependencies
@@ -68,7 +70,7 @@ sudo apt install nala nala -y
 sudo rm /etc/apt/sources.list.d/volian.list
 sudo rm /etc/apt/trusted.gpg.d/volian.gpg
 
-
+# --------------- needs fixing
 #echo "- Converting APT to Nala.."
 #cat <<EOF >> "$HOME/.bashrc"
 #apt() { 
@@ -121,10 +123,10 @@ sudo nala install -y --no-install-recommends plasma-dialer spacebar plasma-disco
 
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# RPI NON-COMPATIBLE - Comment out:
+# RPI NON-COMPATIBLE - Comment out if on RPi:
 
-#sudo nala install thermald
-#sudo systemctl enable --now power-profiles-daemon
+sudo nala install thermald
+sudo systemctl enable --now power-profiles-daemon
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 echo "[System] Installing Flatpaks.."
@@ -140,7 +142,7 @@ echo "[System] Installing Flatpaks..."
 # Install flatpaks
 sudo flatpak install -y flathub com.github.joseexposito.touche
 sudo flatpak install -y flathub io.github.kolunmi.Bazaar
-#sudo flatpak install -y flathub net.retrodeck.retrodeck
+sudo flatpak install -y flathub net.retrodeck.retrodeck
 sudo flatpak install -y flathub org.kde.kweather
 #sudo flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
 #sudo flatpak install -y flathub io.github.swordpuffin.hunt
@@ -170,7 +172,7 @@ if [ -d "$INSTALLER_DIR" ]; then
         #sudo apt-get update -y
         sudo nala install -f -y
 
-        # Install each .deb file AGAIN
+        # try to Install each .deb file AGAIN
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
 
         echo "• Local installer packages installed."
@@ -205,7 +207,7 @@ curl -fsS https://dl.brave.com/install.sh | sh -s -- --yes
 
 
 # ────────────────────────────────────────────────
-# Move ALL configs from ~/Alternix/configs → ~/.config
+# Copy ALL configs from ~/Alternix/configs → ~/.config
 # ────────────────────────────────────────────────
 echo " "
 echo "[Config] Installing user configs..."
@@ -213,7 +215,7 @@ echo "[Config] Installing user configs..."
 CONFIG_SRC="$ALT_ROOT/Alternix/configs"
 CONFIG_DST="$HOME/.config"
 
-sudo mv "$ALT_ROOT/Alternix/configs/.alacritty.toml" ~/
+sudo cp "$ALT_ROOT/Alternix/configs/.alacritty.toml" ~/
 
 mkdir -p "$CONFIG_DST"
 
@@ -831,6 +833,7 @@ echo "[✓] Lockscreen security layer installed."
 # ────────────────────────────────────────────────
 # Lockscreen auto-activate on wake (Sleep / Hibernate)
 # Debian 13 Compatible (systemd 255+)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ NEEDS FIXING
 # ────────────────────────────────────────────────
 #echo " "
 
@@ -979,32 +982,33 @@ sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 echo " "
 
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
+cd ~
 rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
 # 10. Install grub theme & plymouth boot animation - NOT RPI COMPATIBLE
 # ────────────────────────────────────────────────
-#echo " "
-#
-#cd $HOME
-#git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
-#cd forest-dawn-grub-theme
-#chmod +x install.sh
-#sudo ./install.sh
-#sudo update-grub
+echo " "
+
+cd $HOME
+git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
+cd forest-dawn-grub-theme
+chmod +x install.sh
+sudo ./install.sh
+sudo update-grub
 
 # ────────────────────────────────────────────────
-# 11. auto-cpufreq
+# 11. auto-cpufreq - NOT FOR RPI
 # ────────────────────────────────────────────────
-#echo " "
-#
-#echo "- Installing auto-cpufreq..."
-#cd $HOME
-#git clone https://github.com/AdnanHodzic/auto-cpufreq.git
-#cd auto-cpufreq
-#sudo ./auto-cpufreq-installer
-#sudo auto-cpufreq --install
+echo " "
+
+echo "- Installing auto-cpufreq..."
+cd $HOME
+git clone https://github.com/AdnanHodzic/auto-cpufreq.git
+cd auto-cpufreq
+sudo ./auto-cpufreq-installer
+sudo auto-cpufreq --install
 
 # ────────────────────────────────────────────────
 # 12. Finish + prompt
