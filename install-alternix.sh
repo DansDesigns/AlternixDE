@@ -118,7 +118,7 @@ sudo nala install -y \
     kalk vlc qt5-style-kvantum network-manager
 
 
-sudo nala install -y --no-install-recommends plasma-dialer spacebar plasma-discover
+sudo nala install -y --no-install-recommends plasma-dialer spacebar
 
 
 
