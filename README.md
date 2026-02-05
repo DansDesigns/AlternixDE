@@ -3,7 +3,9 @@ A Linux Desktop Environment designed for touchscreen devices.
 ![Alternix Desktop](https://github.com/DansDesigns/OSM-Phone/blob/main/OS%20Concepts/Alternix_Preview.png)
 Using Qtile & custom Qt5 app launcher, app switcher, quick settings, file editor/viewer & drawing app
 
+```
 *note: While in a working state, Alternix is till in Development
+```
 
 to install:
 
