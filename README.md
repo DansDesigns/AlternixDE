@@ -7,9 +7,8 @@ Using Qtile & custom Qt5 app launcher, app switcher, quick settings, file editor
 # *note: While in a working state, Alternix is still in Development
 
 
-```
 Key commands:
-
+```
 WIN + N: Popup Shortcut Menu
 
 WIN + P: Power Menu
