@@ -52,7 +52,7 @@ public:
           pathMenu(nullptr),
           pathMenuLayout(nullptr),
           viewToggleBtn(nullptr),
-          gridMode(true),
+          gridMode(false),
           hiddenBtn(nullptr),
           showHidden(false),
           mkdirBtn(nullptr),
@@ -96,9 +96,9 @@ public:
             " background:#444;"
             " color:white;"
             " border:none;"
-            " border-radius:18px;"
-            " padding:20px;"
-            " font-size:26px;"
+            " border-radius:8px;"
+            " padding:10px;"
+            " font-size:15px;"
             " text-align:left;"
             "}"
             "QPushButton:hover { background:#555; }"
@@ -109,9 +109,9 @@ public:
             " background:#777;"
             " color:white;"
             " border:none;"
-            " border-radius:18px;"
-            " padding:20px;"
-            " font-size:26px;"
+            " border-radius:8px;"
+            " padding:10px;"
+            " font-size:15px;"
             " text-align:left;"
             "}"
             "QPushButton:hover { background:#888; }"
@@ -123,9 +123,9 @@ public:
             " background:#3a3a3a;"
             " color:white;"
             " border:none;"
-            " border-radius:22px;"
-            " padding:16px;"
-            " font-size:22px;"
+            " border-radius:12px;"
+            " padding:10px;"
+            " font-size:15px;"
             " text-align:center;"
             "}"
             "QPushButton:hover { background:#4a4a4a; }"
@@ -136,9 +136,9 @@ public:
             " background:#6a6a6a;"
             " color:white;"
             " border:none;"
-            " border-radius:22px;"
-            " padding:16px;"
-            " font-size:22px;"
+            " border-radius:12px;"
+            " padding:10px;"
+            " font-size:15px;"
             " text-align:center;"
             "}"
             "QPushButton:hover { background:#7a7a7a; }"
@@ -158,9 +158,9 @@ public:
 
         // Back button
         backBtn = new QPushButton("⇑");
-        backBtn->setFixedSize(100, 60);
+        backBtn->setFixedSize(50, 50);
         backBtn->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:28px; font-weight:bold; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; font-weight:bold; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
@@ -168,9 +168,9 @@ public:
 
         // Refresh button
         refreshBtn = new QPushButton("⟳");
-        refreshBtn->setFixedSize(100, 60);
+        refreshBtn->setFixedSize(50, 50);
         refreshBtn->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:28px; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
@@ -178,9 +178,9 @@ public:
 
         // Home button
         homeBtn = new QPushButton("🏡");
-        homeBtn->setFixedSize(100, 60);
+        homeBtn->setFixedSize(50, 50);
         homeBtn->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:28px; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
@@ -194,7 +194,7 @@ public:
         pathBtn = new QPushButton(currentPath);
         pathBtn->setStyleSheet(
             "QPushButton { background:#333; color:#DDDDDD; border-radius:8px; "
-            "padding:10px; font-size:22px; text-align:left; }"
+            "padding:10px; font-size:15px; text-align:left; }"
             "QPushButton:hover { background:#444; }"
             "QPushButton:pressed { background:#222; }"
         );
@@ -204,10 +204,10 @@ public:
 
         // View mode toggle
         viewToggleBtn = new QPushButton("☴");
-        viewToggleBtn->setFixedSize(70, 60);
+        viewToggleBtn->setFixedSize(50, 50);
         viewToggleBtn->setCheckable(true);
         viewToggleBtn->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:28px; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
             "QPushButton:checked { background:#2a82da; }"
@@ -216,10 +216,10 @@ public:
 
         // Shortcuts button
         shortcutsBtn = new QPushButton("⭐");
-        shortcutsBtn->setFixedSize(70, 60);
+        shortcutsBtn->setFixedSize(50, 50);
         shortcutsBtn->setStyleSheet(
             "QPushButton { background:#555; color:white; border:none; "
-            "border-radius:10px; font-size:28px; }"
+            "border-radius:10px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
@@ -233,10 +233,10 @@ public:
 
         auto makeTopButton = [&](const QString &text) -> QPushButton* {
             QPushButton *b = new QPushButton(text);
-            b->setFixedHeight(60);
-            b->setMinimumWidth(80);
+            b->setFixedHeight(40);
+            b->setMinimumWidth(60);
             b->setStyleSheet(
-                "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
+                "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:14px; }"
                 "QPushButton:hover:enabled { background:#666; }"
                 "QPushButton:pressed:enabled { background:#444; }"
                 "QPushButton:disabled { background:#222; color:#555; }"
@@ -256,10 +256,10 @@ public:
 
         // DELETE BUTTON (red when enabled)
         deleteBtn = new QPushButton("Delete");
-        deleteBtn->setFixedHeight(60);
-        deleteBtn->setMinimumWidth(80);
+        deleteBtn->setFixedHeight(40);
+        deleteBtn->setMinimumWidth(60);
         deleteBtn->setStyleSheet(
-            "QPushButton { background:#222; color:#555; border:none; border-radius:10px; font-size:18px; }"
+            "QPushButton { background:#222; color:#555; border:none; border-radius:10px; font-size:14px; }"
             "QPushButton:pressed:enabled { background:#aa0000; }"
             "QPushButton:hover:enabled { background:#dd3333; }"
         );
@@ -330,7 +330,7 @@ public:
         QHBoxLayout *statusRow = new QHBoxLayout;
         statusRow->setSpacing(5);
         statusLabel = new QLabel("0 items");
-        statusLabel->setStyleSheet("QLabel { color:#CCCCCC; font-size:18px; }");
+        statusLabel->setStyleSheet("QLabel { color:#CCCCCC; font-size:12px; }");
         statusRow->addWidget(statusLabel, 1);
         root->addLayout(statusRow);
 
@@ -367,7 +367,7 @@ public:
         addShortcutBtn->setFixedHeight(60);
         addShortcutBtn->setStyleSheet(
             "QPushButton { background:#555; color:white; border-radius:12px; "
-            "font-size:30px; }"
+            "font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
@@ -377,7 +377,7 @@ public:
         removeShortcutBtn->setCheckable(true);
         removeShortcutBtn->setStyleSheet(
             "QPushButton { background:#555; color:white; border-radius:12px; "
-            "font-size:26px; }"
+            "font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:checked { background:#aa0000; }"
         );
@@ -793,7 +793,7 @@ private:
             QPushButton *b = new QPushButton(labelText, shortcutsPanel);
             b->setStyleSheet(
                 "QPushButton { background:#333; color:white; border:none; "
-                "border-radius:14px; padding:16px; font-size:22px; text-align:left; }"
+                "border-radius:14px; padding:10px; font-size:15px; text-align:left; }"
                 "QPushButton:hover { background:#444; }"
                 "QPushButton:pressed { background:#222; }"
             );
@@ -998,7 +998,7 @@ private:
             QPushButton *b = new QPushButton(label, pathMenu);
             b->setStyleSheet(
                 "QPushButton { background:#444; color:white; border:none; border-radius:10px; "
-                "padding:16px; font-size:22px; text-align:left;}"
+                "padding:16px; font-size:15px; text-align:left;}"
                 "QPushButton:hover { background:#555; }"
                 "QPushButton:pressed { background:#333; }"
             );
@@ -1476,7 +1476,7 @@ private:
 
         QDialogButtonBox *bb = new QDialogButtonBox(QDialogButtonBox::Ok);
         bb->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:8px; padding:8px 20px; font-size:18px; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:8px; padding:8px 20px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         );
