@@ -132,7 +132,7 @@ public:
         v->setSpacing(8);
         v->setAlignment(Qt::AlignCenter);
 
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 64 : 64;
+        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 32 : 32;
 
         iconLabel = new QLabel(hoverBox);
         iconLabel->setAlignment(Qt::AlignCenter);
@@ -149,7 +149,7 @@ public:
         lbl->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
         lbl->setMinimumHeight(60);
         lbl->setMaximumHeight(200);
-        lbl->setStyleSheet("color: white; font-size: 18pt; line-height: 110%;");
+        lbl->setStyleSheet("color: white; font-size: 15pt; line-height: 110%;");
         v->addWidget(lbl);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
@@ -162,7 +162,7 @@ public:
         if (!iconLabel)
             return;
 
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 64 : 64;
+        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 32 : 32;
 
         // If there is no icon defined at all, go straight to the puzzle placeholder
         if (entry.icon.trimmed().isEmpty()) {
