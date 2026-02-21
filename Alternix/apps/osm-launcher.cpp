@@ -168,7 +168,7 @@ public:
         if (entry.icon.trimmed().isEmpty()) {
             iconLabel->setPixmap(QPixmap());
             iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:64px;");
+            iconLabel->setStyleSheet("font-size:32px;");
             return;
         }
 
@@ -189,7 +189,7 @@ public:
             // fallback if icon cannot be resolved
             iconLabel->setPixmap(QPixmap());
             iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:64px;");
+            iconLabel->setStyleSheet("font-size:32px;");
         }
     }
 
@@ -328,7 +328,7 @@ int main(int argc, char **argv) {
 
     QHBoxLayout *closeRow = new QHBoxLayout();
     closeRow->addStretch();
-    QPushButton *closeBtn = new QPushButton("  ❌  ");
+    QPushButton *closeBtn = new QPushButton(" ❌ ");
     closeBtn->setFixedHeight(84);
     closeBtn->setStyleSheet(
         "QPushButton { background-color: #66000000; color: red; font-size: 32pt; padding: 6px 18px; border-radius: 8px; }"
