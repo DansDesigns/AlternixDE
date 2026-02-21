@@ -329,7 +329,7 @@ int main(int argc, char **argv) {
     QHBoxLayout *closeRow = new QHBoxLayout();
     closeRow->addStretch();
     QPushButton *closeBtn = new QPushButton(" ❌ ");
-    closeBtn->setFixedHeight(84);
+    closeBtn->setFixedHeight(40);
     closeBtn->setStyleSheet(
         "QPushButton { background-color: #66000000; color: red; font-size: 32pt; padding: 6px 18px; border-radius: 8px; }"
         "QPushButton:hover { background-color: #282828; }");
