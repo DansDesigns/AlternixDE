@@ -195,9 +195,9 @@ for i in groups:
 
 layouts = [
     # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
-    layout.Max(border_width=0, margin=6),
+    layout.Max(border_width=1, margin=6),
     #layout.RatioTile(margin=6),
-    layout.MonadWide(border_width=1, margin=6),
+    layout.MonadWide(border_width=2, margin=6),
     layout.MonadTall(border_width=3, margin=6),
 ]
 
@@ -307,11 +307,12 @@ screens = [
             [
                 #widget.Spacer(length=55),
                 widget.TaskList(),
-                widget.Spacer(length=bar.STRETCH),
+                #widget.Spacer(length=bar.STRETCH),
                 widget.Image(filename='~/.config/qtile/images/apps.png', margin=6,
                              mouse_callbacks={'Button1': lazy.spawn("osm-launcher")}),
                 widget.Prompt(),
                 widget.Spacer(length=bar.STRETCH),
+                # COMMENT OUT THE NEXT 3 LINES TO REMOVE THE KEYBOARD BUTTON:
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
                              mouse_callbacks={'Button1': lazy.spawn("onboard")}),
                 widget.Spacer(length=55),
