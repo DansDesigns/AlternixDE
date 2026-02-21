@@ -427,7 +427,7 @@ WindowCard::WindowCard(
     icon->setScaledContents(true);
 
     QLabel *title = new QLabel(m_info.title, this);
-    title->setStyleSheet("color:white;font-size:28px;");
+    title->setStyleSheet("color:white;font-size:15px;");
     title->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_titleLabel = title;
 
@@ -435,7 +435,7 @@ WindowCard::WindowCard(
     close->setFixedSize(48,48);
     close->setStyleSheet(
         "QPushButton{color:#ff4a6a;background:#00000099;border:none;"
-        "border-radius:24px;font-size:36px;}"
+        "border-radius:14px;font-size:26px;}"
         "QPushButton:hover { color:#ff1616; background:#ad1236; border-radius:18px; }"
         "QPushButton:pressed { color:#ffffff; background:#550000; border-radius:18px; }"
     );
