@@ -203,7 +203,7 @@ layouts = [
 
 widget_defaults = dict(
     font="Ubuntu",
-    fontsize=25,
+    fontsize=15,
     padding=5,
 )
 extension_defaults = widget_defaults.copy()
@@ -214,13 +214,13 @@ extension_defaults = widget_defaults.copy()
 
 close_button = widget.TextBox(
     text="",  # start empty
-    fontsize=32,
+    fontsize=15,
     mouse_callbacks={'Button1': lazy.window.kill()},
 )
 
 float_button = widget.TextBox(
     text="",
-    fontsize=32,
+    fontsize=20,
     mouse_callbacks={'Button1': lazy.window.toggle_floating()},
 )
 
@@ -277,7 +277,7 @@ screens = [
     # Main Screen:
     Screen(
         top=bar.Bar([
-            widget.Spacer(length=15),
+            #widget.Spacer(length=15),
             # widget.Image(filename='~/.config/qtile/images/terminal.png', margin=2.5, mouse_callbacks={'Button1': lazy.spawn(terminal)}),
             widget.GroupBox(highlight_method='border', block_highlight_text_color='ffffff'),
             widget.Systray(),
@@ -297,15 +297,15 @@ screens = [
             float_button,
             widget.Spacer(length=15),
             close_button,
-            widget.Spacer(length=15),
+            #widget.Spacer(length=15),
             # widget.QuickExit(padding=8),
-        ], size=50,
+        ], size=25,
             # N,E,S,W compass directions for margin:
             margin=[0, 0, 0, 0], background=bg,
         ),
         bottom=bar.Bar(
             [
-                widget.Spacer(length=55),
+                #widget.Spacer(length=55),
                 widget.TaskList(),
                 widget.Spacer(length=bar.STRETCH),
                 widget.Image(filename='~/.config/qtile/images/apps.png', margin=6,
@@ -315,7 +315,7 @@ screens = [
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
                              mouse_callbacks={'Button1': lazy.spawn("onboard")}),
                 widget.Spacer(length=55),
-            ], size=50, margin=[0, 0, 0, 0], background=bg,
+            ], size=35, margin=[0, 0, 0, 0], background=bg,
         ),
         # x11_drag_polling_rate = 60,
     ),
