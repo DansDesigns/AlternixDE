@@ -115,7 +115,7 @@ sudo nala install -y \
     python3-venv picom qtile redshift onboard samba xdotool alacritty \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev\
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g \
-    kalk vlc qt5-style-kvantum thermald network-manager peazip partitionmanager
+    kalk vlc qt5-style-kvantum thermald network-manager peazip
 
 
 sudo nala install -y --no-install-recommends plasma-dialer spacebar
