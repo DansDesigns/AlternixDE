@@ -134,17 +134,19 @@ sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub
 echo "[System] Installing Flatpaks..."
 
 # Install flatpaks
-sudo flatpak install -y flathub com.github.joseexposito.touche
-sudo flatpak install -y flathub io.github.kolunmi.Bazaar
-sudo flatpak install -y flathub net.retrodeck.retrodeck
-sudo flatpak install -y flathub org.kde.kweather
-#sudo flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
-#sudo flatpak install -y flathub io.github.swordpuffin.hunt
-#sudo flatpak install -y flathub com.github.avojak.warble
-sudo flatpak install -y flathub org.kde.qrca
-
+flatpak install -y flathub com.github.joseexposito.touche
+#flatpak install -y flathub io.github.kolunmi.Bazaar
+flatpak install -y flathub net.retrodeck.retrodeck
+flatpak install -y flathub org.kde.kweather
+#flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
+#flatpak install -y flathub io.github.swordpuffin.hunt
+#flatpak install -y flathub com.github.avojak.warble
+flatpak install -y flathub org.kde.qrca
 
 # Install Snaps
+
+
+
 
 # ────────────────────────────────────────────────
 # Install all .deb packages in ~/Alternix/installers/
