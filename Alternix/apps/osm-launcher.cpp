@@ -132,7 +132,7 @@ public:
         v->setSpacing(8);
         v->setAlignment(Qt::AlignCenter);
 
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 32 : 32;
+        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 48 : 48;
 
         iconLabel = new QLabel(hoverBox);
         iconLabel->setAlignment(Qt::AlignCenter);
@@ -162,7 +162,7 @@ public:
         if (!iconLabel)
             return;
 
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 32 : 32;
+        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 48 : 48;
 
         // If there is no icon defined at all, go straight to the puzzle placeholder
         if (entry.icon.trimmed().isEmpty()) {
