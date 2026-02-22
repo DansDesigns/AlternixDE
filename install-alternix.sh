@@ -141,7 +141,7 @@ sudo nala install -y \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
-    kalk vlc qt5-style-kvantum thermald network-manager peazip aptitude timeshift\
+    kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift\
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     
 
