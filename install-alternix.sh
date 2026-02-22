@@ -2,7 +2,7 @@
 set -e
 
 echo "=============================================="
-echo "  Alternix / OSM-Phone Installer"
+echo "       Alternix Desktop Installer"
 echo "=============================================="
 echo "-------------------------------------------"
 echo "              User Setup"
@@ -49,10 +49,7 @@ echo "User setup complete. Username set to: $TARGET_USER"
 echo ""
 
 
-# ------------------- error on install --------------
-#echo "-[System] Installing XLibre.."
-#chmod +x install_xlibre.sh
-#sudo ./install_xlibre.sh
+
 
 # ────────────────────────────────────────────────
 # 1. Install apps & dependencies
@@ -71,7 +68,29 @@ echo "[System] Removing nala Install Components.."
 sudo rm /etc/apt/sources.list.d/volian.list
 sudo rm /etc/apt/trusted.gpg.d/volian.gpg
 
-# --------------- needs fixing
+
+echo "-[System] Installing XLibre.."
+sudo nala install -y ca-certificates curl
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
+sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
+
+cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
+Types: deb deb-src
+URIs: https://xlibre-deb.github.io/debian/
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/xlibre-deb.asc
+EOF
+
+
+sudo nala update -y
+sudo nala install xlibre -y
+
+
+# --------------- needs fixing --------------------
 #echo "- Converting APT to Nala.."
 #cat <<EOF >> "$HOME/.bashrc"
 #apt() { 
@@ -656,6 +675,16 @@ Icon=upgrade
 Categories=System;
 EOF
 
+echo "• Creating bauh Shortcut..."
+sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=Apps (bauh)
+Comment=Application Manager
+Exec=/usr/bin/bauh
+Icon=bauh
+Categories=System;
+EOF
 
 # ────────────────────────────────────────────────
 # Create Brave YouTube WebApp launcher
