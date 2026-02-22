@@ -59,14 +59,15 @@ echo ""
 # ────────────────────────────────────────────────
 echo "[1/10] Installing system dependencies..."
 
-echo "- Adding Nala dependencies.."
+echo "- Adding nala dependencies.."
 echo "deb http://deb.volian.org/volian/ nala main" | sudo tee /etc/apt/sources.list.d/volian.list
 wget -qO - https://deb.volian.org/volian/volian.gpg | sudo tee /etc/apt/trusted.gpg.d/volian.gpg
 
 
-echo "- Installing Nala.."
+echo "- Installing nala.."
 sudo apt install nala nala -y
 
+echo "[System] Removing nala Install Components.."
 sudo rm /etc/apt/sources.list.d/volian.list
 sudo rm /etc/apt/trusted.gpg.d/volian.gpg
 
@@ -102,40 +103,43 @@ sudo rm /etc/apt/trusted.gpg.d/volian.gpg
 #EOF
 #echo "- Nala conversion complete.."
 
-echo "- Running Nala Server Fetch.."
+echo "[System] Running nala server fetch.."
+echo " "
+
+echo "----------------------------------------"
+echo " PLEASE ENTER 1, 2, 3, 4, WHEN PROMPTED"
+echo "----------------------------------------"
+echo " "
 sudo nala fetch
 
-
-
+echo "[System] Running nala update.."
 sudo nala update
+
+echo "[System] Installing Required Components.."
 sudo nala install -y \
-    fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev \
+    fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
-    xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip curl git \
-    python3-venv picom qtile redshift onboard samba xdotool alacritty \
-    synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev\
-    snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g \
-    kalk vlc qt5-style-kvantum thermald network-manager peazip \
+    xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip curl git python3-lxml \
+    python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
+    synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
+    snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
+    kalk vlc qt5-style-kvantum thermald network-manager peazip aptitude timeshift\
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     
 
-
+echo "[System] Installing Mobile Telephony Components.."
 sudo nala install -y --no-install-recommends plasma-dialer spacebar
 
+echo "[System] Enabling Power Profile Daemon.."
 sudo systemctl enable --now power-profiles-daemon
 
-
-echo "[System] Installing Flatpaks.."
-
-# Delete APT Archive to free up space
 echo "[System] Clearing space in /var/cache/apt/archive..."
 sudo rm -r /var/cache/apt/archives
 
-# Enable Flathub repository (safe to run multiple times)
+echo "[System] Adding flatpak Components.."
 sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-echo "[System] Installing Flatpaks..."
 
-# Install flatpaks
+echo "[System] Installing Flatpaks..."
 flatpak install -y flathub com.github.joseexposito.touche
 #flatpak install -y flathub io.github.kolunmi.Bazaar
 flatpak install -y flathub net.retrodeck.retrodeck
@@ -149,10 +153,10 @@ echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh
 
 
-
 # ────────────────────────────────────────────────
 # Install all .deb packages in ~/Alternix/installers/
 # ────────────────────────────────────────────────
+echo " "
 echo "[System] Installing local .deb packages..."
 
 INSTALLER_DIR="$ALT_ROOT/Alternix/installers"
