@@ -86,7 +86,7 @@ Signed-By: /etc/apt/keyrings/xlibre-deb.asc
 EOF
 
 
-sudo nala update -y
+sudo nala update
 sudo nala install xlibre -y
 
 
