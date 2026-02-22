@@ -105,7 +105,6 @@ sudo rm /etc/apt/trusted.gpg.d/volian.gpg
 
 echo "[System] Running nala server fetch.."
 echo " "
-
 echo "----------------------------------------"
 echo " PLEASE ENTER 1, 2, 3, 4, WHEN PROMPTED"
 echo "----------------------------------------"
