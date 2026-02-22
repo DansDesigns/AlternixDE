@@ -168,7 +168,7 @@ public:
         if (entry.icon.trimmed().isEmpty()) {
             iconLabel->setPixmap(QPixmap());
             iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:32px;");
+            iconLabel->setStyleSheet("font-size:48px;");
             return;
         }
 
@@ -189,7 +189,7 @@ public:
             // fallback if icon cannot be resolved
             iconLabel->setPixmap(QPixmap());
             iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:32px;");
+            iconLabel->setStyleSheet("font-size:48px;");
         }
     }
 

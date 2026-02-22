@@ -635,14 +635,14 @@ sudo mv system.so /usr/local/bin/
 echo " "
 echo "• Installing App Icons..."
 
-# Icons
+cd "$ALT_ROOT/Alternix"
+sudo mkdir /usr/share/icons/alternix/64x64/apps/
 if [ -f "icons/" ]; then
-    sudo cp icons/* /usr/share/icons/hicolor/64x64/apps/
+    sudo cp icons/* /usr/share/icons/alternix/64x64/apps/
 fi
-
 echo " "
 
-cd "$ALT_ROOT/Alternix"
+
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
@@ -690,7 +690,7 @@ sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
 Type=Application
 Name=Apps (bauh)
 Comment=Application Manager
-Exec=/usr/bin/bauh
+Exec=bauh
 Icon=bauh
 Categories=System;
 EOF
