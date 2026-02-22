@@ -115,7 +115,9 @@ sudo nala install -y \
     python3-venv picom qtile redshift onboard samba xdotool alacritty \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev\
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g \
-    kalk vlc qt5-style-kvantum thermald network-manager peazip
+    kalk vlc qt5-style-kvantum thermald network-manager peazip \
+    python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
+    
 
 
 sudo nala install -y --no-install-recommends plasma-dialer spacebar
@@ -143,8 +145,8 @@ flatpak install -y flathub org.kde.kweather
 #flatpak install -y flathub com.github.avojak.warble
 flatpak install -y flathub org.kde.qrca
 
-# Install Snaps
-
+echo "[System] Installing Bauh Application Manager.."
+sudo pip3 install bauh
 
 
 
