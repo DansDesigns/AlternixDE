@@ -299,7 +299,7 @@ screens = [
             close_button,
             #widget.Spacer(length=15),
             # widget.QuickExit(padding=8),
-        ], size=25,
+        ], size=35,
             # N,E,S,W compass directions for margin:
             margin=[0, 0, 0, 0], background=bg,
         ),
