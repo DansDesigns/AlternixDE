@@ -137,7 +137,7 @@ echo "[System] Installing Required Components.."
 sudo nala install -y \
     fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
-    xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip curl git python3-lxml \
+    xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
@@ -168,7 +168,7 @@ flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 
 echo "[System] Installing Bauh Application Manager.."
-sudo pip3 install bauh
+sudo pip3 install bauh --break-system-packages
 
 
 # ────────────────────────────────────────────────
@@ -630,13 +630,22 @@ sudo mv system.so /usr/local/bin/
 
 
 #────────────────────────────────────────────────
-#            Custom App Shortcuts
+#            Custom App Shortcuts & Icons
 #────────────────────────────────────────────────
+echo " "
+echo "• Installing App Icons..."
+
+# Icons
+if [ -f "icons/" ]; then
+    sudo cp icons/* /usr/share/icons/hicolor/64x64/apps/
+fi
+
 echo " "
 
 cd "$ALT_ROOT/Alternix"
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
+sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
 
 echo "• Creating htop.desktop launcher..."
 sudo tee /usr/share/applications/htop.desktop >/dev/null <<EOF
@@ -1044,12 +1053,25 @@ sudo auto-cpufreq --install
 # 12. Finish + prompt
 # ────────────────────────────────────────────────
 echo " "
-
+echo " "
+echo " "
+echo " "
 echo "=============================================="
 echo "     Alternix installation complete!"
 echo "=============================================="
+echo " "
+echo " "
+echo " "
+echo " "
 echo "Everything installed to /usr/local/bin/"
+echo " "
 echo "Autologin + startx enabled for user: $TARGET_USER"
+echo " "
 echo ".xinitrc configured for Qtile."
+echo " "
 echo "Rebooting to Alternix."
+echo " "
+echo " "
+echo " "
+echo " "
 sudo reboot now
