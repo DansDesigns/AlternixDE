@@ -45,7 +45,17 @@ while true; do
             echo "[------ERROR------]"
             echo "Download failed.."
             rm -rf $HOME/Alternix
-            continue
+            
+            echo "1) Retry"
+            echo "2) Exit"
+            read -p "Select option: " choice1
+
+            if [ "$choice1" = "1" ]; then
+                clear
+                continue
+            else
+                exit 1
+            fi
         fi
 
         cd $HOME/Alternix || exit 1
@@ -64,9 +74,9 @@ while true; do
             
             echo "1) Retry"
             echo "2) Exit"
-            read -p "Select option: " choice
+            read -p "Select option: " choice2
 
-            if [ "$choice" = "1" ]; then
+            if [ "$choice2" = "1" ]; then
                 clear
                 continue
             else
