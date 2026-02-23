@@ -1,7 +1,7 @@
 #!/bin/bash
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
-VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/update/version.txt"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/refs/heads/main/update/version.txt"
 
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)

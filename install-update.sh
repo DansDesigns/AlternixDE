@@ -341,7 +341,7 @@ sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 Type=Application
 Name=System Update
 Comment=System Update
-Exec=alacritty -e sudo nala update && sudo nala upgrade -y
+Exec=alacritty -e sudo nala update && sudo nala upgrade
 Terminal=false
 Icon=update
 Categories=System;
