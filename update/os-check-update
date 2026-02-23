@@ -61,8 +61,10 @@ while true; do
             rm -rf "$TMP_DIR"
             continue
         fi
-
-        echo "Current Version: $REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
+        echo "-----------------"
+        echo "Current Version:"
+        echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
+        echo "-----------------"
 
         cd /
         echo ""
