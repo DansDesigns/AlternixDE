@@ -381,7 +381,7 @@ sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
 Name=OS Update (GUI)
-Exec=/usr/bin/os-check-update
+Exec= alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application
 Terminal=true
