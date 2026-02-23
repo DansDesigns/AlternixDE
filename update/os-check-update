@@ -54,7 +54,7 @@ while true; do
         echo ""
         echo "Installing Update..."
 
-        if ! sudo ./install-update.sh; then
+        if ! ./install-update.sh; then
             echo "[------ERROR------]"
             echo "Installation failed.."
             cd /
