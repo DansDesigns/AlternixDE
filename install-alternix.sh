@@ -2,8 +2,14 @@
 set -e
 
 echo "=============================================="
-echo "       Alternix Desktop Installer"
+echo "          Alternix Desktop Installer"
 echo "=============================================="
+echo "-------> Teaching Penguins how to fly! <-------"
+echo " "
+echo "--------------------------------------------------------------------"
+echo " Setup can take a while, be sure to have a cuppa & some good music!"
+echo "--------------------------------------------------------------------"
+echo ""
 echo "-------------------------------------------"
 echo "              User Setup"
 echo "-------------------------------------------"
@@ -158,14 +164,18 @@ echo "[System] Adding flatpak Components.."
 sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
 echo "[System] Installing Flatpaks..."
+
+# Install flatpaks
 flatpak install -y flathub com.github.joseexposito.touche
-#flatpak install -y flathub io.github.kolunmi.Bazaar
-flatpak install -y flathub net.retrodeck.retrodeck
 flatpak install -y flathub org.kde.kweather
+flatpak install -y flathub org.kde.qrca
+
+# Flatpak Games (disabled by default)
+#flatpak install -y flathub net.retrodeck.retrodeck
 #flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
 #flatpak install -y flathub io.github.swordpuffin.hunt
 #flatpak install -y flathub com.github.avojak.warble
-flatpak install -y flathub org.kde.qrca
+
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages
@@ -1069,9 +1079,25 @@ echo "Autologin + startx enabled for user: $TARGET_USER"
 echo " "
 echo ".xinitrc configured for Qtile."
 echo " "
-echo "Rebooting to Alternix."
-echo " "
-echo " "
-echo " "
-echo " "
-sudo reboot now
+echo "Press 1 to Restart"
+echo "Press 2 to Continue to Shell"
+echo ""
+
+while true; do
+    read -n 1 -s -r KEY
+    if [[ "$KEY" == "1" ]]; then
+        echo ""
+        echo "Restarting system..."
+        sleep 1
+        sudo reboot
+        break
+    elif [[ "$KEY" == "2" ]]; then
+        echo ""
+        echo "Continuing to shell..."
+        sudo systemctl restart getty@tty1
+        break
+    else
+        echo ""
+        echo "Invalid choice. Press 1 to Restart or 2 to Exit to Shell."
+    fi
+done
