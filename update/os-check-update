@@ -1,4 +1,6 @@
 #!/bin/bash
+set -e
+clear
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/refs/heads/Alternix/main/update/version.txt"
