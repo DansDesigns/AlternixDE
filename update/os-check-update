@@ -1,45 +1,80 @@
 #!/bin/bash
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
-VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/refs/heads/main/update/version.txt"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
 
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
 
-if [ -z "$REMOTE_VERSION" ]; then
-    echo " "
-    echo "[------ERROR------]"
-    echo "Unable to check for updates.."
-    echo "Check Internet Connection.."
-    echo " "
-    exit 1
-fi
+while true; do
 
-if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
-    echo " "
-    echo "Current Version: $LOCAL_VERSION"
-    echo " "
-    echo "New version available: $REMOTE_VERSION"
-    echo " "
-    echo " "
-    echo "Downloading Update..."
-    echo " "
-    echo " "
-    echo " "
+    LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
+    REMOTE_VERSION=$(curl -fs "$VERSION_URL")
 
-    git clone "$REPO_URL" || exit 1
-    cd "$REPO_URL"
+    if [ -z "$REMOTE_VERSION" ]; then
+        echo ""
+        echo "[------ERROR------]"
+        echo "Unable to check for updates."
+        echo "Check Internet Connection."
+        echo ""
+        echo "1) Retry"
+        echo "2) Exit"
+        read -p "Select option: " choice
 
-    chmod +x install-update.sh
-    sudo ./install-update.sh
+        if [ "$choice" = "1" ]; then
+            clear
+            continue
+        else
+            exit 1
+        fi
+    fi
 
-    echo "New Version: $REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt
+    if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
+        echo ""
+        echo "Current Version: $LOCAL_VERSION"
+        echo "New Version: $REMOTE_VERSION"
+        echo ""
+        echo "Downloading Update..."
 
-    cd $HOME
-    rm -r "$REPO_URL"
+        TMP_DIR=$(mktemp -d) || exit 1
 
-    echo "Update complete."
-else
-    echo "Alternix is up to date."
-fi
+        if ! git clone "$REPO_URL" "$TMP_DIR"; then
+            echo "[------ERROR------]"
+            echo "Download failed.."
+            rm -rf "$TMP_DIR"
+            continue
+        fi
+
+        cd "$TMP_DIR" || exit 1
+
+        echo ""
+        echo "Download Complete!"
+        chmod +x install-update.sh
+        echo ""
+        echo "Installing Update..."
+
+        if ! sudo ./install-update.sh; then
+            echo "[------ERROR------]"
+            echo "Installation failed.."
+            cd /
+            rm -rf "$TMP_DIR"
+            continue
+        fi
+
+        echo "Current Version: $REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
+
+        cd /
+        echo ""
+        echo "Cleaning Installation Crumbs.."
+        rm -rf "$TMP_DIR"
+
+        echo ""
+        echo "Update Complete!"
+        break
+    else
+        echo "Alternix is up to date: $LOCAL_VERSION "
+        break
+    fi
+
+done
