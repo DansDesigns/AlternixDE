@@ -37,16 +37,14 @@ while true; do
         echo ""
         echo "Downloading Update..."
 
-        TMP_DIR=$HOME || exit 1
-
         if ! git clone "$REPO_URL" "$TMP_DIR"; then
             echo "[------ERROR------]"
             echo "Download failed.."
-            rm -rf "$TMP_DIR"
+            rm -rf $HOME/Alternix
             continue
         fi
 
-        cd "$TMP_DIR" || exit 1
+        cd $HOME/Alternix || exit 1
 
         echo ""
         echo "Download Complete!"
@@ -58,7 +56,7 @@ while true; do
             echo "[------ERROR------]"
             echo "Installation failed.."
             cd /
-            rm -rf "$TMP_DIR"
+            rm -rf $HOME/Alternix
             
             echo "1) Retry"
             echo "2) Exit"
@@ -79,10 +77,11 @@ while true; do
         cd /
         echo ""
         echo "Cleaning Installation Crumbs.."
-        rm -rf "$TMP_DIR"
+        rm -rf $HOME/Alternix
 
         echo ""
         echo "Update Complete!"
+        sleep 2
         break
     else
         echo " "
