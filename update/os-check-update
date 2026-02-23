@@ -37,7 +37,7 @@ while true; do
         echo ""
         echo "Downloading Update..."
 
-        TMP_DIR=$(mktemp -d) || exit 1
+        TMP_DIR=$HOME || exit 1
 
         if ! git clone "$REPO_URL" "$TMP_DIR"; then
             echo "[------ERROR------]"
