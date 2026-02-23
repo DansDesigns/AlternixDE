@@ -59,7 +59,17 @@ while true; do
             echo "Installation failed.."
             cd /
             rm -rf "$TMP_DIR"
-            continue
+            
+            echo "1) Retry"
+            echo "2) Exit"
+            read -p "Select option: " choice
+
+            if [ "$choice" = "1" ]; then
+                clear
+                continue
+            else
+                exit 1
+            fi
         fi
         echo "-----------------"
         echo "Current Version:"
