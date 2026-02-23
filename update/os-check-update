@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 clear
+echo "Checking for Update.."
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/refs/heads/Alternix/main/update/version.txt"
@@ -34,6 +35,7 @@ while true; do
 
     if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
         echo ""
+        echo "Update found.."
         echo "Current Version: $LOCAL_VERSION"
         echo "New Version: $REMOTE_VERSION"
         echo ""
@@ -87,6 +89,7 @@ while true; do
         break
     else
         echo " "
+        echo "No Update needed."
         echo "Alternix is up to date: $LOCAL_VERSION "
         sleep 2
         break
