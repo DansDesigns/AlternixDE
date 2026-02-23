@@ -373,7 +373,7 @@ EOF
 
 
 echo "• Updating Alternix Updater..."
-sudo chmod $HOME/Alternix/update/os-check-update
+sudo chmod +x $HOME/Alternix/update/os-check-update
 sudo cp $HOME/Alternix/update/os-check-update /usr/bin/
 sudo rm -r /usr/share/alternix/version.txt
 sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
