@@ -1,0 +1,17 @@
+#!/bin/bash
+
+LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
+REMOTE_VERSION=$(curl -fs https://github.com/DansDesigns/Alternix/update/version.txt)
+
+if [ -z "$REMOTE_VERSION" ]; then
+    echo "Unable to check for updates."
+    exit 1
+fi
+
+if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
+    echo "Update available: $REMOTE_VERSION (installed: $LOCAL_VERSION)"
+    exit 10
+else
+    echo "OSM is up to date."
+    exit 0
+fi

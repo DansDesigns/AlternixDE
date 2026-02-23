@@ -67,34 +67,12 @@ echo "deb http://deb.volian.org/volian/ nala main" | sudo tee /etc/apt/sources.l
 wget -qO - https://deb.volian.org/volian/volian.gpg | sudo tee /etc/apt/trusted.gpg.d/volian.gpg
 
 
-echo "- Installing nala.."
+echo "[System] Installing nala.."
 sudo apt install nala nala -y
 
 echo "[System] Removing nala Install Components.."
 sudo rm /etc/apt/sources.list.d/volian.list
 sudo rm /etc/apt/trusted.gpg.d/volian.gpg
-
-
-echo "-[System] Installing XLibre.."
-sudo nala install -y ca-certificates curl
-
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
-sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
-
-cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
-Types: deb deb-src
-URIs: https://xlibre-deb.github.io/debian/
-Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/xlibre-deb.asc
-EOF
-
-
-sudo nala update
-sudo nala install xlibre -y
-
 
 # --------------- needs fixing --------------------
 #echo "- Converting APT to Nala.."
@@ -138,6 +116,26 @@ sudo nala fetch
 
 echo "[System] Running nala update.."
 sudo nala update
+
+echo "[System] Installing XLibre.."
+sudo nala install -y ca-certificates curl
+
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
+sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
+
+cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
+Types: deb deb-src
+URIs: https://xlibre-deb.github.io/debian/
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/xlibre-deb.asc
+EOF
+
+
+sudo nala update
+sudo nala install xlibre -y
 
 echo "[System] Installing Required Components.."
 sudo nala install -y \
@@ -676,23 +674,23 @@ sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 Type=Application
 Name=System Update
 Comment=System Update
-Exec=alacritty -e sudo nala update
+Exec=alacritty -e sudo nala update && sudo nala upgrade -y
 Terminal=false
 Icon=update
 Categories=System;
 EOF
 
-echo "• Creating system-upgrade launcher..."
-sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
-[Desktop Entry]
-Type=Application
-Name=System Upgrade
-Comment=System Upgrade
-Exec=alacritty -e sudo nala upgrade
-Terminal=false
-Icon=upgrade
-Categories=System;
-EOF
+#echo "• Creating system-upgrade launcher..."
+#sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
+#[Desktop Entry]
+#Type=Application
+#Name=System Upgrade
+#Comment=System Upgrade
+#Exec=alacritty -e sudo nala upgrade
+#Terminal=false
+#Icon=upgrade
+#Categories=System;
+#EOF
 
 echo "• Creating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
@@ -704,6 +702,24 @@ Exec=bauh
 Icon=bauh
 Categories=System;
 EOF
+
+
+echo "• Installing Alternix Updater..."
+sudo cp $HOME/Alternix/update/os-check-update /usr/bin/
+sudo mkdir /usr/share/alternix/
+sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
+
+sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
+[Desktop Entry]
+Name=OS Update (GUI)
+Exec=os-check-update
+Icon=os-check-update
+Type=Application
+Terminal=true
+Categories=System;
+EOF
+
+
 
 # ────────────────────────────────────────────────
 # Create Brave YouTube WebApp launcher

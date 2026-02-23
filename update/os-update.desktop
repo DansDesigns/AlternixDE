@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=OS Update
+Exec=os-check-update
+Icon=os-check-update
+Type=Application
+Terminal=true
+Categories=System;
