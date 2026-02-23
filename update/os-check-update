@@ -6,16 +6,27 @@ VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/update/versi
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
+
 if [ -z "$REMOTE_VERSION" ]; then
-    echo "Unable to check for updates."
+    echo " "
+    echo "[------ERROR------]"
+    echo "Unable to check for updates.."
+    echo "Check Internet Connection.."
+    echo " "
     exit 1
 fi
 
 if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
+    echo " "
+    echo "Current Version: $LOCAL_VERSION"
+    echo " "
     echo "New version available: $REMOTE_VERSION"
     echo " "
-    echo "Updating Alternix..."
-
+    echo " "
+    echo "Downloading Update..."
+    echo " "
+    echo " "
+    echo " "
 
     git clone "$REPO_URL" || exit 1
     cd Alternix
@@ -25,8 +36,8 @@ if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
 
     echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt
 
-    cd /
-    rm -rf "$TMP_DIR"
+    cd $HOME
+    rm -r $HOME/Alternix
 
     echo "Update complete."
 else

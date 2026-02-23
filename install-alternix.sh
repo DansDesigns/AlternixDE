@@ -643,14 +643,6 @@ sudo mv system.so /usr/local/bin/
 echo " "
 echo "• Installing App Icons..."
 
-cd "$ALT_ROOT/Alternix"
-sudo mkdir /usr/share/icons/alternix/64x64/apps/
-if [ -f "icons/" ]; then
-    sudo cp icons/* /usr/share/icons/alternix/64x64/apps/
-fi
-echo " "
-
-
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
