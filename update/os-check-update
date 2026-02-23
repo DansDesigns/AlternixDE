@@ -1,7 +1,10 @@
 #!/bin/bash
 
+REPO_URL="https://github.com/DansDesigns/Alternix.git"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/update/version.txt"
+
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
-REMOTE_VERSION=$(curl -fs https://github.com/DansDesigns/Alternix/update/version.txt)
+REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
 if [ -z "$REMOTE_VERSION" ]; then
     echo "Unable to check for updates."
@@ -9,9 +12,23 @@ if [ -z "$REMOTE_VERSION" ]; then
 fi
 
 if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
-    echo "Update available: $REMOTE_VERSION (installed: $LOCAL_VERSION)"
-    exit 10
+    echo "New version available: $REMOTE_VERSION"
+    echo " "
+    echo "Updating Alternix..."
+
+
+    git clone "$REPO_URL" || exit 1
+    cd Alternix
+
+    chmod +x install-update.sh
+    sudo ./install-update.sh
+
+    echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt
+
+    cd /
+    rm -rf "$TMP_DIR"
+
+    echo "Update complete."
 else
-    echo "OSM is up to date."
-    exit 0
+    echo "Alternix is up to date."
 fi
