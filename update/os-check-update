@@ -85,7 +85,9 @@ while true; do
         echo "Update Complete!"
         break
     else
+        echo " "
         echo "Alternix is up to date: $LOCAL_VERSION "
+        sleep 2
         break
     fi
 
