@@ -5,7 +5,7 @@ clear
 echo "=============================================="
 echo "          Alternix Desktop Installer"
 echo "=============================================="
-echo "-------> Teaching Penguins how to fly! <-------"
+echo "--------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
 echo " Setup can take a while, be sure to have a cuppa & some good music!"
@@ -671,7 +671,7 @@ sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 Type=Application
 Name=System Update (Linux)
 Comment=System Update
-Exec=alacritty -e sudo nala update && sudo nala upgrade -y
+Exec=alacritty -e sudo nala update
 Terminal=false
 Icon=update
 Categories=System;
@@ -708,7 +708,7 @@ sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
 
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
-Name=System Update (GUI)
+Name=System Update (Alternix)
 Exec=alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application

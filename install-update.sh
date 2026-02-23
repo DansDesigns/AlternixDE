@@ -5,7 +5,7 @@ clear
 echo "=============================================="
 echo "          Alternix Desktop Updater"
 echo "=============================================="
-echo "-------> Re-teaching Penguins how to fly! <-------"
+echo "-------> Teaching Penguins to fly! <-------"
 echo " "
 echo " "
 echo " "
@@ -342,13 +342,15 @@ echo "• Updating system-update launcher..."
 sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
-Name=System Update
+Name=System Update (Linux)
 Comment=System Update
 Exec=alacritty -e sudo nala update
 Terminal=false
 Icon=update
 Categories=System;
 EOF
+
+sudo rm -r /usr/share/applications/upgrade.desktop
 
 #echo "• Updating system-upgrade launcher..."
 #sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
@@ -366,7 +368,7 @@ echo "• Updating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
-Name=Apps (bauh)
+Name=App Store (bauh)
 Comment=Application Manager
 Exec=bauh
 Icon=bauh
@@ -382,7 +384,7 @@ sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
 
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
-Name=OS Update (GUI)
+Name=System Update (GUI)
 Exec= alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application

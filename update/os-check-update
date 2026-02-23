@@ -41,7 +41,7 @@ while true; do
         echo ""
         echo "Downloading Update..."
 
-        if ! git clone "$REPO_URL" "$TMP_DIR"; then
+        if ! git clone "$REPO_URL"; then
             echo "[------ERROR------]"
             echo "Download failed.."
             rm -rf $HOME/Alternix
@@ -83,10 +83,10 @@ while true; do
                 exit 1
             fi
         fi
-        echo "-----------------"
-        echo "Current Version:"
+        echo "---------------------"
+        echo "New Current Version:"
         echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
-        echo "-----------------"
+        echo "---------------------"
 
         cd /
         echo ""
