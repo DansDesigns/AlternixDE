@@ -316,7 +316,8 @@ sudo mv system.so /usr/local/bin/
 echo " "
 echo "• Updating App Icons..."
 
-cd Alternix
+cd $HOME/Alternix/Alternix
+
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
