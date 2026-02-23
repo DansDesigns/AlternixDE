@@ -321,6 +321,7 @@ cd $HOME/Alternix/Alternix
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
+sudo cp icons/os-check-update.png /usr/share/icons/hicolor/64x64/apps/os-check-update.png
 
 echo "• Updating htop.desktop launcher..."
 sudo tee /usr/share/applications/htop.desktop >/dev/null <<EOF
@@ -341,7 +342,7 @@ sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 Type=Application
 Name=System Update
 Comment=System Update
-Exec=alacritty -e sudo nala update && sudo nala upgrade
+Exec=alacritty -e sudo nala update
 Terminal=false
 Icon=update
 Categories=System;
@@ -380,13 +381,14 @@ sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
 Name=OS Update (GUI)
-Exec=os-check-update
+Exec=/usr/bin/os-check-update
 Icon=os-check-update
 Type=Application
 Terminal=true
 Categories=System;
 EOF
 
+sudo rm -rf $HOME/Alternix
 echo " "
 echo " "
 echo " "

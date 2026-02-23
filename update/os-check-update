@@ -29,15 +29,15 @@ if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
     echo " "
 
     git clone "$REPO_URL" || exit 1
-    cd Alternix
+    cd "$REPO_URL"
 
     chmod +x install-update.sh
     sudo ./install-update.sh
 
-    echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt
+    echo "New Version: $REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt
 
     cd $HOME
-    rm -r $HOME/Alternix
+    rm -r "$REPO_URL"
 
     echo "Update complete."
 else
