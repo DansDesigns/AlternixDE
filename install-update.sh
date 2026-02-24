@@ -2,14 +2,7 @@
 set -e
 clear
 
-echo "=============================================="
-echo "          Alternix Desktop Updater"
-echo "=============================================="
-echo "-------> Teaching Penguins to fly! <-------"
-echo " "
-echo " "
-echo " "
-echo " "
+
 # Root of the Alternix repo
 ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
