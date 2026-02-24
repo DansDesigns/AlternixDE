@@ -368,7 +368,7 @@ EOF
 
 
 echo "• Updating Alternix Updater..."
-mkdir /usr/share/alternix
+sudo mkdir /usr/share/alternix
 sudo chmod +x "$ALT_ROOT/update/os-check-update"
 sudo cp "$ALT_ROOT/update/os-check-update" /usr/bin/
 #sudo rm -r /usr/share/alternix/version.txt
