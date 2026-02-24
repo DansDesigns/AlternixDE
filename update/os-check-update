@@ -1,22 +1,19 @@
 #!/bin/bash
 
-
-
-echo "=============================================="
-echo "          Alternix Desktop Updater"
-echo "=============================================="
-echo "-------> Teaching Penguins to fly! <-------"
-echo " "
-sleep 1
-echo "Checking for Update..."
-
-
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
 
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
+echo "=============================================="
+echo "          Alternix Desktop Updater"
+echo "=============================================="
+echo "-------> Teaching Penguins to fly! <-------"
+echo " "
+echo "Current Version: $LOCAL_VERSION"
+sleep 1
+echo "Checking for Update..."
 
 while true; do
 
