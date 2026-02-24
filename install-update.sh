@@ -350,7 +350,7 @@ Icon=update
 Categories=System;
 EOF
 
-sudo rm -r /usr/share/applications/upgrade.desktop
+#sudo rm -r /usr/share/applications/upgrade.desktop
 
 #echo "• Updating system-upgrade launcher..."
 #sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
