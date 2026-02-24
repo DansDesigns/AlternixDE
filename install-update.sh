@@ -318,7 +318,7 @@ sudo mv system.so /usr/local/bin/
 echo " "
 echo "• Updating App Icons..."
 
-cd $HOME/Alternix/Alternix
+cd "$ALT_ROOT/Alternix"
 
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
@@ -392,7 +392,8 @@ Terminal=true
 Categories=System;
 EOF
 
-sudo rm -rf $HOME/Alternix
+
+sudo rm -rf "$ALT_ROOT"
 echo " "
 echo " "
 echo " "
