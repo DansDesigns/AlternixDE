@@ -4,7 +4,7 @@
 echo "Checking for Update.."
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
-VERSION_URL="https://raw.githubusercontent.com/DansDesigns/refs/heads/Alternix/main/update/version.txt"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
 
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
@@ -102,8 +102,8 @@ while true; do
         break
     else
         echo " "
-        echo "No Update needed."
-        echo "Alternix is up to date: $LOCAL_VERSION "
+        echo "No Update needed.."
+        echo "Alternix is up to date: $LOCAL_VERSION"
         sleep 2
         break
     fi
