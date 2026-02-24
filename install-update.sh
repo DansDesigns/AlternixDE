@@ -1,6 +1,5 @@
 #!/bin/bash
 set -e
-clear
 
 
 # Root of the Alternix repo
