@@ -105,8 +105,6 @@ while true; do
         rm -rf "$TMP_DIR"
 
         echo ""
-        echo "Update Complete!"
-        sleep 5
         break
     else
         echo " "
