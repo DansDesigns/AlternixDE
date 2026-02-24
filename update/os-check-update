@@ -119,10 +119,8 @@ while true; do
 
     else
         echo " "
-        sleep 2
         echo "No Update needed."
         echo " "
-        sleep 1
         echo "Alternix is up to date: $LOCAL_VERSION"
         sleep 5
         break
