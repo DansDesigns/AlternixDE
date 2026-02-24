@@ -52,6 +52,7 @@ while true; do
         sleep 2
         echo ""
         echo "Downloading Update..."
+        echo ""
 
         TMP_DIR=$(mktemp -d) || exit 1
 
@@ -59,6 +60,7 @@ while true; do
             echo ""
             echo "[------ERROR------]"
             echo "Download failed.."
+            echo ""
             cd /
             rm -rf "$TMP_DIR"
             
@@ -81,11 +83,13 @@ while true; do
         chmod +x install-update.sh
         echo ""
         echo "Installing Update..."
+        echo ""
 
         if ! ./install-update.sh; then
             echo ""
             echo "[------ERROR------]"
             echo "Installation failed.."
+            echo ""
             cd /
             rm -rf "$TMP_DIR"
             
