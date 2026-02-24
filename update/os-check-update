@@ -9,9 +9,7 @@ echo "-------> Teaching Penguins to fly! <-------"
 echo " "
 sleep 2
 echo "Checking for Update..."
-echo " "
-echo " "
-sleep 2
+
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
@@ -46,14 +44,19 @@ while true; do
     if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
         echo ""
         echo "Update found.."
+        echo ""
+        echo "--------------------------------"
         echo "Current Version: $LOCAL_VERSION"
         echo "New Version: $REMOTE_VERSION"
+        echo "--------------------------------"
+        sleep 2
         echo ""
         echo "Downloading Update..."
 
         TMP_DIR=$(mktemp -d) || exit 1
 
         if ! git clone "$REPO_URL" "$TMP_DIR"; then
+            echo ""
             echo "[------ERROR------]"
             echo "Download failed.."
             cd /
@@ -80,6 +83,7 @@ while true; do
         echo "Installing Update..."
 
         if ! ./install-update.sh; then
+            echo ""
             echo "[------ERROR------]"
             echo "Installation failed.."
             cd /
@@ -96,8 +100,9 @@ while true; do
                 exit 1
             fi
         fi
+        echo ""
         echo "---------------------"
-        echo "New Current Version:"
+        echo "Installed Version:"
         echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
         echo "---------------------"
 
