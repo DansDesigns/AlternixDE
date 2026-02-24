@@ -7,7 +7,7 @@ echo "          Alternix Desktop Updater"
 echo "=============================================="
 echo "-------> Teaching Penguins to fly! <-------"
 echo " "
-sleep 2
+sleep 1
 echo "Checking for Update..."
 
 
@@ -114,13 +114,13 @@ while true; do
         echo ""
         echo "Cleaning Installation Crumbs.."
         rm -rf "$TMP_DIR"
-
         echo ""
         break
+
     else
         echo " "
         sleep 2
-        echo "No Update needed.."
+        echo "No Update needed."
         echo " "
         sleep 1
         echo "Alternix is up to date: $LOCAL_VERSION"
