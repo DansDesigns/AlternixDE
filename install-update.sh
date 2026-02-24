@@ -11,7 +11,7 @@ echo " "
 echo " "
 echo " "
 # Root of the Alternix repo
-ALT_ROOT="$HOME/Alternix"
+ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 #if [ ! -d "$ALT_ROOT" ]; then
 #    echo "ERROR: $ALT_ROOT not found. Please place install-update.sh inside ~/Alternix."

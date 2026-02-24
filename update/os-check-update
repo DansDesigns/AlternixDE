@@ -1,6 +1,6 @@
 #!/bin/bash
-set -e
-clear
+
+
 echo "Checking for Update.."
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
@@ -41,10 +41,13 @@ while true; do
         echo ""
         echo "Downloading Update..."
 
-        if ! git clone "$REPO_URL"; then
+        TMP_DIR=$(mktemp -d) || exit 1
+
+        if ! git clone "$REPO_URL" "$TMP_DIR"; then
             echo "[------ERROR------]"
             echo "Download failed.."
-            rm -rf $HOME/Alternix
+            cd /
+            rm -rf "$TMP_DIR"
             
             echo "1) Retry"
             echo "2) Exit"
@@ -58,7 +61,7 @@ while true; do
             fi
         fi
 
-        cd $HOME/Alternix || exit 1
+        cd "$TMP_DIR" || exit 1
 
         echo ""
         echo "Download Complete!"
@@ -70,7 +73,7 @@ while true; do
             echo "[------ERROR------]"
             echo "Installation failed.."
             cd /
-            rm -rf $HOME/Alternix
+            rm -rf "$TMP_DIR"
             
             echo "1) Retry"
             echo "2) Exit"
@@ -91,7 +94,7 @@ while true; do
         cd /
         echo ""
         echo "Cleaning Installation Crumbs.."
-        rm -rf $HOME/Alternix
+        rm -rf "$TMP_DIR"
 
         echo ""
         echo "Update Complete!"
@@ -104,5 +107,4 @@ while true; do
         sleep 2
         break
     fi
-
 done
