@@ -377,10 +377,10 @@ EOF
 
 
 echo "• Updating Alternix Updater..."
-sudo chmod +x $HOME/Alternix/update/os-check-update
-sudo cp $HOME/Alternix/update/os-check-update /usr/bin/
+sudo chmod +x "$ALT_ROOT/update/os-check-update"
+sudo cp "$ALT_ROOT/update/os-check-update" /usr/bin/
 sudo rm -r /usr/share/alternix/version.txt
-sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
+sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/
 
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
