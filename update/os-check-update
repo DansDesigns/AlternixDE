@@ -7,9 +7,11 @@ echo "          Alternix Desktop Updater"
 echo "=============================================="
 echo "-------> Teaching Penguins to fly! <-------"
 echo " "
+sleep 2
 echo "Checking for Update..."
 echo " "
 echo " "
+sleep 2
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
@@ -108,7 +110,10 @@ while true; do
         break
     else
         echo " "
+        sleep 2
         echo "No Update needed.."
+        echo " "
+        sleep 1
         echo "Alternix is up to date: $LOCAL_VERSION"
         sleep 5
         break
