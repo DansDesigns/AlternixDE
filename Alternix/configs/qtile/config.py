@@ -61,7 +61,7 @@ def lock_on_resume():
 @hook.subscribe.startup
 def autostart():
     # Autostart Programs
-#    subprocess.Popen(['osm-lockd'])
+    subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['osm-notify'])
     # subprocess.Popen(['osm-launcher'])
@@ -195,10 +195,10 @@ for i in groups:
 
 layouts = [
     # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
-    layout.Max(border_width=1, margin=6),
+    layout.Max(border_width=0, margin=6),
     #layout.RatioTile(margin=6),
-    layout.MonadWide(border_width=2, margin=6),
-    layout.MonadTall(border_width=3, margin=6),
+    layout.MonadWide(border_width=0, margin=6),
+    layout.MonadTall(border_width=0, margin=6),
 ]
 
 widget_defaults = dict(
@@ -214,13 +214,13 @@ extension_defaults = widget_defaults.copy()
 
 close_button = widget.TextBox(
     text="",  # start empty
-    fontsize=15,
+    fontsize=25,
     mouse_callbacks={'Button1': lazy.window.kill()},
 )
 
 float_button = widget.TextBox(
     text="",
-    fontsize=20,
+    fontsize=35,
     mouse_callbacks={'Button1': lazy.window.toggle_floating()},
 )
 

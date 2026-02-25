@@ -263,7 +263,6 @@ fi
 
 sudo cp -r "$ALT_ROOT/Alternix/onboard" /usr/share/onboard
 
-cp "$ALT_ROOT/Alternix/decky/decky_installer.desktop" ~/
 
 
 # ────────────────────────────────────────────────
