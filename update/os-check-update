@@ -18,13 +18,9 @@ echo "Checking for Linux System Updates..."
 echo " "
 sudo nala update
 echo " "
-echo "Applying Upgrades…"
+echo "Checking for Linux System Upgrades…"
 echo " "
 sudo nala upgrade
-echo " "
-echo "=============================================="
-echo "          System Update Complete."
-echo "=============================================="
 echo " "
 echo "Checking for Alternix Update..."
 sleep 1
@@ -113,13 +109,10 @@ while true; do
                 exit 1
             fi
         fi
-        echo ""
-        echo "---------------------"
-        echo "Update Complete!"
+        echo "=============================================="
         echo "Installed Version:"
         echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
-        echo "---------------------"
-
+        echo "=============================================="
         cd /
         echo ""
         echo "Cleaning Installation Crumbs.."
