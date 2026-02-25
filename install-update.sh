@@ -342,18 +342,19 @@ EOF
 #EOF
 
 sudo rm -r /usr/share/applications/update.desktop
+sudo rm -r /usr/share/applications/upgrade.desktop
 
-echo "• Updating system-upgrade launcher..."
-sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
-[Desktop Entry]
-Type=Application
-Name=System Upgrade
-Comment=System Upgrade
-Exec=alacritty -e sudo nala upgrade
-Terminal=false
-Icon=upgrade
-Categories=System;
-EOF
+#echo "• Updating system-upgrade launcher..."
+#sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
+#[Desktop Entry]
+#Type=Application
+#Name=System Upgrade
+#Comment=System Upgrade
+#Exec=alacritty -e sudo nala upgrade
+#Terminal=false
+#Icon=upgrade
+#Categories=System;
+#EOF
 
 echo "• Updating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
