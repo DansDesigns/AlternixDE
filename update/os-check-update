@@ -53,17 +53,15 @@ while true; do
 
     if dpkg --compare-versions "$REMOTE_VERSION" gt "$LOCAL_VERSION"; then
         echo ""
-        echo "Update found.."
+        echo "New Update found!"
         echo ""
         echo "--------------------------------"
         echo "Current Version: $LOCAL_VERSION"
         echo "New Version: $REMOTE_VERSION"
         echo "--------------------------------"
-        sleep 1
         echo ""
         echo "Downloading Update..."
         echo ""
-        sleep 2
 
         TMP_DIR=$(mktemp -d) || exit 1
 
