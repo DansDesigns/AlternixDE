@@ -131,7 +131,7 @@ while true; do
         echo " "
         echo "No Update needed."
         echo " "
-        echo "Alternix is up to date!"
+        echo "Current Version: $LOCAL_VERSION"
         echo " "
         sleep 2
         echo "This window will self-destruct in 5 seconds.."
