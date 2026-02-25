@@ -681,7 +681,7 @@ EOF
 #sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
 #[Desktop Entry]
 #Type=Application
-#Name=System Upgrade
+#Name=System Upgrade (Linux)
 #Comment=System Upgrade
 #Exec=alacritty -e sudo nala upgrade
 #Terminal=false
@@ -1099,9 +1099,10 @@ echo ""
 while true; do
     read -n 1 -s -r KEY
     if [[ "$KEY" == "1" ]]; then
-        echo ""
-        echo "Restarting system..."
-        sleep 1
+        echo "Rebooting Now..."
+        echo " "
+        echo "This window will self-destruct in 5 seconds.."
+        sleep 5
         sudo reboot
         break
     elif [[ "$KEY" == "2" ]]; then

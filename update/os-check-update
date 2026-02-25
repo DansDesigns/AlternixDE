@@ -9,12 +9,21 @@ REMOTE_VERSION=$(curl -fs $VERSION_URL)
 echo "=============================================="
 echo "          Alternix Desktop Updater"
 echo "=============================================="
-echo "-------> Teaching Penguins to fly! <-------"
+echo " -------> Teaching Penguins to fly! <-------"
 echo " "
-echo "Current Version: $LOCAL_VERSION"
+echo "=============================================="
+echo "       Current Version: $LOCAL_VERSION"
+echo "=============================================="
+echo "Checking for Linux System Update..."
+echo " "
+sudo nala update
+echo " "
+echo "=============================================="
+echo "          System Update Complete."
+echo "=============================================="
+echo " "
+echo "Checking for Alternix Update..."
 sleep 1
-echo "Checking for Update..."
-
 while true; do
 
     LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
@@ -46,10 +55,11 @@ while true; do
         echo "Current Version: $LOCAL_VERSION"
         echo "New Version: $REMOTE_VERSION"
         echo "--------------------------------"
-        sleep 2
+        sleep 1
         echo ""
         echo "Downloading Update..."
         echo ""
+        sleep 2
 
         TMP_DIR=$(mktemp -d) || exit 1
 
@@ -103,6 +113,7 @@ while true; do
         fi
         echo ""
         echo "---------------------"
+        echo "Update Complete!"
         echo "Installed Version:"
         echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
         echo "---------------------"
@@ -118,7 +129,10 @@ while true; do
         echo " "
         echo "No Update needed."
         echo " "
-        echo "Alternix is up to date: $LOCAL_VERSION"
+        echo "Alternix is up to date!"
+        echo " "
+        sleep 2
+        echo "This window will self-destruct in 5 seconds.."
         sleep 5
         break
     fi

@@ -330,31 +330,31 @@ Categories=System;
 EOF
 
 
-echo "• Updating system-update launcher..."
-sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
-[Desktop Entry]
-Type=Application
-Name=System Update (Linux)
-Comment=System Update
-Exec=alacritty -e sudo nala update
-Terminal=false
-Icon=update
-Categories=System;
-EOF
-
-#sudo rm -r /usr/share/applications/upgrade.desktop
-
-#echo "• Updating system-upgrade launcher..."
-#sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
+#echo "• Updating system-update launcher..."
+#sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
 #[Desktop Entry]
 #Type=Application
-#Name=System Upgrade
-#Comment=System Upgrade
-#Exec=alacritty -e sudo nala upgrade
+#Name=System Update (Linux)
+#Comment=System Update
+#Exec=alacritty -e sudo nala update
 #Terminal=false
-#Icon=upgrade
+#Icon=update
 #Categories=System;
 #EOF
+
+sudo rm -r /usr/share/applications/update.desktop
+
+echo "• Updating system-upgrade launcher..."
+sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=System Upgrade
+Comment=System Upgrade
+Exec=alacritty -e sudo nala upgrade
+Terminal=false
+Icon=upgrade
+Categories=System;
+EOF
 
 echo "• Updating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
@@ -397,3 +397,5 @@ echo " "
 echo " "
 echo " "
 echo " "
+echo "This window will self-destruct in 5 seconds.."
+sleep 5
