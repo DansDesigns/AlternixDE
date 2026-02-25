@@ -666,17 +666,17 @@ Categories=System;
 EOF
 
 
-echo "• Creating system-update launcher..."
-sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
-[Desktop Entry]
-Type=Application
-Name=System Update (Linux)
-Comment=System Update
-Exec=alacritty -e sudo nala update
-Terminal=false
-Icon=update
-Categories=System;
-EOF
+#echo "• Creating system-update launcher..."
+#sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
+#[Desktop Entry]
+#Type=Application
+#Name=System Update (Linux)
+#Comment=System Update
+#Exec=alacritty -e sudo nala update
+#Terminal=false
+#Icon=update
+#Categories=System;
+#EOF
 
 #echo "• Creating system-upgrade launcher..."
 #sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
@@ -710,7 +710,7 @@ sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
 
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
-Name=System Update (Alternix)
+Name=System Update
 Exec=alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application

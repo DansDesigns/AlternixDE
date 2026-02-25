@@ -22,7 +22,7 @@ echo "Checking for Linux System Upgrades…"
 echo " "
 sudo nala upgrade
 echo " "
-echo "Checking for Alternix Update..."
+echo "Checking for Alternix Updates..."
 sleep 1
 while true; do
 
