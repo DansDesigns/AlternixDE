@@ -397,5 +397,3 @@ echo " "
 echo " "
 echo " "
 echo " "
-echo "This window will self-destruct in 5 seconds.."
-sleep 5

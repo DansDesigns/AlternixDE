@@ -118,6 +118,8 @@ while true; do
         echo "Cleaning Installation Crumbs.."
         rm -rf "$TMP_DIR"
         echo ""
+        echo "This window will self-destruct in 5 seconds.."
+        sleep 5
         break
 
     else
