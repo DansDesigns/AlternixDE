@@ -11,6 +11,10 @@ echo "--------------------------------------------------------------------"
 echo " Setup can take a while, be sure to have a cuppa & some good music!"
 echo "--------------------------------------------------------------------"
 echo ""
+echo ""
+echo "NOTE: You will be asked for input several times."
+echo ""
+echo ""
 echo "-------------------------------------------"
 echo "              User Setup"
 echo "-------------------------------------------"
@@ -156,6 +160,10 @@ sudo nala install -y --no-install-recommends plasma-dialer spacebar
 
 echo "[System] Enabling Power Profile Daemon.."
 sudo systemctl enable --now power-profiles-daemon
+
+# ────────────────────────────────────────────────
+#  Install Flatpaks
+# ────────────────────────────────────────────────
 
 echo "[System] Clearing space in /var/cache/apt/archive..."
 sudo rm -r /var/cache/apt/archives
