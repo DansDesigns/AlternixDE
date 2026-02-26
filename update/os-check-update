@@ -1,10 +1,6 @@
 #!/bin/bash
 
-REPO_URL="https://github.com/DansDesigns/Alternix.git"
-VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
 
-LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
-REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
 echo "=============================================="
 echo "          Alternix Desktop Updater"
@@ -18,12 +14,18 @@ echo "Checking for Linux System Updates..."
 echo " "
 sudo nala update
 echo " "
-echo "Checking for Linux System Upgrades…"
+echo "Applying Upgrades…"
 echo " "
 sudo nala upgrade
 echo " "
 echo "Checking for Alternix Updates..."
-sleep 1
+
+REPO_URL="https://github.com/DansDesigns/Alternix.git"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
+
+LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
+REMOTE_VERSION=$(curl -fs $VERSION_URL)
+
 while true; do
 
     LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
