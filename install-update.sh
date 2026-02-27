@@ -13,20 +13,23 @@ ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 #===========================================================
 # Add the Settings to be updated (configs, system icons & settings):
 #===========================================================
-
 echo ""
 echo "No Settings or Configs to update..."
 echo ""
 
+echo ""
 #===========================================================
 # Add the Apps to be updated (compilation commands & icons):
 #===========================================================
+echo ""
+#echo "No Apps need updating..."
+echo ""
+
+echo "• Building osm-notify..."
+g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
+chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
 echo ""
-echo "No Apps need updating..."
-echo ""
-
-
 #===========================================================
 # Update the Updater:
 #===========================================================
@@ -40,8 +43,8 @@ sudo cp icons/os-check-update.png /usr/share/icons/hicolor/64x64/apps/os-check-u
 #=========================================
 # Un-Comment to remove old update and upgrade shortcuts:
 echo "• Revmoing old shortcuts..."
-#sudo rm -r /usr/share/applications/update.desktop
-#sudo rm -r /usr/share/applications/upgrade.desktop
+sudo rm -r /usr/share/applications/update.desktop
+sudo rm -r /usr/share/applications/upgrade.desktop
 
 #=========================================
 # Update Updater:
