@@ -3,7 +3,8 @@
 
 # Root of the Alternix repo
 ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-
+cd "$ALT_ROOT/Alternix"
+pwd
 #if [ ! -d "$ALT_ROOT" ]; then
 #    echo "ERROR: $ALT_ROOT not found. Please place install-update.sh inside ~/Alternix."
 #    exit 1
@@ -26,6 +27,7 @@ echo ""
 echo ""
 
 echo "• Building osm-notify..."
+
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
@@ -34,7 +36,6 @@ echo ""
 # Update the Updater:
 #===========================================================
 echo "[Updating Alternix Updater]"
-cd "$ALT_ROOT/Alternix"
 
 # Un-Comment to update icon:
 echo "• Updating Icon..."
