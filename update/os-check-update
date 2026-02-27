@@ -114,6 +114,8 @@ while true; do
         echo "Installed Version:"
         echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
         echo "=============================================="
+        echo ""
+        sleep 2
         cd /
         echo ""
         echo "Cleaning Installation Crumbs.."
@@ -121,7 +123,6 @@ while true; do
         echo ""
         echo "Press 1 to [Reboot]"
         echo "Press 2 to Continue"
-
         while true; do
             read -n 1 -s -r KEY
             if [[ "$KEY" == "1" ]]; then
