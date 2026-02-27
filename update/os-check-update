@@ -110,15 +110,23 @@ while true; do
                 exit 1
             fi
         fi
+
         echo "=============================================="
-        echo "Installed Version:"
-        echo "$LOCAL_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
+        echo "     Installed Version: $REMOTE_VERSION"
         echo "=============================================="
         echo ""
         sleep 2
         cd /
         echo ""
-        echo "Cleaning Installation Crumbs.."
+        echo "Cleaning Installation Crumbs..."
+        echo ""
+        sleep 1
+        echo "Resetting System Setter..."
+        echo ""
+        sleep 1
+        echo "Parsing un-passable Conduits..."
+        echo ""
+        sleep 1
         rm -rf "$TMP_DIR"
         echo ""
         echo "Press 1 to [Reboot]"
@@ -158,7 +166,7 @@ while true; do
         echo " "
         echo "No Update needed."
         echo " "
-        echo "Current Version: $LOCAL_VERSION"
+        #echo "Current Version: $LOCAL_VERSION"
         echo " "
         echo "This window will self-destruct in 5 seconds..."
         sleep 1
