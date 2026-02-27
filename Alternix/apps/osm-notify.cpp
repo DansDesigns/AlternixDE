@@ -633,8 +633,8 @@ public:
             QHBoxLayout *topInner = new QHBoxLayout();
             topInner->setSpacing(10);
 
-            auto *wall = new ClickIcon(imgBase + "osm-paper.png",
-                                       "osm-paper", 60, this);
+            auto *wall = new ClickIcon(imgBase + "osm-power.png",
+                                       "osm-power", 60, this);
             auto *set  = new ClickIcon(imgBase + "osm-settings.png",
                                        "osm-settings", 60, this);
 
