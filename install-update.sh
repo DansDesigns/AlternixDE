@@ -76,8 +76,6 @@ Terminal=true
 Categories=System;
 EOF
 
-cd /
-sudo rm -rf "$ALT_ROOT"
 echo " "
 echo " "
 echo " "

@@ -120,8 +120,16 @@ while true; do
         echo "Cleaning Installation Crumbs.."
         rm -rf "$TMP_DIR"
         echo ""
-        echo "This window will self-destruct in 5 seconds.."
-        sleep 5
+        echo "This window will self-destruct in 5 seconds..."
+        sleep 1
+        echo "4.."
+        sleep 1
+        echo "3.."
+        sleep 1
+        echo "2.."
+        sleep 1
+        echo "1.."
+        sleep 1
         break
 
     else
@@ -130,9 +138,16 @@ while true; do
         echo " "
         echo "Current Version: $LOCAL_VERSION"
         echo " "
-        sleep 2
-        echo "This window will self-destruct in 5 seconds.."
-        sleep 5
+        echo "This window will self-destruct in 5 seconds..."
+        sleep 1
+        echo "4.."
+        sleep 1
+        echo "3.."
+        sleep 1
+        echo "2.."
+        sleep 1
+        echo "1.."
+        sleep 1
         break
     fi
 done
