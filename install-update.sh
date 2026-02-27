@@ -29,10 +29,19 @@ echo ""
 #echo "No Apps need updating..."
 echo ""
 
-echo "• Building osm-notify..."
+echo "[Config] Installing updated configs..."
+cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
 
+
+echo "• Building osm-notify..."
+pkill osm-notify
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
+echo "re-launching osm-notify..."
+
+echo "• Building osm-power..."
+g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 echo ""
 #===========================================================
@@ -88,6 +97,6 @@ echo "=============================================="
 echo "         Alternix Update Complete!"
 echo "=============================================="
 echo " "
-echo " "
-echo " "
-echo " "
+echo "============================================================="
+echo "THIS UPDATE REQUIRES A RESTART, PLEASE SELECT [REBOOT] BELOW"
+ECHO "============================================================="

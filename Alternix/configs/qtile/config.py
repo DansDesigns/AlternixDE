@@ -64,15 +64,12 @@ def autostart():
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['osm-notify'])
-    # subprocess.Popen(['osm-launcher'])
-    subprocess.Popen(['osm-status'])
+#    subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['onboard'])
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
-    # subprocess.Popen(['flameshot'])
-    # subprocess.Popen(['redshift'])
     # subprocess.Popen(['redshift'])
 
     # Function to update the time

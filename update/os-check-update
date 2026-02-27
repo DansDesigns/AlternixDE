@@ -119,17 +119,39 @@ while true; do
         echo "Cleaning Installation Crumbs.."
         rm -rf "$TMP_DIR"
         echo ""
-        echo "This window will self-destruct in 5 seconds..."
-        sleep 1
-        echo "4.."
-        sleep 1
-        echo "3.."
-        sleep 1
-        echo "2.."
-        sleep 1
-        echo "1.."
-        sleep 1
-        break
+        echo "Press 1 to [Reboot]"
+        echo "Press 2 to Continue"
+
+        while true; do
+            read -n 1 -s -r KEY
+            if [[ "$KEY" == "1" ]]; then
+                echo "Beginning Reboot Sequence..."
+                echo " "
+                echo "This window will self-destruct in 5 seconds..."
+                sleep 1
+                echo "5.."
+                sleep 1
+                echo "4.."
+                sleep 1
+                echo "3.."
+                sleep 1
+                echo "2.."
+                sleep 1
+                echo "1.."
+                sleep 1
+                sudo reboot
+                break
+            elif [[ "$KEY" == "2" ]]; then
+                echo ""
+                echo "Continuing to shell..."
+                sleep 2
+                break
+            else
+                echo ""
+                echo "Invalid choice. Press 1 to Restart or 2 to Continue."
+            fi
+        done
+        
 
     else
         echo " "

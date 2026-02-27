@@ -1102,26 +1102,36 @@ echo "Autologin + startx enabled for user: $TARGET_USER"
 echo " "
 echo ".xinitrc configured for Qtile."
 echo " "
+
 echo "Press 1 to Restart"
-echo "Press 2 to Continue to Shell"
+echo "Press 2 to Continue"
 echo ""
 
 while true; do
     read -n 1 -s -r KEY
     if [[ "$KEY" == "1" ]]; then
-        echo "Rebooting Now..."
+        echo "Begining Reboot Sequence..."
         echo " "
-        echo "This window will self-destruct in 5 seconds.."
-        sleep 5
+        echo "This window will self-destruct in 5 seconds..."
+        sleep 1
+        echo "5.."
+        sleep 1
+        echo "4.."
+        sleep 1
+        echo "3.."
+        sleep 1
+        echo "2.."
+        sleep 1
+        echo "1.."
+        sleep 1
         sudo reboot
         break
     elif [[ "$KEY" == "2" ]]; then
         echo ""
         echo "Continuing to shell..."
-        sudo systemctl restart getty@tty1
         break
     else
         echo ""
-        echo "Invalid choice. Press 1 to Restart or 2 to Exit to Shell."
+        echo "Invalid choice. Press 1 to Restart or 2 to Continue."
     fi
 done
