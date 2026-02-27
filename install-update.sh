@@ -100,5 +100,5 @@ echo "         Alternix Update Complete!"
 echo "=============================================="
 echo " "
 echo "=============================================="
-echo "       THIS UPDATE REQUIRES A RESTART
+echo "       THIS UPDATE REQUIRES A RESTART"
 echo "=============================================="
