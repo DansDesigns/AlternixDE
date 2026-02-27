@@ -3,9 +3,11 @@
 
 # Root of the Alternix repo
 ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
-cd "$ALT_ROOT/Alternix"
+
 echo ""
+echo "Current working directory:"
 pwd
+cd "$ALT_ROOT/Alternix"
 echo ""
 sleep 1
 #if [ ! -d "$ALT_ROOT" ]; then
@@ -15,22 +17,23 @@ sleep 1
 
 
 #===========================================================
-# Add the Settings to be updated (configs, system icons & settings):
+# Settings to be updated (configs, system icons & settings):
 #===========================================================
 echo ""
-echo "No Settings or Configs to update..."
+#echo "No Settings or Configs to update..."
 echo ""
+
+echo "[Config] Installing updated configs..."
+cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
 
 echo ""
 #===========================================================
-# Add the Apps to be updated (compilation commands & icons):
+# Apps to be updated (compilation commands & icons):
 #===========================================================
 echo ""
 #echo "No Apps need updating..."
 echo ""
 
-echo "[Config] Installing updated configs..."
-cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
 
 
 echo "• Building osm-notify..."
@@ -45,7 +48,7 @@ chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 echo ""
 #===========================================================
-# Update the Updater:
+# Updater:
 #===========================================================
 echo "[Updating Alternix Updater]"
 
@@ -96,7 +99,8 @@ echo " "
 echo "=============================================="
 echo "         Alternix Update Complete!"
 echo "=============================================="
+echo "Now running version:" cat /usr/share/alternix/version.txt
 echo " "
 echo "============================================================="
 echo "THIS UPDATE REQUIRES A RESTART, PLEASE SELECT [REBOOT] BELOW"
-ECHO "============================================================="
+echo "============================================================="
