@@ -74,7 +74,7 @@ sudo cp "$ALT_ROOT/update/os-check-update" /usr/bin/
 #=========================================
 # Update Version Number:
 echo "• Updating Version Number..."
-#sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
+sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 
 
 #=========================================

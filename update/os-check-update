@@ -112,7 +112,7 @@ while true; do
         fi
         echo "=============================================="
         echo "Installed Version:"
-        echo "$REMOTE_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
+        echo "$LOCAL_VERSION" | sudo tee /usr/share/alternix/version.txt > /dev/null
         echo "=============================================="
         echo ""
         sleep 2
