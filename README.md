@@ -64,3 +64,11 @@ chmod +x install-alternix.sh
 Follow the onscreen prompts..
 
 You can edit the install-alternix.sh script to enable or disable packages.
+
+
+```
+PLEASE NOTE, DUE TO INSANE PEOPLE IN POSITIONS OF POWER:
+
+California residents will no longer be able to use this OS after January 1st 2027
+Colorado residents will no longer be able to use this OS after January 1st 2028
+```
