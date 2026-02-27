@@ -68,7 +68,7 @@ sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 echo "• Updating Launcher..."
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
-Name=System Update (GUI)
+Name=System Update
 Exec= alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application
