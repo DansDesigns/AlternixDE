@@ -1,6 +1,6 @@
 #!/bin/bash
 
-
+LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 
 echo "=============================================="
 echo "          Alternix Desktop Updater"
@@ -16,14 +16,13 @@ sudo nala update
 echo " "
 echo "Applying Upgrades…"
 echo " "
-sudo nala upgrade
+sudo nala upgrade -y
 echo " "
 echo "Checking for Alternix Updates..."
 
 REPO_URL="https://github.com/DansDesigns/Alternix.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
 
-LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
 while true; do
@@ -139,6 +138,8 @@ while true; do
         echo "Current Version: $LOCAL_VERSION"
         echo " "
         echo "This window will self-destruct in 5 seconds..."
+        sleep 1
+        echo "5.."
         sleep 1
         echo "4.."
         sleep 1
