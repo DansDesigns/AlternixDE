@@ -175,6 +175,7 @@ echo "[System] Installing Flatpaks..."
 
 # Install flatpaks
 flatpak install -y flathub com.github.joseexposito.touche
+flatpak install -y flathub chat.delta.desktop
 flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
