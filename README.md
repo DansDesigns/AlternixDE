@@ -66,9 +66,11 @@ Follow the onscreen prompts..
 You can edit the install-alternix.sh script to enable or disable packages.
 
 
-```
-PLEASE NOTE, THE FOLLOWING AREAS ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
+# The utilization of this Linux distribution is prohibited in jurisdictions mandating age verification.
+Any penalties or charges incurred due to non-compliance will be transferred to the user
 
+PLEASE NOTE, THE FOLLOWING AREAS ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
+```
 New York (S8102A) after March 4th 2026 (not acuatlly passed into law yet but I'm not taking chances!)
 Brazil (law 15.211) after March 17th 2026.
 California (AB-1043) after January 1st 2027.
