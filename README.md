@@ -66,9 +66,13 @@ Follow the onscreen prompts..
 You can edit the install-alternix.sh script to enable or disable packages.
 
 
-```
-PLEASE NOTE, DUE TO INSANE PEOPLE IN POSITIONS OF POWER:
+# The utilization of this Linux distribution is prohibited in jurisdictions mandating age verification.
+Any penalties or charges incurred due to non-compliance will be transferred to the user
 
-California residents will no longer be able to use this OS after January 1st 2027
-Colorado residents will no longer be able to use this OS after January 1st 2028
+PLEASE NOTE, THE FOLLOWING AREAS ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
+```
+New York (S8102A) after March 4th 2026 (not acuatlly passed into law yet but I'm not taking chances!)
+Brazil (law 15.211) after March 17th 2026.
+California (AB-1043) after January 1st 2027.
+Colorado (SB26-51) after January 1st 2028.
 ```
