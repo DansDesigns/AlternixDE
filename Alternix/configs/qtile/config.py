@@ -70,7 +70,7 @@ def autostart():
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
-    # subprocess.Popen(['redshift'])
+    subprocess.Popen(["python3", "/usr/bin/rounded_corners"])
 
     # Function to update the time
     def update_time():
