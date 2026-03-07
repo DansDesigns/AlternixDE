@@ -71,7 +71,7 @@ Any penalties or charges incurred due to non-compliance will be transferred to t
 
 PLEASE NOTE, THE FOLLOWING AREAS ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
 ```
-New York (S8102A) after March 4th 2026 (not acuatlly passed into law yet but I'm not taking chances!)
+New York (S8102A) after March 4th 2026.
 Brazil (law 15.211) after March 17th 2026.
 California (AB-1043) after January 1st 2027.
 Colorado (SB26-51) after January 1st 2028.
