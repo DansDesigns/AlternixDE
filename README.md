@@ -4,7 +4,7 @@ A Linux Desktop Environment designed for touchscreen devices.
 Using Qtile & custom Qt5 app launcher, app switcher, quick settings, file editor/viewer & drawing app
 
 
-# *note: While in a working state, Alternix is still in Development
+# Alternix is still in Development
 
 
 Key commands:
