@@ -1083,8 +1083,20 @@ cd auto-cpufreq
 sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
 
+# ──────────────────────────────────────────────── 
+# install rounded-corners
 # ────────────────────────────────────────────────
-# 12. Finish + prompt
+echo " "
+
+echo "- Installing rounded-corners..."
+cd $HOME
+git clone https://github.com/DansDesigns/rounded_corners
+cd rounded_corners
+chmod +x start_corners.sh
+sudo ./start_corners.sh
+
+# ────────────────────────────────────────────────
+# Finish + prompt
 # ────────────────────────────────────────────────
 echo " "
 echo " "

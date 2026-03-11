@@ -70,7 +70,7 @@ def autostart():
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
-    # subprocess.Popen(['redshift'])
+    subprocess.Popen(["python3", "/usr/bin/rounded_corners"])
 
     # Function to update the time
     def update_time():
@@ -274,7 +274,7 @@ screens = [
     # Main Screen:
     Screen(
         top=bar.Bar([
-            #widget.Spacer(length=15),
+            widget.Spacer(length=15),
             # widget.Image(filename='~/.config/qtile/images/terminal.png', margin=2.5, mouse_callbacks={'Button1': lazy.spawn(terminal)}),
             widget.GroupBox(highlight_method='border', block_highlight_text_color='ffffff'),
             widget.Systray(),
@@ -294,7 +294,7 @@ screens = [
             float_button,
             widget.Spacer(length=15),
             close_button,
-            #widget.Spacer(length=15),
+            widget.Spacer(length=15),
             # widget.QuickExit(padding=8),
         ], size=35,
             # N,E,S,W compass directions for margin:
@@ -302,7 +302,7 @@ screens = [
         ),
         bottom=bar.Bar(
             [
-                #widget.Spacer(length=55),
+                widget.Spacer(length=15),
                 widget.TaskList(),
                 #widget.Spacer(length=bar.STRETCH),
                 widget.Image(filename='~/.config/qtile/images/apps.png', margin=6,
@@ -312,7 +312,7 @@ screens = [
                 # COMMENT OUT THE NEXT 3 LINES TO REMOVE THE KEYBOARD BUTTON:
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
                              mouse_callbacks={'Button1': lazy.spawn("onboard")}),
-                widget.Spacer(length=55),
+                widget.Spacer(length=15),
             ], size=35, margin=[0, 0, 0, 0], background=bg,
         ),
         # x11_drag_polling_rate = 60,
