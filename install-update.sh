@@ -34,6 +34,37 @@ echo ""
 #echo "No Apps need updating..."
 echo ""
 
+# ────────────────────────────────────────────────
+# Install all .deb packages in ~/Alternix/installers/
+# ────────────────────────────────────────────────
+echo " "
+echo "[System] Installing local .deb packages..."
+
+INSTALLER_DIR="$ALT_ROOT/Alternix/installers"
+
+if [ -d "$INSTALLER_DIR" ]; then
+    DEB_COUNT=$(ls -1 "$INSTALLER_DIR"/*.deb 2>/dev/null | wc -l)
+
+    if [ "$DEB_COUNT" -gt 0 ]; then
+        echo "• Found $DEB_COUNT installer package(s). Installing..."
+
+        # Install each .deb file
+        sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
+
+        # Fix missing dependencies automatically
+        #sudo apt-get update -y
+        sudo nala install -f -y
+
+        # try to Install each .deb file AGAIN
+        sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
+
+        echo "• Local installer packages installed."
+    else
+        echo "• No .deb files in installers folder, skipping."
+    fi
+else
+    echo "• No installers folder found, skipping."
+fi
 
 
 echo "• Building osm-notify..."
@@ -80,16 +111,16 @@ sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 #=========================================
 # Un-Comment to Update the App Launcher:
 
-echo "• Updating Launcher..."
-sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
-[Desktop Entry]
-Name=System Update
-Exec= alacritty -e /usr/bin/os-check-update
-Icon=os-check-update
-Type=Application
-Terminal=true
-Categories=System;
-EOF
+#echo "• Updating Launcher..."
+#sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
+#[Desktop Entry]
+#Name=System Update
+#Exec= alacritty -e /usr/bin/os-check-update
+#Icon=os-check-update
+#Type=Application
+#Terminal=true
+#Categories=System;
+#EOF
 
 echo " "
 echo " "
