@@ -29,6 +29,8 @@ WIN + 1, 2, 3: Switch to Desktop 1, 2, 3
 
 WIN + SHIFT + 1 ,2 ,3: Move Window & Switch to Desktop 1, 2, 3
 
+CTRL + SPACE: open Ulauncher Application, file & search bar
+
 ```
 
 
