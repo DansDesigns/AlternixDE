@@ -71,6 +71,7 @@ def autostart():
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
     subprocess.Popen(["python3", "/usr/bin/rounded_corners"])
+    subprocess.Popen(['ulauncher'])
 
     # Function to update the time
     def update_time():
