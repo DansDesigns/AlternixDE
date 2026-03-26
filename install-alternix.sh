@@ -180,9 +180,9 @@ flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
+flatpak install -y flathub net.retrodeck.retrodeck
 
 # Flatpak Games (disabled by default)
-#flatpak install -y flathub net.retrodeck.retrodeck
 #flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
 #flatpak install -y flathub io.github.swordpuffin.hunt
 #flatpak install -y flathub com.github.avojak.warble
