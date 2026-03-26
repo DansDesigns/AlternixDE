@@ -179,6 +179,7 @@ flatpak install -y flathub chat.delta.desktop
 flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
+flatpak install -y flathub com.github.tchx84.Flatseal
 
 # Flatpak Games (disabled by default)
 #flatpak install -y flathub net.retrodeck.retrodeck
