@@ -71,7 +71,7 @@ You can edit the install-alternix.sh script to enable or disable packages.
 # The utilization of this Linux distribution is prohibited in jurisdictions mandating age verification.
 Any penalties or charges incurred due to non-compliance will be transferred to the user
 
-PLEASE NOTE, THE FOLLOWING AREAS ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
+THIS INCLUDES BUT NOT LIMITED TO: THE FOLLOWING AREAS THAT ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
 ```
 New York (S8102A) after March 4th 2026.
 Brazil (15.211) after March 17th 2026.
@@ -81,6 +81,7 @@ Illinois (PENDING)
 Utah (PENDING)
 Texas (PENDING)
 Louisiana (PENDING)
+Michigan (PENDING)
 Singapore 
 
 ```
