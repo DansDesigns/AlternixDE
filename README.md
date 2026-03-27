@@ -82,6 +82,7 @@ Utah (PENDING)
 Texas (PENDING)
 Louisiana (PENDING)
 Michigan (PENDING)
+Oregon (PENDING)
 Singapore 
 
 ```
