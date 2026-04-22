@@ -42,7 +42,7 @@ static QPushButton* smallBtn(const QString &txt) {
 static QString runCmd(const QString &cmd) {
     QProcess p;
     p.start("bash", {"-c", cmd});
-    p.waitForFinished(1500);
+    p.waitForFinished(5000);  // FIX: bumped from 1500ms — rescan needs more time
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
 }
 
@@ -204,15 +204,43 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // LAMBDAS FOR STATE UPDATES
     // =====================================================
 
-    // Scan for SSIDs
+    // FIX: Trigger a real radio rescan before listing SSIDs.
+    // Also fetch IN_USE and SSID together so we can mark the active network.
     auto doScan = [ssidList]() {
         ssidList->clear();
-        QStringList lines = runCmd("nmcli -t -f SSID device wifi list").split("\n");
 
-        for (QString s : lines) {
-            s = s.trimmed();
-            if (!s.isEmpty())
-                ssidList->addItem(s);
+        // Fire a rescan (non-blocking is fine; nmcli device wifi list will
+        // wait internally for the scan results via NetworkManager).
+        runCmd("nmcli device wifi rescan 2>/dev/null || true");
+
+        // FIX: Use multivalue -f to get IN_USE flag alongside SSID.
+        //      --rescan no stops a second implicit rescan from duplicating work.
+        //      In terse (-t) mode fields are colon-separated: IN_USE:SSID
+        QString raw = runCmd("nmcli -t -f IN_USE,SSID device wifi list --rescan no");
+        QStringList lines = raw.split("\n");
+
+        for (QString line : lines) {
+            line = line.trimmed();
+            if (line.isEmpty()) continue;
+
+            // FIX: Split on the FIRST colon only — SSIDs can contain colons.
+            int sep = line.indexOf(':');
+            QString inUseFlag = (sep >= 0) ? line.left(sep).trimmed()  : "";
+            QString ssid      = (sep >= 0) ? line.mid(sep + 1).trimmed() : line;
+
+            // Skip rows where SSID is empty (hidden networks, separator lines).
+            if (ssid.isEmpty()) continue;
+
+            // FIX: Mark the currently connected network with a ✔ prefix
+            //      and a distinct colour so it's obvious at a glance.
+            bool active = (inUseFlag == "*");
+            QListWidgetItem *item = new QListWidgetItem(
+                active ? ("✔  " + ssid) : ssid
+            );
+            if (active) {
+                item->setForeground(QColor("#7CFC00"));  // bright green for active
+            }
+            ssidList->addItem(item);
         }
 
         if (ssidList->count() == 0)
@@ -239,7 +267,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
             toggleWifi->setStyleSheet(
                 "QPushButton {"
                 " background:#444444;"
-                " color:#7CFC00;"      // bright green
+                " color:#7CFC00;"
                 " border:1px solid #222222;"
                 " border-radius:16px;"
                 " font-size:26px;"
@@ -254,7 +282,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
             toggleWifi->setStyleSheet(
                 "QPushButton {"
                 " background:#444444;"
-                " color:#CC6666;"      // dim red
+                " color:#CC6666;"
                 " border:1px solid #222222;"
                 " border-radius:16px;"
                 " font-size:26px;"
@@ -303,6 +331,10 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
 
         QString ssid = item->text();
         if (ssid.contains("No networks")) return;
+
+        // FIX: Strip the ✔ prefix added to the active network before connecting.
+        if (ssid.startsWith("✔  "))
+            ssid = ssid.mid(3);
 
         bool ok;
         QString pass = QInputDialog::getText(
