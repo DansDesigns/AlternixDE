@@ -50,10 +50,10 @@ cd into the newly created repo folder
 ```
 cd Alternix
 ```
-give permission & run:
+give permission & run (Devuan version):
 ```
-chmod +x install-alternix.sh
-./install-alternix.sh
+chmod +x install-alternix_devuan.sh
+./install-alternix_devuan.sh
 ```
 
 if it doesnt run, use:
