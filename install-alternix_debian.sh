@@ -155,8 +155,33 @@ sudo nala install -y \
     podman podman-compose
     
 
-echo "[System] Installing Mobile Telephony Components.."
-sudo nala install -y --no-install-recommends plasma-dialer spacebar
+# ────────────────────────────────────────────────
+# Mobile Telephony Components (optional)
+# ────────────────────────────────────────────────
+echo ""
+echo "-------------------------------------------"
+echo "   Install Mobile Telephony Components?"
+echo "-------------------------------------------"
+echo " plasma-dialer & spacebar (KDE phone apps)"
+echo ""
+echo "  1) Install telephony components"
+echo "  2) Skip"
+echo ""
+
+while true; do
+    read -rp "Enter choice [1/2]: " TELEPHONY_CHOICE
+    if [[ "$TELEPHONY_CHOICE" == "1" ]]; then
+        echo "[System] Installing Mobile Telephony Components.."
+        sudo nala install -y --no-install-recommends plasma-dialer spacebar
+        echo "• Telephony components installed."
+        break
+    elif [[ "$TELEPHONY_CHOICE" == "2" ]]; then
+        echo "• Skipping telephony components."
+        break
+    else
+        echo "Invalid choice. Please enter 1 or 2."
+    fi
+done
 
 echo "[System] Enabling Power Profile Daemon.."
 sudo systemctl enable --now power-profiles-daemon
