@@ -4,11 +4,12 @@ clear
 
 echo "=============================================="
 echo "          Alternix Desktop Installer"
+echo"                 Debian Version"
 echo "=============================================="
 echo "--------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
-echo " Setup can take a while, be sure to have a cuppa & some good music!"
+echo " Setup can take a while, be sure to have a tasty beverage & some good music!"
 echo "--------------------------------------------------------------------"
 echo ""
 echo ""
