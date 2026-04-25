@@ -100,8 +100,8 @@ if command -v nala >/dev/null 2>&1; then
 fi
 
 echo "[System] Running nala update.."
-sudo nala -o Acquire::Check-Valid-Until=false update
-# sudo apt-get -o Acquire::Check-Valid-Until=false update
+# sudo nala -o Acquire::Check-Valid-Until=false update
+sudo apt-get -o Acquire::Check-Valid-Until=false update
 
 
 echo "[System] Installing XLibre.."
