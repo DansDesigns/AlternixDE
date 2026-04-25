@@ -112,10 +112,22 @@ curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xli
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
 # Use Devuan VERSION_CODENAME — maps to the matching Debian suite upstream
+# Maps Devuan codename → Debian codename for XLibre repo
+DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+case "$DEVUAN_CODENAME" in
+    excalibur)  DEBIAN_SUITE="trixie"   ;;
+    daedalus)   DEBIAN_SUITE="bookworm" ;;
+    chimaera)   DEBIAN_SUITE="bullseye" ;;
+    beowulf)    DEBIAN_SUITE="buster"   ;;
+    *)          DEBIAN_SUITE="$DEVUAN_CODENAME" ;;  # fallback / future releases
+esac
+
+echo "[System] Detected Devuan '$DEVUAN_CODENAME' → using Debian '$DEBIAN_SUITE' for XLibre repo"
+
 cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
 Types: deb deb-src
 URIs: https://xlibre-deb.github.io/debian/
-Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Suites: $DEBIAN_SUITE
 Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/xlibre-deb.asc
