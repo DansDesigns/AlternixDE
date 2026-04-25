@@ -58,9 +58,9 @@ chmod +x install-alternix_devuan.sh
 
 if it doesnt run, use:
 ```
-sed -i 's/\r$//' install-alternix.sh
-chmod +x install-alternix.sh
-./install-alternix.sh
+sed -i 's/\r$//' install-alternix_devuan.sh
+chmod +x install-alternix_devuan.sh
+./install-alternix_devuan.sh
 ```
 
 Follow the onscreen prompts..
@@ -83,6 +83,7 @@ Texas (PENDING)
 Louisiana (PENDING)
 Michigan (PENDING)
 Oregon (PENDING)
+Entire USA (Federal: Parents Decide Act (PENDING))
 Singapore 
 
 ```
