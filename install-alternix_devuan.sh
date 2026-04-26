@@ -140,7 +140,7 @@ sudo nala install -y \
     fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
-    python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
+    python3-venv picom qtile redshift samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
     elogind libpam-elogind \
     power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
@@ -152,17 +152,40 @@ sudo nala install -y \
 # NOTE: snapd is NOT available on Devuan (it depends on systemd).
 # If snap packages are needed, use flatpak equivalents instead.
 
-# ────────────────────────────────────────────────
-# Mobile Telephony Components (optional)
-# ────────────────────────────────────────────────
+
+echo ""
+echo "-------------------------------------------"
+echo "        Onboard Touchscreen Keyboard"
+echo "-------------------------------------------"
+ecbo " Install Onboard Touchscreen Keyboard?"
+echo ""
+echo "  1) Yes, install touchscreen keyboard"
+echo "  2) No, skip"
+echo ""
+
+while true; do
+    read -rp "Enter choice [1/2]: " KEYBOARD_CHOICE
+    if [[ "$KEYBOARD_CHOICE" == "1" ]]; then
+        echo "[System] Installing Onboard Touchscreen Keyboard.."
+        sudo nala install -y onboard
+        echo "• Onboard Keyboard installed."
+        break
+    elif [[ "$KEYBOARD_CHOICE" == "2" ]]; then
+        echo "• Skipping Touschscreen Keyboard."
+        break
+    else
+        echo "Invalid choice. Please enter 1 or 2."
+    fi
+done
+
 echo ""
 echo "-------------------------------------------"
 echo "        Mobile Telephony Components"
 echo "-------------------------------------------"
-echo " plasma-dialer & spacebar (KDE phone apps)"
+echo " Install plasma-dialer & spacebar? (KDE phone & messaging apps)"
 echo ""
-echo "  1) Install telephony components"
-echo "  2) Skip"
+echo "  1) Yes, install telephony components"
+echo "  2) No, skip"
 echo ""
 
 while true; do
