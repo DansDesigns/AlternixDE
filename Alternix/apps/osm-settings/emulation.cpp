@@ -237,7 +237,7 @@ bool EmulationPage::runCmdOk(const QString &cmd, QString &output)
     return (p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0);
 }
 
-// Deeper Waydroid info (hybrid container+session view)
+// Waydroid info — systemd services unavailable on Devuan, use process/CLI check instead
 QString EmulationPage::buildWaydroidInfoHtml()
 {
     QString hasWaydroid = runCmd("command -v waydroid >/dev/null 2>&1 && echo yes || echo no");
@@ -245,47 +245,20 @@ QString EmulationPage::buildWaydroidInfoHtml()
         return "Waydroid not installed or not in PATH.";
     }
 
-    QString version = runCmd("waydroid -V 2>/dev/null");
-    QString contState = runCmd("systemctl is-active waydroid-container.service 2>/dev/null");
-    QString sessState = runCmd("systemctl is-active waydroid-session.service 2>/dev/null");
-
-    contState = contState.trimmed();
-    sessState = sessState.trimmed();
-
-    auto colorForState = [](const QString &s) -> QString {
-        if (s == "active")   return "#7CFC00";
-        if (s == "inactive") return "#FF5555";
-        if (s.isEmpty() || s == "unknown") return "#CCCCCC";
-        return "#CCCCCC";
-    };
-
-    QString contColor = colorForState(contState);
-    QString sessColor = colorForState(sessState.isEmpty() ? "unknown" : sessState);
-
-    QString contText = contState.isEmpty() ? "unknown" : contState;
-    QString sessText = sessState.isEmpty() ? "unknown" : sessState;
-
-    // Android image version only if container is active
-    QString androidVer;
-    if (contState == "active") {
-        androidVer = runCmd("waydroid shell getprop ro.build.version.release 2>/dev/null");
-        if (androidVer.isEmpty())
-            androidVer = "unknown (container running, but property not available)";
-    } else {
-        androidVer = "offline (container not running)";
-    }
-
+    QString version  = runCmd("waydroid -V 2>/dev/null");
+    QString running  = runCmd("pgrep -f 'waydroid' >/dev/null 2>&1 && echo running || echo stopped");
     QString binderfs = runCmd("[ -e /dev/binderfs ] && echo present || echo missing");
 
+    QString runColor = (running.trimmed() == "running") ? "#7CFC00" : "#FF5555";
+
     QString html;
-    html  = QString("Installed: <b>yes</b><br>");
+    html  = "Installed: <b>yes</b><br>";
     html += "Version: " + version.toHtmlEscaped() + "<br>";
-    html += QString("Container: <span style='color:%1;'>%2</span><br>")
-            .arg(contColor, contText.toHtmlEscaped());
-    html += QString("Session: <span style='color:%1;'>%2</span><br>")
-            .arg(sessColor, sessText.toHtmlEscaped());
-    html += "Android image: " + androidVer.toHtmlEscaped() + "<br>";
-    html += "Binderfs: " + binderfs.toHtmlEscaped();
+    html += QString("Status: <span style='color:%1;'>%2</span><br>")
+            .arg(runColor, running.toHtmlEscaped());
+    html += "Binderfs: " + binderfs.toHtmlEscaped() + "<br>";
+    html += "<span style='color:#FFAA00;'>Note: Waydroid systemd services are not "
+            "available on Devuan. Use: waydroid session start/stop</span>";
 
     return html;
 }
@@ -336,47 +309,30 @@ void EmulationPage::refreshWine()
 // -----------------------------------------------------
 // Start/Stop actions
 // -----------------------------------------------------
-// Hybrid C: container + session
+// Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::startWaydroid()
 {
     QString out;
-    bool okCont = runCmdOk("systemctl start waydroid-container.service", out);
-    if (!okCont) {
-        okCont = runCmdOk("sudo systemctl start waydroid-container.service", out);
-    }
-
-    QString out2;
-    bool okSess = runCmdOk("waydroid session start", out2);
-
-    if (!okCont || !okSess) {
+    bool ok = runCmdOk("waydroid session start", out);
+    if (!ok) {
         QMessageBox::warning(
             this,
             "Waydroid start failed",
-            "Could not start Waydroid completely.\n\n"
-            "Container output:\n" + out + "\n\n"
-            "Session output:\n" + out2
+            "Could not start Waydroid session.\n\n" + out
         );
     }
 }
 
+// Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::stopWaydroid()
 {
-    QString outSess;
-    bool okSess = runCmdOk("waydroid session stop", outSess);
-
-    QString outCont;
-    bool okCont = runCmdOk("systemctl stop waydroid-container.service", outCont);
-    if (!okCont) {
-        okCont = runCmdOk("sudo systemctl stop waydroid-container.service", outCont);
-    }
-
-    if (!okCont || !okSess) {
+    QString out;
+    bool ok = runCmdOk("waydroid session stop", out);
+    if (!ok) {
         QMessageBox::warning(
             this,
             "Waydroid stop failed",
-            "Could not stop Waydroid completely.\n\n"
-            "Session output:\n" + outSess + "\n\n"
-            "Container output:\n" + outCont
+            "Could not stop Waydroid session.\n\n" + out
         );
     }
 }

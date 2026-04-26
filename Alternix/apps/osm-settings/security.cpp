@@ -642,19 +642,24 @@ QWidget *SecurityPage::makeLogsCardUfw()
 // -----------------------------------------------------
 bool SecurityPage::readSSH()
 {
-    QString st1 = runCmd("systemctl is-active ssh 2>/dev/null");
-    QString st2 = runCmd("systemctl is-active sshd 2>/dev/null");
+    // Devuan uses SysVinit — check via service status output
+    QString st1 = runCmd("service ssh status 2>/dev/null");
+    QString st2 = runCmd("service sshd status 2>/dev/null");
 
-    return (st1 == "active" || st2 == "active");
+    return (st1.contains("running") || st2.contains("running"));
 }
 
 void SecurityPage::setSSH(bool on)
 {
     QString out;
     if (on) {
-        runCmdOk("sudo systemctl enable --now ssh || sudo systemctl enable --now sshd", out);
+        // Enable at boot and start now (try both ssh and sshd service names)
+        runCmdOk("sudo update-rc.d ssh enable && sudo service ssh start 2>/dev/null || "
+                 "sudo update-rc.d sshd enable && sudo service sshd start 2>/dev/null", out);
     } else {
-        runCmdOk("sudo systemctl disable --now ssh || sudo systemctl disable --now sshd", out);
+        // Stop now and disable at boot
+        runCmdOk("sudo service ssh stop 2>/dev/null && sudo update-rc.d ssh disable 2>/dev/null || "
+                 "sudo service sshd stop 2>/dev/null && sudo update-rc.d sshd disable 2>/dev/null", out);
     }
 }
 
