@@ -272,17 +272,17 @@ private slots:
 
     void doSleep() {
         QProcess::startDetached("osm-lockd", QStringList());
-        QProcess::startDetached("pm-suspend", QStringList());
+        QProcess::startDetached("sudo pm-suspend", QStringList());
         close();
     }
 
     void doReboot() {
-        QProcess::startDetached("reboot", QStringList());
+        QProcess::startDetached("sudo reboot", QStringList());
         close();
     }
 
     void doPowerOff() {
-        QProcess::startDetached("poweroff", QStringList());
+        QProcess::startDetached("sudo poweroff", QStringList());
         close();
     }
 
