@@ -25,7 +25,7 @@ echo ""
 ALT_ROOT="$HOME/Alternix"
 
 if [ ! -d "$ALT_ROOT" ]; then
-    echo "ERROR: $ALT_ROOT not found. Please place install.sh inside ~/Alternix."
+    echo "ERROR: $ALT_ROOT not found. Please place install-alternix_devuan.sh inside ~/Alternix."
     exit 1
 fi
 
