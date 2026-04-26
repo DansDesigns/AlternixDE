@@ -61,17 +61,17 @@ def lock_on_resume():
 @hook.subscribe.startup
 def autostart():
     # Autostart Programs
+    subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['osm-notify'])
 #    subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
-    subprocess.Popen(['onboard'])
-    subprocess.Popen(['picom', '-b'])
+#    subprocess.Popen(['onboard'])
     subprocess.Popen(['osm-powerd'])
-    subprocess.Popen(['touchegg'])
+#    subprocess.Popen(['touchegg'])
     subprocess.Popen(["python3", "/usr/bin/rounded_corners"])
-    subprocess.Popen(['ulauncher'])
+#    subprocess.Popen(['ulauncher'])
 
     # Function to update the time
     def update_time():
