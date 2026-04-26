@@ -23,7 +23,7 @@
 #include <QLinearGradient>
 #include <QVector>
 #include <QDir>
-#include <QLockFile>
+#include <QSettings>
 #include <algorithm>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
@@ -149,7 +149,7 @@ public:
         lbl->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
         lbl->setMinimumHeight(60);
         lbl->setMaximumHeight(200);
-        lbl->setStyleSheet("color: white; font-size: 15pt; line-height: 110%;");
+        // Font size is inherited from QApplication font (set from UI settings config)
         v->addWidget(lbl);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
@@ -240,6 +240,17 @@ public:
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
+
+    // ───────── Read font size from UI settings
+    {
+        QString cfgPath = QDir::homePath() + "/.config/Alternix/osm-settings.conf";
+        QSettings cfg(cfgPath, QSettings::IniFormat);
+        int pt = cfg.value("UI/LauncherFontSize", 15).toInt();
+        pt = qBound(14, pt, 36);
+        QFont f = a.font();
+        f.setPointSize(pt);
+        a.setFont(f);
+    }
 
     // ───────── Single-instance guard using QLockFile
     QDir cacheDir(QDir::homePath() + "/Alternix/.cache");

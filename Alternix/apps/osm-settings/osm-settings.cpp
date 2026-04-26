@@ -16,7 +16,7 @@
 #include <QScrollBar>
 #include <QScreen>
 #include <QMouseEvent>
-#include <QScroller>
+#include <QSettings>
 #include <functional>
 
 static const int CARD_PADDING = 22;
@@ -165,7 +165,8 @@ private:
             {"📶", "Mobile Network", "Cellular, APN, Roaming", "mobile"},
             {"🔗", "Ethernet", eth, "ethernet"},
             {"📍", "Location", "GPS, Geolocation Services", "location"},
-            {"🖥️", "Display", "Brightness, Rotation", "display"},
+            {"🖥️", "Display", "Brightness, Sleep, Screen Info", "display"},
+            {"🎨", "UI", "Font Size, Wallpaper", "ui"},
             {"🔊", "Sounds", "Output, Volume Levels", "sound"},
             {"🔋", "Battery", "Battery Level & Charging", "battery"},
             {"💾", "Storage", "Space, Usage & Cleanup", "storage"},
@@ -346,6 +347,20 @@ private:
 // ------------------------------------------------------
 int main(int argc, char *argv[]) {
     QApplication a(argc, argv);
+
+    // Apply saved settings font size before any widgets are created
+    {
+        QString cfgPath = QDir::homePath() + "/.config/Alternix/osm-settings.conf";
+        QSettings cfg(cfgPath, QSettings::IniFormat);
+        // Default: 18pt on narrow screens (≤720px), 22pt otherwise
+        QScreen *scr = QGuiApplication::primaryScreen();
+        int defaultPt = (scr && scr->size().width() <= 720) ? 18 : 22;
+        int pt = cfg.value("UI/SettingsFontSize", defaultPt).toInt();
+        pt = qBound(14, pt, 36);
+        QFont f = a.font();
+        f.setPointSize(pt);
+        a.setFont(f);
+    }
 
     SettingsHub w;
     w.show();

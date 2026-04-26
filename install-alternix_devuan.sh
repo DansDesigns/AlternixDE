@@ -3,13 +3,13 @@ set -e
 clear
 
 echo "=============================================="
-echo "       Alternix Desktop Installer"
+echo "          Alternix Desktop Installer"
 echo "          (Devuan Edition)"
 echo "=============================================="
 echo "--------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
-echo " Setup can take a while, be sure to have a tasty beverage & some good music!"
+echo " Setup can take a while, be sure to have a cuppa & some good music!"
 echo "--------------------------------------------------------------------"
 echo ""
 echo ""
@@ -25,7 +25,7 @@ echo ""
 ALT_ROOT="$HOME/Alternix"
 
 if [ ! -d "$ALT_ROOT" ]; then
-    echo "ERROR: $ALT_ROOT not found. Please place install-alternix_devuan.sh inside ~/Alternix."
+    echo "ERROR: $ALT_ROOT not found. Please place install.sh inside ~/Alternix."
     exit 1
 fi
 
@@ -100,9 +100,7 @@ if command -v nala >/dev/null 2>&1; then
 fi
 
 echo "[System] Running nala update.."
-# sudo nala -o Acquire::Check-Valid-Until=false update
-sudo apt-get -o Acquire::Check-Valid-Until=false update
-
+sudo nala update
 
 echo "[System] Installing XLibre.."
 sudo nala install -y ca-certificates curl
@@ -112,27 +110,16 @@ curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xli
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
 # Use Devuan VERSION_CODENAME — maps to the matching Debian suite upstream
-# Maps Devuan codename → Debian codename for XLibre repo
-DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-case "$DEVUAN_CODENAME" in
-    excalibur)  DEBIAN_SUITE="trixie"   ;;
-    daedalus)   DEBIAN_SUITE="bookworm" ;;
-    chimaera)   DEBIAN_SUITE="bullseye" ;;
-    beowulf)    DEBIAN_SUITE="buster"   ;;
-    *)          DEBIAN_SUITE="$DEVUAN_CODENAME" ;;  # fallback / future releases
-esac
-
-echo "[System] Detected Devuan '$DEVUAN_CODENAME' → using Debian '$DEBIAN_SUITE' for XLibre repo"
-
 cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
 Types: deb deb-src
 URIs: https://xlibre-deb.github.io/debian/
-Suites: $DEBIAN_SUITE
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
 Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/xlibre-deb.asc
 EOF
 
+sudo nala update
 sudo nala install xlibre -y
 
 echo "[System] Installing Required Components.."
@@ -140,45 +127,20 @@ sudo nala install -y \
     fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
-    python3-venv picom qtile redshift samba xdotool alacritty sqlite3 fuse \
+    python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
-    elogind libpam-elogind onboard\
-    power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
+    elogind libpam-elogind \
+    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose \
     sysvinit-utils pm-utils
 
+# NOTE: snapd is NOT available on Devuan (it depends on systemd).
+# If snap packages are needed, use flatpak equivalents instead.
 
-echo "---------------------------------------------------------------"
-echo "NOTE: snapd is NOT available on Devuan (it depends on systemd),"
-echo "If snap packages are needed, use flatpak equivalents instead."
-echo "---------------------------------------------------------------"
-
-echo ""
-echo "-------------------------------------------"
-echo "        Mobile Telephony Components"
-echo "-------------------------------------------"
-echo " Install plasma-dialer & spacebar? (KDE phone & messaging apps)"
-echo ""
-echo "  1) Yes, install telephony components"
-echo "  2) No, skip"
-echo ""
-
-while true; do
-    read -rp "Enter choice [1/2]: " TELEPHONY_CHOICE
-    if [[ "$TELEPHONY_CHOICE" == "1" ]]; then
-        echo "[System] Installing Mobile Telephony Components.."
-        sudo nala install -y --no-install-recommends plasma-dialer spacebar
-        echo "• Telephony components installed."
-        break
-    elif [[ "$TELEPHONY_CHOICE" == "2" ]]; then
-        echo "• Skipping telephony components."
-        break
-    else
-        echo "Invalid choice. Please enter 1 or 2."
-    fi
-done
+echo "[System] Installing Mobile Telephony Components.."
+sudo nala install -y --no-install-recommends plasma-dialer spacebar
 
 
 # ────────────────────────────────────────────────
@@ -573,6 +535,10 @@ echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv system.so /usr/local/bin/
 
+echo "• Building ui.so..."
+g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv ui.so /usr/local/bin/
+
 
 # ────────────────────────────────────────────────
 #            Custom App Shortcuts & Icons
@@ -912,8 +878,8 @@ echo "- Installing rounded-corners..."
 cd "$HOME"
 git clone https://github.com/DansDesigns/rounded_corners
 cd rounded_corners
-chmod +x install_corners.sh
-sudo ./install_corners.sh
+chmod +x start_corners.sh
+sudo ./start_corners.sh
 
 
 # ────────────────────────────────────────────────

@@ -292,9 +292,6 @@ public:
         // Sleep Timeout (TimeoutPill)
         outerLay->addWidget(makeSleepTimeoutRow());
 
-        // Wallpaper (Change button)
-        outerLay->addWidget(makeWallpaperRow());
-
         // Adaptive Brightness (BoolPill)
         outerLay->addWidget(makeAdaptiveRow());
 
@@ -328,7 +325,6 @@ private:
     BoolPillToggle *m_adaptivePill   = nullptr;
     BoolPillToggle *m_bootPill       = nullptr;
     TimeoutPill    *m_timeoutPill    = nullptr;
-    QPushButton    *m_wallpaperBtn   = nullptr;
 
     // ------------- config helpers (local) -------------
     QString readCfg(const QString &k, const QString &def = QString()) const
@@ -406,33 +402,6 @@ private:
             int s = m_timeoutPill->state();
             writeCfg("display_sleep_timeout", QString::number(s));
             applyTimeoutState(s);
-        });
-
-        return card;
-    }
-
-    QWidget *makeWallpaperRow()
-    {
-        QFrame *card = new QFrame;
-        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
-        lay->setSpacing(20);
-
-        QLabel *lbl = new QLabel("Wallpaper");
-        lbl->setStyleSheet("font-size:30px; font-weight:bold;");
-        lay->addWidget(lbl);
-
-        lay->addStretch();
-
-        m_wallpaperBtn = new QPushButton("Change");
-        m_wallpaperBtn->setStyleSheet(altBtnBright());
-        m_wallpaperBtn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-        lay->addWidget(m_wallpaperBtn);
-
-        connect(m_wallpaperBtn, &QPushButton::clicked, this, []() {
-            QProcess::startDetached("osm-paper", QStringList());
         });
 
         return card;
