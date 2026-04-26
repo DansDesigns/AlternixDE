@@ -180,12 +180,6 @@ while true; do
     fi
 done
 
-# ── Enable power-profiles-daemon via SysVinit ──────────────────────────────
-echo "[System] Enabling Power Profile Daemon.."
-# Devuan uses SysVinit; services are managed with update-rc.d and service(8)
-sudo update-rc.d power-profiles-daemon enable
-sudo service power-profiles-daemon start || true
-
 
 # ────────────────────────────────────────────────
 #  Install Flatpaks
