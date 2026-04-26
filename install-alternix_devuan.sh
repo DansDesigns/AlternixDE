@@ -142,41 +142,18 @@ sudo nala install -y \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv picom qtile redshift samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
-    elogind libpam-elogind \
+    elogind libpam-elogind onboard\
     power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose \
     sysvinit-utils pm-utils
 
-# NOTE: snapd is NOT available on Devuan (it depends on systemd).
-# If snap packages are needed, use flatpak equivalents instead.
 
-
-echo ""
-echo "-------------------------------------------"
-echo "        Onboard Touchscreen Keyboard"
-echo "-------------------------------------------"
-ecbo " Install Onboard Touchscreen Keyboard?"
-echo ""
-echo "  1) Yes, install touchscreen keyboard"
-echo "  2) No, skip"
-echo ""
-
-while true; do
-    read -rp "Enter choice [1/2]: " KEYBOARD_CHOICE
-    if [[ "$KEYBOARD_CHOICE" == "1" ]]; then
-        echo "[System] Installing Onboard Touchscreen Keyboard.."
-        sudo nala install -y onboard
-        echo "• Onboard Keyboard installed."
-        break
-    elif [[ "$KEYBOARD_CHOICE" == "2" ]]; then
-        echo "• Skipping Touschscreen Keyboard."
-        break
-    else
-        echo "Invalid choice. Please enter 1 or 2."
-    fi
-done
+echo "---------------------------------------------------------------"
+echo "NOTE: snapd is NOT available on Devuan (it depends on systemd),"
+echo "If snap packages are needed, use flatpak equivalents instead."
+echo "---------------------------------------------------------------"
 
 echo ""
 echo "-------------------------------------------"
