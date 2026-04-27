@@ -868,6 +868,7 @@ sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 # ────────────────────────────────────────────────
 # 9. Cleanup Alternix folder
 # ────────────────────────────────────────────────
+
 echo " "
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
 cd ~
@@ -883,6 +884,10 @@ git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
 cd forest-dawn-grub-theme
 chmod +x install.sh
 sudo ./install.sh
+
+# Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
+sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
+
 sudo update-grub
 
 
