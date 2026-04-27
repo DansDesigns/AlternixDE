@@ -109,15 +109,18 @@ sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
-# Use the dedicated Devuan repo — uses Devuan codenames (excalibur, daedalus etc) directly
+# Use the dedicated Devuan repo — Devuan codenames used directly
 DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
 ARCH=$(dpkg --print-architecture)
-
 echo "[System] Installing XLibre for Devuan '$DEVUAN_CODENAME'..."
-
-printf 'Types: deb deb-src\nURIs: https://xlibre-deb.github.io/devuan/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/xlibre-deb.asc\n' \
-    "$DEVUAN_CODENAME" "$ARCH" \
-    | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
+sudo tee /etc/apt/sources.list.d/xlibre-deb.sources > /dev/null << XLIBRESRC
+Types: deb deb-src
+URIs: https://xlibre-deb.github.io/devuan/
+Suites: ${DEVUAN_CODENAME}
+Components: main
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/xlibre-deb.asc
+XLIBRESRC
 
 sudo nala update
 sudo nala install xlibre -y
