@@ -139,8 +139,8 @@ sudo nala install -y \
     podman podman-compose \
     sysvinit-utils pm-utils
 
-# NOTE: snapd is NOT available on Devuan (it depends on systemd).
-# If snap packages are needed, use flatpak equivalents instead.
+echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
+echo "If snap packages are needed, use flatpak equivalents instead."
 
 # ────────────────────────────────────────────────
 # Mobile Telephony Components (optional)
