@@ -109,22 +109,14 @@ sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
-# XLibre uses Debian suite names — map Devuan codename to Debian equivalent
+# Use the dedicated Devuan repo — uses Devuan codenames (excalibur, daedalus etc) directly
 DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-case "$DEVUAN_CODENAME" in
-    excalibur)  DEBIAN_SUITE="trixie"   ;;
-    daedalus)   DEBIAN_SUITE="bookworm" ;;
-    chimaera)   DEBIAN_SUITE="bullseye" ;;
-    beowulf)    DEBIAN_SUITE="buster"   ;;
-    *)          DEBIAN_SUITE="$DEVUAN_CODENAME" ;;
-esac
 ARCH=$(dpkg --print-architecture)
 
-echo "[System] Devuan '$DEVUAN_CODENAME' -> using Debian '$DEBIAN_SUITE' for XLibre repo"
+echo "[System] Installing XLibre for Devuan '$DEVUAN_CODENAME'..."
 
-# Use printf instead of heredoc to avoid inline subshell evaluation issues
-printf 'Types: deb deb-src\nURIs: https://xlibre-deb.github.io/debian/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/xlibre-deb.asc\n' \
-    "$DEBIAN_SUITE" "$ARCH" \
+printf 'Types: deb deb-src\nURIs: https://xlibre-deb.github.io/devuan/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/xlibre-deb.asc\n' \
+    "$DEVUAN_CODENAME" "$ARCH" \
     | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
 
 sudo nala update
