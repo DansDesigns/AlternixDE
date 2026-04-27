@@ -906,8 +906,8 @@ echo "- Installing rounded-corners..."
 cd "$HOME"
 git clone https://github.com/DansDesigns/rounded_corners
 cd rounded_corners
-chmod +x start_corners.sh
-sudo ./start_corners.sh
+chmod +x install_corners.sh
+sudo ./install_corners.sh
 
 
 # ────────────────────────────────────────────────
