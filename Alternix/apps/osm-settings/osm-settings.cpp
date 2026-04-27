@@ -16,6 +16,7 @@
 #include <QScrollBar>
 #include <QScreen>
 #include <QMouseEvent>
+#include <QScroller>
 #include <QSettings>
 #include <functional>
 
