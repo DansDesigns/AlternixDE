@@ -22,6 +22,12 @@ sleep 1
 echo ""
 #echo "No Settings or Configs to update..."
 echo ""
+echo ""
+echo "[Config] Updating Grub Entry.."
+
+# Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
+sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
+sudo update-grub
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
