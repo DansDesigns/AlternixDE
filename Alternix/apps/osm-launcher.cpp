@@ -23,8 +23,7 @@
 #include <QLinearGradient>
 #include <QVector>
 #include <QDir>
-#include <QSettings>
-#include <algorithm>
+#include <QLockFile>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
