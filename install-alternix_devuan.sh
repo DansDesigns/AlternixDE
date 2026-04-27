@@ -109,26 +109,23 @@ sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
-# XLibre uses Debian suite names, not Devuan names — map them explicitly
+# XLibre uses Debian suite names — map Devuan codename to Debian equivalent
 DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
 case "$DEVUAN_CODENAME" in
     excalibur)  DEBIAN_SUITE="trixie"   ;;
     daedalus)   DEBIAN_SUITE="bookworm" ;;
     chimaera)   DEBIAN_SUITE="bullseye" ;;
     beowulf)    DEBIAN_SUITE="buster"   ;;
-    *)          DEBIAN_SUITE="$DEVUAN_CODENAME" ;;  # fallback for future releases
+    *)          DEBIAN_SUITE="$DEVUAN_CODENAME" ;;
 esac
+ARCH=$(dpkg --print-architecture)
 
-echo "[System] Devuan '$DEVUAN_CODENAME' → using Debian '$DEBIAN_SUITE' for XLibre repo"
+echo "[System] Devuan '$DEVUAN_CODENAME' -> using Debian '$DEBIAN_SUITE' for XLibre repo"
 
-cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
-Types: deb deb-src
-URIs: https://xlibre-deb.github.io/debian/
-Suites: $DEBIAN_SUITE
-Components: main
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/xlibre-deb.asc
-EOF
+# Use printf instead of heredoc to avoid inline subshell evaluation issues
+printf 'Types: deb deb-src\nURIs: https://xlibre-deb.github.io/debian/\nSuites: %s\nComponents: main\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/xlibre-deb.asc\n' \
+    "$DEBIAN_SUITE" "$ARCH" \
+    | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
 
 sudo nala update
 sudo nala install xlibre -y
