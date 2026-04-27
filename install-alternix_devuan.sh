@@ -3,7 +3,7 @@ set -e
 clear
 
 echo "=============================================="
-echo "          Alternix Desktop Installer"
+echo "       Alternix Desktop Installer"
 echo "          (Devuan Edition)"
 echo "=============================================="
 echo "--------> Teaching Penguins to fly! <--------"
