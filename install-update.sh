@@ -111,6 +111,14 @@ echo "• Updating Version Number..."
 sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 
 
+echo "• Updating udev rules..."
+# Symlink qtile binary to where udev rules expect it
+sudo mkdir -p /usr/lib/udev
+sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
+sudo udevadm control --reload-rules
+
+echo "• Updating usermod access..."
+sudo usermod -aG video,input "$TARGET_USER"
 #=========================================
 # Un-Comment to Update the App Launcher:
 
