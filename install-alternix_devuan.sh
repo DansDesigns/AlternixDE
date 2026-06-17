@@ -310,6 +310,11 @@ source "$HOME/.qtile_venv/bin/activate"
 echo "[3/10] Installing Python pip dependencies..."
 pip3 install qtile qtile-extras mypy
 
+# Symlink qtile binary to where udev rules expect it
+sudo mkdir -p /usr/lib/udev
+sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
+sudo udevadm control --reload-rules
+
 # ────────────────────────────────────────────────
 # 3. Configure xinitrc autostart
 # ────────────────────────────────────────────────
@@ -864,6 +869,7 @@ echo "Setting NOPASSWD for $TARGET_USER..."
 echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-nopasswd >/dev/null
 sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 
+sudo usermod -aG video,input "$TARGET_USER"
 
 # ────────────────────────────────────────────────
 # 9. Cleanup Alternix folder
