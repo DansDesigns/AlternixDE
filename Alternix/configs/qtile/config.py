@@ -51,11 +51,11 @@ bg = '28282899'
 # Lock on DPMS wake (screen turning back on)
 @hook.subscribe.screen_change
 def lock_on_screen_wake(event, screen):
-    subprocess.Popen(["systemctl", "restart", "osm-lockscreen.service"])
+    subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
 
 @hook.subscribe.resume
 def lock_on_resume():
-    subprocess.Popen(["systemctl", "restart", "osm-lockscreen.service"])
+    subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
 
 
 @hook.subscribe.startup
