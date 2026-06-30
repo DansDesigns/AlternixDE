@@ -14,6 +14,7 @@
 #include <QListWidget>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QCoreApplication>
 #include <functional>
 
 // =========================================================
@@ -39,10 +40,10 @@ static QPushButton* smallBtn(const QString &txt) {
     return b;
 }
 
-static QString runCmd(const QString &cmd) {
+static QString runCmd(const QString &cmd, int timeoutMs = 5000) {
     QProcess p;
     p.start("bash", {"-c", cmd});
-    p.waitForFinished(5000);  // FIX: bumped from 1500ms — rescan needs more time
+    p.waitForFinished(timeoutMs);  // FIX: bumped from 1500ms — rescan needs more time
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
 }
 
@@ -208,15 +209,25 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // Also fetch IN_USE and SSID together so we can mark the active network.
     auto doScan = [ssidList]() {
         ssidList->clear();
+        ssidList->addItem("Scanning…");
+        // FIX: repaint immediately so the placeholder is visible while the
+        // blocking nmcli call below runs (can take a few seconds).
+        QCoreApplication::processEvents();
 
-        // Fire a rescan (non-blocking is fine; nmcli device wifi list will
-        // wait internally for the scan results via NetworkManager).
-        runCmd("nmcli device wifi rescan 2>/dev/null || true");
+        // FIX (root cause of the empty list): the previous version fired
+        // "nmcli device wifi rescan" asynchronously and then *immediately*
+        // read the list with --rescan no. The rescan command returns as
+        // soon as the request is sent to NetworkManager, NOT once the scan
+        // has actually completed, so the following "list" call almost
+        // always read the old (often empty, e.g. on first launch) cache.
+        //
+        // nmcli's own "--rescan yes" (the default) handles this correctly:
+        // it triggers a scan via D-Bus and BLOCKS until fresh results are
+        // available before printing them, so we get real data every time.
+        // Give it a generous timeout since a Wi-Fi scan can take 5-10s.
+        QString raw = runCmd("nmcli -t -f IN_USE,SSID device wifi list --rescan yes", 15000);
 
-        // FIX: Use multivalue -f to get IN_USE flag alongside SSID.
-        //      --rescan no stops a second implicit rescan from duplicating work.
-        //      In terse (-t) mode fields are colon-separated: IN_USE:SSID
-        QString raw = runCmd("nmcli -t -f IN_USE,SSID device wifi list --rescan no");
+        ssidList->clear();
         QStringList lines = raw.split("\n");
 
         for (QString line : lines) {
@@ -330,7 +341,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         if (!item) return;
 
         QString ssid = item->text();
-        if (ssid.contains("No networks")) return;
+        if (ssid.contains("No networks") || ssid.contains("Scanning")) return;
 
         // FIX: Strip the ✔ prefix added to the active network before connecting.
         if (ssid.startsWith("✔  "))
