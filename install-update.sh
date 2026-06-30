@@ -74,7 +74,7 @@ else
     echo "• No installers folder found, skipping."
 fi
 
-
+cd "$ALT_ROOT/Alternix/apps/osm-settings"
 echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv wifi.so /usr/local/bin/
