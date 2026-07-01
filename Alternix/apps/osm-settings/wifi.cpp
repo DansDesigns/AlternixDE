@@ -224,11 +224,34 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         // nmcli's own "--rescan yes" (the default) handles this correctly:
         // it triggers a scan via D-Bus and BLOCKS until fresh results are
         // available before printing them, so we get real data every time.
-        // Give it a generous timeout since a Wi-Fi scan can take 5-10s.
-        QString raw = runCmd("nmcli -t -f IN_USE,SSID device wifi list --rescan yes", 15000);
+        //
+        // FIX: runCmd() only ever captured stdout and threw stderr away, so
+        // if nmcli was failing (missing polkit auth, radio off, no wifi
+        // device, nmcli not installed, etc.) the list just silently went
+        // empty with no clue why. Use a raw QProcess here and read stdout
+        // and stderr SEPARATELY so a real failure is shown, not hidden.
+        QProcess proc;
+        proc.start("bash", {"-c", "nmcli -t -f IN_USE,SSID device wifi list --rescan yes"});
+        proc.waitForFinished(15000);  // a real scan can take 5-10s
+        QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+        QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
 
         ssidList->clear();
-        QStringList lines = raw.split("\n");
+
+        if (out.isEmpty()) {
+            // Surface the actual reason instead of a generic "no networks".
+            QString diag = !err.isEmpty()
+                ? err
+                : "nmcli returned nothing (check: wifi radio on? "
+                  "wifi device present? nmcli installed?)";
+            QListWidgetItem *item = new QListWidgetItem(diag);
+            item->setForeground(QColor("#CC6666"));
+            item->setFlags(item->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
+            ssidList->addItem(item);
+            return;
+        }
+
+        QStringList lines = out.split("\n");
 
         for (QString line : lines) {
             line = line.trimmed();
@@ -254,8 +277,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
             ssidList->addItem(item);
         }
 
-        if (ssidList->count() == 0)
-            ssidList->addItem("No networks found");
+        if (ssidList->count() == 0) {
+            QListWidgetItem *none = new QListWidgetItem("No networks found");
+            none->setFlags(none->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
+            ssidList->addItem(none);
+        }
     };
 
     // Update IP/DNS/Mask/Gateway info
