@@ -36,6 +36,9 @@
 #include <QPropertyAnimation>
 #include <QEasingCurve>
 #include <QFileDialog>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <functional>
 
 class FileBrowser : public QWidget {
 public:
@@ -192,12 +195,12 @@ public:
 
         // Path dropdown button
         pathBtn = new QPushButton(currentPath);
-        pathBtn->setStyleSheet(
+        pathBtnNormalStyle =
             "QPushButton { background:#333; color:#DDDDDD; border-radius:8px; "
             "padding:10px; font-size:15px; text-align:left; }"
             "QPushButton:hover { background:#444; }"
-            "QPushButton:pressed { background:#222; }"
-        );
+            "QPushButton:pressed { background:#222; }";
+        pathBtn->setStyleSheet(pathBtnNormalStyle);
         pathBtn->setMinimumHeight(50);
         pathBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         pathRow->addWidget(pathBtn, 1);
@@ -606,6 +609,7 @@ private:
     QString gridSelectedStyle;
     QString currentNormalStyle;
     QString currentSelectedStyle;
+    QString pathBtnNormalStyle;
 
     QHash<QString, QPushButton*> pathToButton;
     QSet<QString> selectedPaths;
@@ -1191,33 +1195,82 @@ private:
         return QStringList(selectedPaths.begin(), selectedPaths.end());
     }
 
-    static bool copyRecursively(const QString &src, const QString &dst) {
+    // Build an ordered list of copy steps (dirs created before their contents,
+    // so each step can run independently and still produce a valid tree).
+    void planCopy(const QString &src, const QString &dst, QVector<std::function<void()>> &steps) {
         QFileInfo s(src);
         if (s.isDir()) {
-            if (!QDir().mkpath(dst)) return false;
+            steps.append([dst]() { QDir().mkpath(dst); });
             QDir d(src);
             QFileInfoList list = d.entryInfoList(QDir::NoDotAndDotDot|QDir::AllEntries);
-            for (const QFileInfo &f : list) {
-                if (!copyRecursively(f.absoluteFilePath(),
-                                     dst + "/" + f.fileName()))
-                    return false;
-            }
-            return true;
+            for (const QFileInfo &f : list)
+                planCopy(f.absoluteFilePath(), dst + "/" + f.fileName(), steps);
+        } else {
+            steps.append([src, dst]() { QFile::copy(src, dst); });
         }
-        return QFile::copy(src,dst);
     }
 
-    static bool removeRecursively(const QString &path) {
+    // Build a post-order list of delete steps (children removed before the
+    // directory that contains them, so rmdir succeeds once we reach it).
+    void planDelete(const QString &path, QVector<std::function<void()>> &steps) {
         QFileInfo info(path);
         if (info.isDir() && !info.isSymLink()) {
             QDir d(path);
             QFileInfoList list = d.entryInfoList(QDir::NoDotAndDotDot|QDir::AllEntries);
             for (const QFileInfo &f : list)
-                if (!removeRecursively(f.absoluteFilePath()))
-                    return false;
-            return d.rmdir(path);
+                planDelete(f.absoluteFilePath(), steps);
+            steps.append([path]() { QDir().rmdir(path); });
+        } else {
+            steps.append([path]() { QFile::remove(path); });
         }
-        return QFile::remove(path);
+    }
+
+    // Turns the address bar into a fill gauge: a gradient split at `frac`
+    // sweeps across it left-to-right, with a live label + percentage.
+    void setPathBarProgress(double frac, const QString &label) {
+        frac = qBound(0.0, frac, 1.0);
+        QString stop = QString::number(frac, 'f', 4);
+        pathBtn->setText(QString("%1  (%2%)").arg(label).arg(int(frac * 100)));
+        pathBtn->setStyleSheet(QString(
+            "QPushButton { "
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+            "stop:0 #2a82da, stop:%1 #2a82da, stop:%1 #333333, stop:1 #333333); "
+            "color:white; border-radius:8px; padding:10px; font-size:15px; text-align:left; }"
+        ).arg(stop));
+    }
+
+    void resetPathBar() {
+        pathBtn->setStyleSheet(pathBtnNormalStyle);
+        pathBtn->setText(currentPath);
+        pathBtn->setEnabled(true);
+    }
+
+    // Runs a flat list of file-operation steps one at a time, animating the
+    // address bar as progress and keeping the UI responsive throughout.
+    void runWithProgress(const QString &label, const QVector<std::function<void()>> &steps) {
+        if (steps.isEmpty()) return;
+
+        pathBtn->setEnabled(false);
+        int total = steps.size();
+
+        setPathBarProgress(0.0, label);
+        QCoreApplication::processEvents();
+
+        QElapsedTimer throttle;
+        throttle.start();
+
+        for (int i = 0; i < total; ++i) {
+            steps[i]();
+
+            bool last = (i == total - 1);
+            if (last || throttle.elapsed() >= 40) {
+                setPathBarProgress(double(i + 1) / double(total), label);
+                QCoreApplication::processEvents();
+                throttle.restart();
+            }
+        }
+
+        resetPathBar();
     }
 
     void copySelection() {
@@ -1240,6 +1293,10 @@ private:
         QDir d(currentPath);
         if (!d.exists()) return;
 
+        // Resolve every destination name up front so collisions are settled
+        // before any work starts (renaming mid-operation would shift names).
+        struct PasteItem { QString src, dst; };
+        QVector<PasteItem> items;
         for (const QString &src : clipboardPaths) {
             QFileInfo info(src);
             QString base = info.fileName();
@@ -1250,14 +1307,23 @@ private:
                 dst = d.absoluteFilePath(base + "_" + QString::number(i));
                 ++i;
             }
-
-            if (clipboardCutMode)
-                QFile::rename(src,dst);
-            else
-                copyRecursively(src,dst);
+            items.append({src, dst});
         }
 
-        if (clipboardCutMode) {
+        bool cutMode = clipboardCutMode;
+        QVector<std::function<void()>> steps;
+        for (const PasteItem &it : items) {
+            if (cutMode) {
+                QString src = it.src, dst = it.dst;
+                steps.append([src, dst]() { QFile::rename(src, dst); });
+            } else {
+                planCopy(it.src, it.dst, steps);
+            }
+        }
+
+        runWithProgress(cutMode ? "Moving files…" : "Copying files…", steps);
+
+        if (cutMode) {
             clipboardPaths.clear();
             clipboardCutMode = false;
         }
@@ -1298,10 +1364,14 @@ private:
         QDir d(dest.trimmed());
         if (!d.exists()) return;
 
+        QVector<std::function<void()>> steps;
         for (const QString &src : selectedPathList()) {
             QFileInfo info(src);
-            QFile::rename(src, d.absoluteFilePath(info.fileName()));
+            QString dstPath = d.absoluteFilePath(info.fileName());
+            steps.append([src, dstPath]() { QFile::rename(src, dstPath); });
         }
+
+        runWithProgress("Moving files…", steps);
 
         listDirectory(currentPath);
         clearSelection(true);
@@ -1309,8 +1379,12 @@ private:
     }
 
     void deleteSelection() {
+        QVector<std::function<void()>> steps;
         for (const QString &p : selectedPathList())
-            removeRecursively(p);
+            planDelete(p, steps);
+
+        runWithProgress("Deleting files…", steps);
+
         listDirectory(currentPath);
         clearSelection(true);
         updateActionButtons();
