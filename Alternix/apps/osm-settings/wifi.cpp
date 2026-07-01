@@ -400,9 +400,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // Currently handles the "unmanaged by NetworkManager" case common on
     // Devuan/Debian: [ifupdown] managed=false in NetworkManager.conf, and/or
     // the wifi interface being claimed by /etc/network/interfaces. Any file
-    // it edits is backed up first (.bak-<timestamp>). Requires root to
-    // actually change anything — if it isn't, that's reported plainly
-    // rather than failing silently.
+    // it edits is backed up first (.bak-<timestamp>).
+    // The script runs via 'sudo -n' since editing /etc requires root —
+    // Alternix installs set NOPASSWD sudo for the user, so no prompt appears.
+    // -n makes sudo fail immediately (reported) instead of hanging on a
+    // password prompt if NOPASSWD isn't configured.
     QObject::connect(fixBtn, &QPushButton::clicked, [ssidList, doScan, updateInfo, updateWifiState]() mutable {
         QString iface = getWifiIface();
 
@@ -415,26 +417,39 @@ set -u
 IFACE="$1"
 TS=$(date +%Y%m%d-%H%M%S)
 NMCONF=/etc/NetworkManager/NetworkManager.conf
-IFACES=/etc/network/interfaces
 CHANGED=0
+FAILED=0
 
 # 1. NetworkManager.conf: [ifupdown] managed=false -> managed=true
+# Only report FIXED if the edit actually took effect.
 if [ -f "$NMCONF" ] && grep -Pzo '\[ifupdown\][^\[]*managed=false' "$NMCONF" >/dev/null 2>&1; then
-    cp "$NMCONF" "$NMCONF.bak-$TS"
-    sed -i '/\[ifupdown\]/,/^\[/{s/^managed=false/managed=true/}' "$NMCONF"
-    echo "FIXED: NetworkManager.conf managed=false -> managed=true (backup: $NMCONF.bak-$TS)"
-    CHANGED=1
+    if cp "$NMCONF" "$NMCONF.bak-$TS" \
+       && sed -i '/\[ifupdown\]/,/^\[/{s/^managed=false/managed=true/}' "$NMCONF" \
+       && ! grep -Pzo '\[ifupdown\][^\[]*managed=false' "$NMCONF" >/dev/null 2>&1; then
+        echo "FIXED: NetworkManager.conf managed=false -> managed=true"
+        echo "       (backup: $NMCONF.bak-$TS)"
+        CHANGED=1
+    else
+        echo "FAILED: could not edit $NMCONF (need root?)"
+        FAILED=1
+    fi
 fi
 
 # 2. /etc/network/interfaces and interfaces.d/* claiming this iface
 if [ -n "$IFACE" ]; then
-    for cf in "$IFACES" /etc/network/interfaces.d/*; do
+    for cf in /etc/network/interfaces /etc/network/interfaces.d/*; do
         [ -f "$cf" ] || continue
-        if grep -qE "\b$IFACE\b" "$cf"; then
-            cp "$cf" "$cf.bak-$TS"
-            sed -i -E "s/^([^#].*\b$IFACE\b.*)$/#\1/" "$cf"
-            echo "FIXED: commented $IFACE entries in $cf (backup: $cf.bak-$TS)"
-            CHANGED=1
+        if grep -qE "^[^#]*\b$IFACE\b" "$cf"; then
+            if cp "$cf" "$cf.bak-$TS" \
+               && sed -i -E "s/^([^#].*\b$IFACE\b.*)$/#\1/" "$cf" \
+               && ! grep -qE "^[^#]*\b$IFACE\b" "$cf"; then
+                echo "FIXED: commented $IFACE entries in $cf"
+                echo "       (backup: $cf.bak-$TS)"
+                CHANGED=1
+            else
+                echo "FAILED: could not edit $cf (need root?)"
+                FAILED=1
+            fi
         fi
     done
 fi
@@ -448,33 +463,46 @@ if [ "$CHANGED" -eq 1 ]; then
     else
         echo "WARN: could not find a way to restart NetworkManager"
     fi
-    sleep 2
+
+    # The device can take a few seconds to be claimed after restart —
+    # poll for up to 10s rather than sampling once too early.
+    if [ -n "$IFACE" ]; then
+        for i in $(seq 1 10); do
+            STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$IFACE" '$1==d{print $2}')
+            [ -n "$STATE" ] && [ "$STATE" != "unmanaged" ] && break
+            sleep 1
+        done
+        echo "STATE: $IFACE is now '${STATE:-unknown}'"
+    fi
+elif [ -n "$IFACE" ]; then
+    STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$IFACE" '$1==d{print $2}')
+    echo "STATE: $IFACE is '${STATE:-unknown}'"
 fi
 
-if [ -n "$IFACE" ]; then
-    STATE=$(nmcli -t -f DEVICE,STATE device status | awk -F: -v d="$IFACE" '$1==d{print $2}')
-    echo "STATE: $IFACE is now '$STATE'"
-fi
-
-if [ "$CHANGED" -eq 0 ]; then
+if [ "$CHANGED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
     echo "No known auto-fixable issue found."
 fi
 )SCRIPT";
             f.close();
         }
 
+        // Run as root via sudo -n (non-interactive). Alternix sets NOPASSWD
+        // for the user, so this succeeds silently; if it can't, sudo exits
+        // immediately with an error we can show instead of hanging on a
+        // password prompt inside a GUI app with no terminal.
         QProcess proc;
-        proc.start("bash", {scriptPath, iface});
-        proc.waitForFinished(15000);
+        proc.start("sudo", {"-n", "bash", scriptPath, iface});
+        proc.waitForFinished(30000);
         QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
         QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
 
         QString report = out.isEmpty() ? "No output from fix script." : out;
         if (!err.isEmpty())
             report += "\n\n[stderr]\n" + err;
-        if (report.contains("Permission denied"))
-            report += "\n\nTip: this app likely needs to run as root to "
-                      "edit NetworkManager.conf / restart the service.";
+        if (err.contains("password is required") || err.contains("a password is required"))
+            report += "\n\nTip: passwordless sudo isn't configured for this "
+                      "user, so the fix can't edit /etc. Run the app as root "
+                      "or add a NOPASSWD sudoers rule.";
 
         QMessageBox::information(nullptr, "Wi-Fi Fix", report);
 
