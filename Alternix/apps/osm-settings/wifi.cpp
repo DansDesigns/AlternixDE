@@ -231,7 +231,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         // empty with no clue why. Use a raw QProcess here and read stdout
         // and stderr SEPARATELY so a real failure is shown, not hidden.
         QProcess proc;
-        proc.start("bash", {"-c", "nmcli -t -f IN_USE,SSID device wifi list --rescan yes"});
+        proc.start("bash", {"-c", "nmcli -t -f IN-USE,SSID device wifi list --rescan yes"});
         proc.waitForFinished(15000);  // a real scan can take 5-10s
         QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
         QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
