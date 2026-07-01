@@ -29,7 +29,7 @@ echo "[Config] Updating Grub Entry.."
 sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 sudo update-grub
 
-sudo nala install xserver-xorg-input-synaptics xserver-xlibre-input-libinput -y
+sudo nala install xserver-xlibre-input-libinput -y
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
@@ -118,7 +118,7 @@ sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
 sudo udevadm control --reload-rules
 
 echo "• Updating usermod access..."
-sudo usermod -aG video,input "$TARGET_USER"
+sudo usermod -aG video,input "$USER"
 #=========================================
 # Un-Comment to Update the App Launcher:
 
