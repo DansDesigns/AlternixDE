@@ -214,9 +214,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
 
     QPushButton *toggleWifi = smallBtn("On");
     QPushButton *refresh    = smallBtn("Refresh");
+    QPushButton *fixBtn     = smallBtn("Fix");
 
     switchRow->addWidget(toggleWifi);
     switchRow->addWidget(refresh);
+    switchRow->addWidget(fixBtn);
 
     root->addLayout(switchRow);
 
@@ -389,6 +391,95 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         else
             runCmd("nmcli radio wifi on");
 
+        updateWifiState();
+    });
+
+    // -----------------------------------------------------
+    // FIX BUTTON — scan for known issues and repair them
+    // -----------------------------------------------------
+    // Currently handles the "unmanaged by NetworkManager" case common on
+    // Devuan/Debian: [ifupdown] managed=false in NetworkManager.conf, and/or
+    // the wifi interface being claimed by /etc/network/interfaces. Any file
+    // it edits is backed up first (.bak-<timestamp>). Requires root to
+    // actually change anything — if it isn't, that's reported plainly
+    // rather than failing silently.
+    QObject::connect(fixBtn, &QPushButton::clicked, [ssidList, doScan, updateInfo, updateWifiState]() mutable {
+        QString iface = getWifiIface();
+
+        const QString scriptPath = "/tmp/alternix_wifi_fix.sh";
+        QFile f(scriptPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QTextStream ts(&f);
+            ts << R"SCRIPT(#!/bin/bash
+set -u
+IFACE="$1"
+TS=$(date +%Y%m%d-%H%M%S)
+NMCONF=/etc/NetworkManager/NetworkManager.conf
+IFACES=/etc/network/interfaces
+CHANGED=0
+
+# 1. NetworkManager.conf: [ifupdown] managed=false -> managed=true
+if [ -f "$NMCONF" ] && grep -Pzo '\[ifupdown\][^\[]*managed=false' "$NMCONF" >/dev/null 2>&1; then
+    cp "$NMCONF" "$NMCONF.bak-$TS"
+    sed -i '/\[ifupdown\]/,/^\[/{s/^managed=false/managed=true/}' "$NMCONF"
+    echo "FIXED: NetworkManager.conf managed=false -> managed=true (backup: $NMCONF.bak-$TS)"
+    CHANGED=1
+fi
+
+# 2. /etc/network/interfaces and interfaces.d/* claiming this iface
+if [ -n "$IFACE" ]; then
+    for cf in "$IFACES" /etc/network/interfaces.d/*; do
+        [ -f "$cf" ] || continue
+        if grep -qE "\b$IFACE\b" "$cf"; then
+            cp "$cf" "$cf.bak-$TS"
+            sed -i -E "s/^([^#].*\b$IFACE\b.*)$/#\1/" "$cf"
+            echo "FIXED: commented $IFACE entries in $cf (backup: $cf.bak-$TS)"
+            CHANGED=1
+        fi
+    done
+fi
+
+# 3. restart NetworkManager if we changed anything
+if [ "$CHANGED" -eq 1 ]; then
+    if [ -x /etc/init.d/network-manager ]; then
+        /etc/init.d/network-manager restart >/dev/null 2>&1 && echo "RESTARTED: network-manager"
+    elif command -v systemctl >/dev/null 2>&1; then
+        systemctl restart NetworkManager >/dev/null 2>&1 && echo "RESTARTED: NetworkManager"
+    else
+        echo "WARN: could not find a way to restart NetworkManager"
+    fi
+    sleep 2
+fi
+
+if [ -n "$IFACE" ]; then
+    STATE=$(nmcli -t -f DEVICE,STATE device status | awk -F: -v d="$IFACE" '$1==d{print $2}')
+    echo "STATE: $IFACE is now '$STATE'"
+fi
+
+if [ "$CHANGED" -eq 0 ]; then
+    echo "No known auto-fixable issue found."
+fi
+)SCRIPT";
+            f.close();
+        }
+
+        QProcess proc;
+        proc.start("bash", {scriptPath, iface});
+        proc.waitForFinished(15000);
+        QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
+        QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+
+        QString report = out.isEmpty() ? "No output from fix script." : out;
+        if (!err.isEmpty())
+            report += "\n\n[stderr]\n" + err;
+        if (report.contains("Permission denied"))
+            report += "\n\nTip: this app likely needs to run as root to "
+                      "edit NetworkManager.conf / restart the service.";
+
+        QMessageBox::information(nullptr, "Wi-Fi Fix", report);
+
+        doScan();
+        updateInfo();
         updateWifiState();
     });
 
