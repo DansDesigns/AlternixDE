@@ -132,7 +132,7 @@ sudo nala install -y \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils flatpak libevdev-dev \
-    elogind libpam-elogind xserver-xorg-input-synaptics \
+    elogind libpam-elogind xserver-xlibre-input-libinput \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \

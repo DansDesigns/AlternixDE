@@ -77,8 +77,9 @@ fi
 cd "$ALT_ROOT/Alternix/apps/osm-settings"
 echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
+echo "• Installing Updated wifi.so..."
 sudo mv wifi.so /usr/local/bin/
-
+echo "• Update & Install Complete."
 echo ""
 #===========================================================
 # Updater:
