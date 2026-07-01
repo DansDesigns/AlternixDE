@@ -480,6 +480,33 @@ if [ "$CURSTATE" = "unavailable" ] || [ "$CHANGED" -eq 1 ]; then
         echo "      (sudo apt install rfkill)"
     fi
 
+    # Leftover ifupdown-style wpa_supplicant: an instance bound directly to
+    # the interface (-i IFACE) holds exclusive control of it, so NM's own
+    # D-Bus supplicant can't attach and the device sits at 'unavailable'.
+    # These get spawned at boot by wpa-conf lines in /etc/network/interfaces
+    # and survive even after that config is commented out. Kill only the
+    # interface-bound instance — the D-Bus one (-u) must stay running.
+    if [ -n "$IFACE" ]; then
+        for pid in $(pgrep -x wpa_supplicant 2>/dev/null); do
+            CMDLINE=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+            # Only the interface-bound instance (-i IFACE); never the -u D-Bus one.
+            case "$CMDLINE" in
+                *"-i $IFACE"*|*"-i$IFACE"*)
+                    if kill "$pid" 2>/dev/null; then
+                        rm -f "/run/wpa_supplicant.$IFACE.pid"
+                        echo "FIXED: killed leftover per-interface wpa_supplicant"
+                        echo "       (PID $pid was holding $IFACE, blocking NM)"
+                        CHANGED=1
+                        sleep 1
+                    else
+                        echo "FAILED: could not kill per-interface wpa_supplicant (PID $pid)"
+                        FAILED=1
+                    fi
+                    ;;
+            esac
+        done
+    fi
+
     # wpa_supplicant: NetworkManager cannot use ANY wifi device without a
     # running supplicant — without one, every wifi device sits permanently
     # at 'unavailable'. On systemd it gets D-Bus-activated automatically;
