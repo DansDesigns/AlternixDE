@@ -16,6 +16,9 @@
 #include <QSpacerItem>
 #include <QLineEdit>
 #include <QTimer>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <functional>
 
 // ---------------------------------------------------------
 // Helpers
@@ -45,6 +48,37 @@ static QString runCommandBT(const QString &program, const QStringList &args)
     QProcess proc;
     proc.start(program, args);
     proc.waitForFinished();
+    QString out = proc.readAllStandardOutput();
+    out += proc.readAllStandardError();
+    return out;
+}
+
+// Spinner frames (Braille pattern rotation — present in DejaVu Sans).
+static const char* const SPIN_FRAMES_BT[] = {
+    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
+};
+static const int SPIN_COUNT_BT = 10;
+
+// Runs a command while calling tick() roughly every 80ms so the UI can
+// animate during the wait (pair/connect can take 10s+).
+static QString runCommandBTAnimated(const QString &program, const QStringList &args,
+                                    int timeoutMs, const std::function<void()> &tick)
+{
+    QProcess proc;
+    proc.start(program, args);
+
+    QElapsedTimer t;
+    t.start();
+    while (!proc.waitForFinished(80)) {
+        if (t.elapsed() > timeoutMs) {
+            proc.kill();
+            proc.waitForFinished(500);
+            break;
+        }
+        if (tick) tick();
+        QCoreApplication::processEvents();
+    }
+
     QString out = proc.readAllStandardOutput();
     out += proc.readAllStandardError();
     return out;
@@ -305,6 +339,15 @@ public:
             }
         });
 
+        // Spinner animation timer for the Scan button (the scan itself is a
+        // detached process, so a plain timer drives the frames).
+        scanSpinTimer = new QTimer(this);
+        scanSpinTimer->setInterval(90);
+        connect(scanSpinTimer, &QTimer::timeout, this, [this]() {
+            spinFrame = (spinFrame + 1) % SPIN_COUNT_BT;
+            scanButton->setText(QString::fromUtf8(SPIN_FRAMES_BT[spinFrame]));
+        });
+
         // Connections
         connect(powerButton, &QPushButton::clicked, this, &BluetoothPage::togglePower);
 
@@ -325,6 +368,12 @@ public:
             // Start non-blocking 60s scan
             startBluetoothScanLong();
 
+            // Spinner on the Scan button for the whole scan window —
+            // replaces the modal "scanning for 60 seconds" popup.
+            spinFrame = 0;
+            scanButton->setText(QString::fromUtf8(SPIN_FRAMES_BT[0]));
+            scanSpinTimer->start();
+
             // Start periodic refresh while scanning
             scanRefreshTimer->start();
             refreshDevices(); // immediate refresh at start
@@ -332,12 +381,11 @@ public:
             // After 60s, re-enable and final refresh
             QTimer::singleShot(60000, this, [this]() {
                 scanInProgress = false;
+                scanSpinTimer->stop();
+                scanButton->setText("Scan");
                 scanButton->setEnabled(true);
                 refreshDevices();
             });
-
-            QMessageBox::information(this, "Bluetooth Scan",
-                                     "Scanning for devices for 60 seconds...");
         });
 
         connect(visibleButton, &QPushButton::clicked, this, &BluetoothPage::toggleVisible);
@@ -348,13 +396,16 @@ public:
             }
         });
 
-        // Initial state
-        bluetoothPowered   = isBluetoothPowered();
-        discoverable       = isBluetoothDiscoverable();
-
-        updatePowerButton();
-        updateVisibleButton();
-        refreshDevices();
+        // Initial state — deferred so the page paints immediately; the
+        // bluetoothctl queries (show, devices, per-device info) previously
+        // all ran before the page could appear.
+        QTimer::singleShot(50, this, [this]() {
+            bluetoothPowered = isBluetoothPowered();
+            discoverable     = isBluetoothDiscoverable();
+            updatePowerButton();
+            updateVisibleButton();
+            refreshDevices();
+        });
     }
 
 private:
@@ -369,7 +420,10 @@ private:
     bool bluetoothPowered = false;
     bool discoverable = false;
     bool scanInProgress = false;
+    bool connectInProgress = false;
     QTimer *scanRefreshTimer = nullptr;
+    QTimer *scanSpinTimer = nullptr;
+    int spinFrame = 0;
 
     void clearDeviceList()
     {
@@ -391,6 +445,11 @@ private:
 
     void refreshDevices()
     {
+        // Never rebuild the list while a connect is animating a row button —
+        // the scan-refresh timer still fires during pumped waits, and
+        // clearing the list would delete the button mid-animation.
+        if (connectInProgress) return;
+
         clearDeviceList();
 
         QList<BluetoothDevice> devices = getBluetoothDevices();
@@ -471,8 +530,8 @@ private:
                 });
             }
 
-            connect(deviceButton, &QPushButton::clicked, this, [this, dev]() {
-                onDeviceClicked(dev);
+            connect(deviceButton, &QPushButton::clicked, this, [this, dev, deviceButton]() {
+                onDeviceClicked(dev, deviceButton);
             });
 
             deviceLayout->insertWidget(deviceLayout->count() - 1, rowFrame);
@@ -597,7 +656,7 @@ private:
         }
     }
 
-    void onDeviceClicked(const BluetoothDevice &dev)
+    void onDeviceClicked(const BluetoothDevice &dev, QPushButton *deviceButton)
     {
         if (!bluetoothPowered) {
             QMessageBox::warning(this, "Bluetooth Off",
@@ -641,7 +700,25 @@ private:
             ).arg(dev.mac);
         }
 
-        QString out = runCommandBT("bash", {"-c", script});
+        // Lock controls while connecting — the animated wait pumps events,
+        // so without this another row / scan / power tap could re-enter.
+        setControlsEnabled(false);
+        connectInProgress = true;
+
+        int frame = 0;
+        deviceButton->setText(
+            QString::fromUtf8(SPIN_FRAMES_BT[0]) + "  Connecting to " + dev.name + "…");
+        QCoreApplication::processEvents();
+
+        QString out = runCommandBTAnimated("bash", {"-c", script}, 30000, [&]() {
+            frame = (frame + 1) % SPIN_COUNT_BT;
+            deviceButton->setText(
+                QString::fromUtf8(SPIN_FRAMES_BT[frame]) + "  Connecting to " + dev.name + "…");
+        });
+
+        deviceButton->setText(dev.name);
+        connectInProgress = false;
+        setControlsEnabled(true);
 
         // Simple error detection – if bluetoothctl reports "Failed" or "Error", show it
         if (out.contains("Failed", Qt::CaseInsensitive) ||
@@ -665,6 +742,16 @@ private:
         QTimer::singleShot(1500, this, [this]() {
             refreshDevices();
         });
+    }
+
+    // Enable/disable the page's interactive controls as a group (used while
+    // a connect is in progress and events are being pumped).
+    void setControlsEnabled(bool en)
+    {
+        powerButton->setEnabled(en);
+        scanButton->setEnabled(en && !scanInProgress);
+        visibleButton->setEnabled(en);
+        if (deviceContainer) deviceContainer->setEnabled(en);
     }
 
     void onDisconnectDevice(const BluetoothDevice &dev)

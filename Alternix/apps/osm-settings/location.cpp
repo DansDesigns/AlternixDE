@@ -14,6 +14,9 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <functional>
 
 // ---------------------------------------------------------
 // Helpers (button + command runner)
@@ -38,11 +41,37 @@ static QPushButton* smallBtnBT(const QString &txt) {
     return b;
 }
 
+// Spinner frames (Braille pattern rotation — present in DejaVu Sans).
+static const char* const SPIN_FRAMES_LOC[] = {
+    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
+};
+static const int SPIN_COUNT_LOC = 10;
+
+// Optional UI tick, called during command waits. The manual Refresh handler
+// points this at its button-spinner update so the animation runs through
+// the entire backend chain (mmcli → gpsd → AT) without threading each
+// backend individually.
+static std::function<void()> g_locTick;
+
 static QString runCommand(const QString &program, const QStringList &args)
 {
     QProcess proc;
     proc.start(program, args);
-    proc.waitForFinished();
+
+    // Sliced wait: keeps the UI responsive (gpspipe -w -n 10 alone can take
+    // several seconds) and lets g_locTick animate during it.
+    QElapsedTimer t;
+    t.start();
+    while (!proc.waitForFinished(80)) {
+        if (t.elapsed() > 15000) {
+            proc.kill();
+            proc.waitForFinished(500);
+            break;
+        }
+        if (g_locTick) g_locTick();
+        QCoreApplication::processEvents();
+    }
+
     QString out = proc.readAllStandardOutput();
     out += proc.readAllStandardError();
     return out;
@@ -404,7 +433,7 @@ public:
         connect(powerButton, &QPushButton::clicked,
                 this, &LocationPage::togglePower);
         connect(refreshButton, &QPushButton::clicked,
-                this, &LocationPage::refreshDataOnce);
+                this, &LocationPage::manualRefresh);
         connect(backButton, &QPushButton::clicked, this, [this]() {
             if (stackedWidget) {
                 stackedWidget->setCurrentIndex(0);
@@ -433,7 +462,10 @@ public:
         if (locationEnabled) {
             if (!stackedWidget || stackedWidget->currentWidget() == this)
                 refreshTimer->start();
-            refreshDataOnce();
+            // Deferred: the backend chain (mmcli → gpspipe waiting on 10
+            // messages → AT probe) previously ran before the page could
+            // paint, freezing the hub for seconds. Show the page first.
+            QTimer::singleShot(50, this, [this]() { refreshDataOnce(); });
         } else {
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
@@ -540,12 +572,20 @@ private:
             return;
         }
 
+        // Reentrancy guard: the sliced command waits pump events, so the 2s
+        // auto-refresh timer can fire again mid-refresh; without this the
+        // refreshes would nest and stack up.
+        static bool busy = false;
+        if (busy) return;
+        busy = true;
+
         LocationInfo info = getBestLocation();
 
         if (!info.error.isEmpty()) {
             gpsLabel->setText(info.error);
             satLabel->setText(info.error);
             mapLabel->setText("Mini map of local area\n\n" + info.error);
+            busy = false;
             return;
         }
 
@@ -593,6 +633,29 @@ private:
         mapText += "\n(Use external map app for full view)";
 
         mapLabel->setText(mapText);
+        busy = false;
+    }
+
+    // Manual refresh (button press): animates the Refresh button spinner
+    // through the whole backend chain, unlike the silent auto-refresh.
+    void manualRefresh()
+    {
+        if (!locationEnabled || !refreshButton->isEnabled()) return;
+
+        refreshButton->setEnabled(false);
+        int frame = 0;
+        refreshButton->setText(QString::fromUtf8(SPIN_FRAMES_LOC[0]));
+
+        g_locTick = [this, &frame]() {
+            frame = (frame + 1) % SPIN_COUNT_LOC;
+            refreshButton->setText(QString::fromUtf8(SPIN_FRAMES_LOC[frame]));
+        };
+
+        refreshDataOnce();
+
+        g_locTick = nullptr;
+        refreshButton->setText("Refresh");
+        refreshButton->setEnabled(true);
     }
 };
 

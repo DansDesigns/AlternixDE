@@ -16,6 +16,7 @@
 #include <QMessageBox>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QTimer>
 #include <functional>
 
 // =========================================================
@@ -404,10 +405,17 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         }
     };
 
-    // Initial population
-    doScan();
-    updateInfo();
-    updateWifiState();
+    // Initial population — deferred so make_page() returns immediately and
+    // the page becomes visible at once. Previously the full nmcli scan ran
+    // synchronously here, freezing the settings hub for several seconds
+    // before the page even appeared. The 50ms delay lets the first paint
+    // happen, then the animated scan takes over. ssidList is the context
+    // object so the callback is dropped if the page is destroyed first.
+    QTimer::singleShot(50, ssidList, [doScan, updateInfo, updateWifiState]() mutable {
+        updateWifiState();
+        updateInfo();
+        doScan();
+    });
 
     // -----------------------------------------------------
     // BUTTON CONNECTIONS
