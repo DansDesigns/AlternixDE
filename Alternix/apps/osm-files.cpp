@@ -36,6 +36,7 @@
 #include <QPropertyAnimation>
 #include <QEasingCurve>
 #include <QFileDialog>
+#include <QMessageBox>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <functional>
@@ -610,6 +611,7 @@ private:
     QString currentNormalStyle;
     QString currentSelectedStyle;
     QString pathBtnNormalStyle;
+    QElapsedTimer planThrottle;
 
     QHash<QString, QPushButton*> pathToButton;
     QSet<QString> selectedPaths;
@@ -1195,34 +1197,59 @@ private:
         return QStringList(selectedPaths.begin(), selectedPaths.end());
     }
 
+    // Live feedback during the planning tree-walk. On big folders the scan
+    // itself is the slow phase (before any step runs), and previously it
+    // showed nothing — making a folder delete look like a silent freeze.
+    void planTick(const QString &label, int count) {
+        if (planThrottle.elapsed() < 50) return;
+        pathBtn->setText(QString("%1  (scanning… %2 items)").arg(label).arg(count));
+        QCoreApplication::processEvents();
+        planThrottle.restart();
+    }
+
     // Build an ordered list of copy steps (dirs created before their contents,
     // so each step can run independently and still produce a valid tree).
-    void planCopy(const QString &src, const QString &dst, QVector<std::function<void()>> &steps) {
+    void planCopy(const QString &src, const QString &dst,
+                  QVector<std::function<void()>> &steps, const QString &label) {
         QFileInfo s(src);
         if (s.isDir()) {
             steps.append([dst]() { QDir().mkpath(dst); });
+            planTick(label, steps.size());
             QDir d(src);
             QFileInfoList list = d.entryInfoList(QDir::NoDotAndDotDot|QDir::AllEntries);
             for (const QFileInfo &f : list)
-                planCopy(f.absoluteFilePath(), dst + "/" + f.fileName(), steps);
+                planCopy(f.absoluteFilePath(), dst + "/" + f.fileName(), steps, label);
         } else {
             steps.append([src, dst]() { QFile::copy(src, dst); });
+            planTick(label, steps.size());
         }
     }
 
     // Build a post-order list of delete steps (children removed before the
     // directory that contains them, so rmdir succeeds once we reach it).
-    void planDelete(const QString &path, QVector<std::function<void()>> &steps) {
+    void planDelete(const QString &path,
+                    QVector<std::function<void()>> &steps, const QString &label) {
         QFileInfo info(path);
         if (info.isDir() && !info.isSymLink()) {
             QDir d(path);
             QFileInfoList list = d.entryInfoList(QDir::NoDotAndDotDot|QDir::AllEntries);
             for (const QFileInfo &f : list)
-                planDelete(f.absoluteFilePath(), steps);
+                planDelete(f.absoluteFilePath(), steps, label);
             steps.append([path]() { QDir().rmdir(path); });
         } else {
             steps.append([path]() { QFile::remove(path); });
         }
+        planTick(label, steps.size());
+    }
+
+    // Puts the path bar into busy mode before planning begins, so there is
+    // visible feedback from the very first moment of the operation.
+    void beginPathBarBusy(const QString &label) {
+        pathBtn->setEnabled(false);
+        setPathBarProgress(0.0, label);
+        pathBtn->setText(label + "  (scanning…)");
+        QCoreApplication::processEvents();
+        planThrottle.start();
     }
 
     // Turns the address bar into a fill gauge: a gradient split at `frac`
@@ -1247,10 +1274,13 @@ private:
 
     // Runs a flat list of file-operation steps one at a time, animating the
     // address bar as progress and keeping the UI responsive throughout.
+    // Call beginPathBarBusy(label) before planning, then this to execute.
     void runWithProgress(const QString &label, const QVector<std::function<void()>> &steps) {
-        if (steps.isEmpty()) return;
+        if (steps.isEmpty()) {
+            resetPathBar();
+            return;
+        }
 
-        pathBtn->setEnabled(false);
         int total = steps.size();
 
         setPathBarProgress(0.0, label);
@@ -1311,17 +1341,21 @@ private:
         }
 
         bool cutMode = clipboardCutMode;
+        QString label = cutMode ? "Moving files…" : "Copying files…";
+
+        beginPathBarBusy(label);
+
         QVector<std::function<void()>> steps;
         for (const PasteItem &it : items) {
             if (cutMode) {
                 QString src = it.src, dst = it.dst;
                 steps.append([src, dst]() { QFile::rename(src, dst); });
             } else {
-                planCopy(it.src, it.dst, steps);
+                planCopy(it.src, it.dst, steps, label);
             }
         }
 
-        runWithProgress(cutMode ? "Moving files…" : "Copying files…", steps);
+        runWithProgress(label, steps);
 
         if (cutMode) {
             clipboardPaths.clear();
@@ -1364,6 +1398,8 @@ private:
         QDir d(dest.trimmed());
         if (!d.exists()) return;
 
+        beginPathBarBusy("Moving files…");
+
         QVector<std::function<void()>> steps;
         for (const QString &src : selectedPathList()) {
             QFileInfo info(src);
@@ -1379,9 +1415,60 @@ private:
     }
 
     void deleteSelection() {
+        QStringList sel = selectedPathList();
+        if (sel.isEmpty()) return;
+
+        // Confirmation prompt — deletes are permanent (no trash), so make
+        // it clear what's about to go before doing anything.
+        int files = 0, dirs = 0;
+        for (const QString &p : sel) {
+            if (QFileInfo(p).isDir()) dirs++;
+            else files++;
+        }
+
+        QString what;
+        if (sel.size() == 1) {
+            what = "\"" + QFileInfo(sel.first()).fileName() + "\"";
+        } else {
+            QStringList parts;
+            if (files > 0) parts << QString("%1 file%2").arg(files).arg(files == 1 ? "" : "s");
+            if (dirs  > 0) parts << QString("%1 folder%2").arg(dirs).arg(dirs == 1 ? "" : "s");
+            what = parts.join(" and ");
+        }
+        if (dirs > 0)
+            what += "\n(folders are deleted with everything inside them)";
+
+        QMessageBox confirm(this);
+        confirm.setWindowTitle("Delete");
+        confirm.setText("Permanently delete " + what + "?\n\nThis cannot be undone.");
+        confirm.setIcon(QMessageBox::Warning);
+        confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+        confirm.setDefaultButton(QMessageBox::Cancel);
+        confirm.setStyleSheet(
+            "QMessageBox { background:#282828; }"
+            "QMessageBox QLabel { color:white; font-size:18px; }"
+            "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
+            "padding:8px 24px; font-size:16px; min-width:80px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#444; }"
+        );
+        if (QPushButton *yes = qobject_cast<QPushButton*>(confirm.button(QMessageBox::Yes))) {
+            yes->setText("Delete");
+            yes->setStyleSheet(
+                "QPushButton { background:#aa2222; color:white; border:none; border-radius:8px; "
+                "padding:8px 24px; font-size:16px; min-width:80px; }"
+                "QPushButton:hover { background:#cc3333; }"
+                "QPushButton:pressed { background:#881818; }"
+            );
+        }
+
+        if (confirm.exec() != QMessageBox::Yes) return;
+
+        beginPathBarBusy("Deleting files…");
+
         QVector<std::function<void()>> steps;
-        for (const QString &p : selectedPathList())
-            planDelete(p, steps);
+        for (const QString &p : sel)
+            planDelete(p, steps, "Deleting files…");
 
         runWithProgress("Deleting files…", steps);
 

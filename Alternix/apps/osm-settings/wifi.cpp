@@ -454,7 +454,55 @@ if [ -n "$IFACE" ]; then
     done
 fi
 
-# 3. restart NetworkManager if we changed anything
+# 3. Device 'unavailable' — the state after unmanaged is fixed but the
+# radio/interface still can't be used. Handle the common causes:
+#    - rfkill soft block (leftover from ifupdown days or Fn-key toggle)
+#    - interface administratively DOWN
+#    - NM wifi radio switched off
+CURSTATE=""
+if [ -n "$IFACE" ]; then
+    CURSTATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$IFACE" '$1==d{print $2}')
+fi
+
+if [ "$CURSTATE" = "unavailable" ] || [ "$CHANGED" -eq 1 ]; then
+    if command -v rfkill >/dev/null 2>&1; then
+        if rfkill list 2>/dev/null | grep -A1 -i wireless | grep -qi "Soft blocked: yes"; then
+            rfkill unblock wifi \
+                && echo "FIXED: rfkill soft block removed from wifi radio" \
+                && CHANGED=1
+        fi
+        if rfkill list 2>/dev/null | grep -A2 -i wireless | grep -qi "Hard blocked: yes"; then
+            echo "BLOCKED: wifi radio is HARD blocked — this is a physical"
+            echo "         switch or BIOS setting; software cannot unblock it."
+        fi
+    fi
+
+    if [ -n "$IFACE" ] && command -v ip >/dev/null 2>&1; then
+        if ip link show "$IFACE" 2>/dev/null | grep -q "state DOWN"; then
+            ip link set "$IFACE" up \
+                && echo "FIXED: brought interface $IFACE up" \
+                && CHANGED=1
+        fi
+    fi
+
+    if [ "$(nmcli radio wifi 2>/dev/null)" = "disabled" ]; then
+        nmcli radio wifi on \
+            && echo "FIXED: NetworkManager wifi radio switched on" \
+            && CHANGED=1
+    fi
+
+    # Firmware problems also present as 'unavailable' — surface any kernel
+    # complaints so it's obvious if this is a missing-firmware situation.
+    if command -v dmesg >/dev/null 2>&1; then
+        FWERR=$(dmesg 2>/dev/null | grep -iE "firmware.*(fail|error|missing|not found)" | grep -i -m1 -E "wifi|wlan|iwl|ath|rtl|brcm|mt7")
+        if [ -n "$FWERR" ]; then
+            echo "FIRMWARE: kernel reports a wifi firmware problem:"
+            echo "  $FWERR"
+        fi
+    fi
+fi
+
+# 4. restart NetworkManager if config files were changed
 if [ "$CHANGED" -eq 1 ]; then
     if [ -x /etc/init.d/network-manager ]; then
         /etc/init.d/network-manager restart >/dev/null 2>&1 && echo "RESTARTED: network-manager"
@@ -469,10 +517,16 @@ if [ "$CHANGED" -eq 1 ]; then
     if [ -n "$IFACE" ]; then
         for i in $(seq 1 10); do
             STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$IFACE" '$1==d{print $2}')
-            [ -n "$STATE" ] && [ "$STATE" != "unmanaged" ] && break
+            [ -n "$STATE" ] && [ "$STATE" != "unmanaged" ] && [ "$STATE" != "unavailable" ] && break
             sleep 1
         done
         echo "STATE: $IFACE is now '${STATE:-unknown}'"
+        case "${STATE:-}" in
+            disconnected) echo "READY: device is working — hit Refresh to scan for networks." ;;
+            connected)    echo "READY: device is connected." ;;
+            unavailable)  echo "STILL UNAVAILABLE: check rfkill hard block or firmware messages above." ;;
+            unmanaged)    echo "STILL UNMANAGED: config change may not have taken effect." ;;
+        esac
     fi
 elif [ -n "$IFACE" ]; then
     STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null | awk -F: -v d="$IFACE" '$1==d{print $2}')
