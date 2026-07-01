@@ -80,6 +80,7 @@ g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 echo "• Installing Updated wifi.so..."
 sudo mv wifi.so /usr/local/bin/
 
+cd "$ALT_ROOT/Alternix/apps"
 echo "• Building osm-files..."
 g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
