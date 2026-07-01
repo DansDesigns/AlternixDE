@@ -126,8 +126,9 @@ while true; do
         sleep 1
         echo "Parsing un-passable Conduits..."
         echo ""
-        sleep 1
+	echo "Removing temp directory..."
         rm -rf "$TMP_DIR"
+        echo ""
         echo ""
         echo "Press 1 to [Reboot]"
         echo "Press 2 to Continue"
