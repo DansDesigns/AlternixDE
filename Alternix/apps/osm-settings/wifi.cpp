@@ -15,6 +15,7 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <functional>
 
 // =========================================================
@@ -44,6 +45,38 @@ static QString runCmd(const QString &cmd, int timeoutMs = 5000) {
     QProcess p;
     p.start("bash", {"-c", cmd});
     p.waitForFinished(timeoutMs);  // FIX: bumped from 1500ms — rescan needs more time
+    return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+}
+
+// Spinner frames (Braille pattern rotation — present in DejaVu Sans).
+static const char* const SPIN_FRAMES[] = {
+    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
+};
+static const int SPIN_COUNT = 10;
+
+// Runs a command while calling tick() roughly every 80ms, so the UI can
+// animate during what would otherwise be a frozen blocking wait. Same
+// synchronous flow as runCmd — just sliced. Returns stdout; stderr goes
+// to errOut if provided.
+static QString runCmdAnimated(const QString &cmd, int timeoutMs,
+                              const std::function<void()> &tick,
+                              QString *errOut = nullptr) {
+    QProcess p;
+    p.start("bash", {"-c", cmd});
+
+    QElapsedTimer t;
+    t.start();
+    while (!p.waitForFinished(80)) {
+        if (t.elapsed() > timeoutMs) {
+            p.kill();
+            p.waitForFinished(500);
+            break;
+        }
+        if (tick) tick();
+        QCoreApplication::processEvents();
+    }
+
+    if (errOut) *errOut = QString::fromUtf8(p.readAllStandardError()).trimmed();
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
 }
 
@@ -228,34 +261,36 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
 
     // FIX: Trigger a real radio rescan before listing SSIDs.
     // Also fetch IN_USE and SSID together so we can mark the active network.
-    auto doScan = [ssidList]() {
+    // extraTick (optional) receives the spinner frame index so callers can
+    // animate their own widget (e.g. the Refresh button) in sync.
+    auto doScan = [ssidList](const std::function<void(int)> &extraTick = {}) {
+        // Reentrancy guard: processEvents during the animated wait means the
+        // user can tap Refresh mid-scan; a nested scan would clear the list
+        // and leave the outer scan holding a dangling placeholder pointer.
+        static bool scanning = false;
+        if (scanning) return;
+        scanning = true;
+
         ssidList->clear();
-        ssidList->addItem("Scanning…");
-        // FIX: repaint immediately so the placeholder is visible while the
-        // blocking nmcli call below runs (can take a few seconds).
+        QListWidgetItem *ph = new QListWidgetItem(
+            QString::fromUtf8(SPIN_FRAMES[0]) + "  Scanning…");
+        ph->setFlags(ph->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
+        ssidList->addItem(ph);
         QCoreApplication::processEvents();
 
-        // FIX (root cause of the empty list): the previous version fired
-        // "nmcli device wifi rescan" asynchronously and then *immediately*
-        // read the list with --rescan no. The rescan command returns as
-        // soon as the request is sent to NetworkManager, NOT once the scan
-        // has actually completed, so the following "list" call almost
-        // always read the old (often empty, e.g. on first launch) cache.
-        //
-        // nmcli's own "--rescan yes" (the default) handles this correctly:
-        // it triggers a scan via D-Bus and BLOCKS until fresh results are
-        // available before printing them, so we get real data every time.
-        //
-        // FIX: runCmd() only ever captured stdout and threw stderr away, so
-        // if nmcli was failing (missing polkit auth, radio off, no wifi
-        // device, nmcli not installed, etc.) the list just silently went
-        // empty with no clue why. Use a raw QProcess here and read stdout
-        // and stderr SEPARATELY so a real failure is shown, not hidden.
-        QProcess proc;
-        proc.start("bash", {"-c", "nmcli -t -f IN-USE,SSID device wifi list --rescan yes"});
-        proc.waitForFinished(15000);  // a real scan can take 5-10s
-        QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-        QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        // nmcli's "--rescan yes" triggers a scan via D-Bus and blocks until
+        // fresh results are available — the wait is sliced by runCmdAnimated
+        // so the spinner keeps moving the whole time.
+        int frame = 0;
+        QString err;
+        QString out = runCmdAnimated(
+            "nmcli -t -f IN-USE,SSID device wifi list --rescan yes", 15000,
+            [&]() {
+                frame = (frame + 1) % SPIN_COUNT;
+                ph->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Scanning…");
+                if (extraTick) extraTick(frame);
+            },
+            &err);
 
         ssidList->clear();
 
@@ -283,6 +318,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
             item->setForeground(QColor("#CC6666"));
             item->setFlags(item->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
             ssidList->addItem(item);
+            scanning = false;
             return;
         }
 
@@ -317,6 +353,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
             none->setFlags(none->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
             ssidList->addItem(none);
         }
+        scanning = false;
     };
 
     // Update IP/DNS/Mask/Gateway info
@@ -376,9 +413,19 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // BUTTON CONNECTIONS
     // -----------------------------------------------------
 
-    // Refresh = rescan SSIDs + refresh info + wifi state
-    QObject::connect(refresh, &QPushButton::clicked, [doScan, updateInfo, updateWifiState]() mutable {
-        doScan();
+    // Refresh = rescan SSIDs + refresh info + wifi state.
+    // The button itself spins in sync with the list spinner while running.
+    QObject::connect(refresh, &QPushButton::clicked, [refresh, doScan, updateInfo, updateWifiState]() mutable {
+        if (!refresh->isEnabled()) return;
+        refresh->setEnabled(false);
+        refresh->setText(QString::fromUtf8(SPIN_FRAMES[0]));
+
+        doScan([refresh](int frame) {
+            refresh->setText(QString::fromUtf8(SPIN_FRAMES[frame]));
+        });
+
+        refresh->setText("Refresh");
+        refresh->setEnabled(true);
         updateInfo();
         updateWifiState();
     });
@@ -641,7 +688,8 @@ fi
     // -----------------------------------------------------
     // CONNECT ON SSID CLICK
     // -----------------------------------------------------
-    QObject::connect(ssidList, &QListWidget::itemClicked, [ssidList]() {
+    QObject::connect(ssidList, &QListWidget::itemClicked,
+                     [ssidList, refresh, toggleWifi, fixBtn, doScan, updateInfo, updateWifiState]() mutable {
         QListWidgetItem *item = ssidList->currentItem();
         if (!item) return;
 
@@ -661,11 +709,48 @@ fi
         );
         if (!ok || pass.isEmpty()) return;
 
+        // FIX: escape single quotes — an SSID or password containing '
+        // previously broke the shell command entirely.
+        QString ssidEsc = ssid;  ssidEsc.replace("'", "'\\''");
+        QString passEsc = pass;  passEsc.replace("'", "'\\''");
         QString cmd = QString("nmcli device wifi connect '%1' password '%2'")
-                        .arg(ssid).arg(pass);
+                        .arg(ssidEsc).arg(passEsc);
 
-        QString out = runCmd(cmd);
-        QMessageBox::information(nullptr, "Wi-Fi", out.isEmpty() ? "Done." : out);
+        // Lock the controls while connecting: the animated wait pumps
+        // events, and a mid-connect Refresh would clear the list and
+        // dangle the item pointer being animated below.
+        ssidList->setEnabled(false);
+        refresh->setEnabled(false);
+        toggleWifi->setEnabled(false);
+        fixBtn->setEnabled(false);
+
+        QString original = item->text();
+        int frame = 0;
+        item->setText(QString::fromUtf8(SPIN_FRAMES[0]) + "  Connecting to " + ssid + "…");
+        QCoreApplication::processEvents();
+
+        // FIX: 45s timeout — the old 5s runCmd cut off real associations,
+        // which commonly take 10-20s (scan + auth + DHCP).
+        QString err;
+        QString out = runCmdAnimated(cmd, 45000, [&]() {
+            frame = (frame + 1) % SPIN_COUNT;
+            item->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Connecting to " + ssid + "…");
+        }, &err);
+
+        item->setText(original);
+        ssidList->setEnabled(true);
+        refresh->setEnabled(true);
+        toggleWifi->setEnabled(true);
+        fixBtn->setEnabled(true);
+
+        QString msg = !out.isEmpty() ? out : err;
+        QMessageBox::information(nullptr, "Wi-Fi", msg.isEmpty() ? "Done." : msg);
+
+        // Refresh so the ✔ lands on the newly joined network and the
+        // IP/DNS/gateway info reflects the new connection.
+        doScan();
+        updateInfo();
+        updateWifiState();
     });
 
     // -----------------------------------------------------
