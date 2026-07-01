@@ -475,6 +475,42 @@ if [ "$CURSTATE" = "unavailable" ] || [ "$CHANGED" -eq 1 ]; then
             echo "BLOCKED: wifi radio is HARD blocked — this is a physical"
             echo "         switch or BIOS setting; software cannot unblock it."
         fi
+    else
+        echo "NOTE: rfkill not installed — cannot check or clear radio blocks."
+        echo "      (sudo apt install rfkill)"
+    fi
+
+    # wpa_supplicant: NetworkManager cannot use ANY wifi device without a
+    # running supplicant — without one, every wifi device sits permanently
+    # at 'unavailable'. On systemd it gets D-Bus-activated automatically;
+    # on Devuan/sysvinit that path is often broken, so start it ourselves.
+    if ! pgrep -x wpa_supplicant >/dev/null 2>&1; then
+        if command -v wpa_supplicant >/dev/null 2>&1; then
+            STARTED=0
+            if [ -x /etc/init.d/wpasupplicant ]; then
+                /etc/init.d/wpasupplicant start >/dev/null 2>&1
+            fi
+            pgrep -x wpa_supplicant >/dev/null 2>&1 && STARTED=1
+            if [ "$STARTED" -eq 0 ]; then
+                # -u = D-Bus interface mode (what NM talks to), -B = daemonize
+                wpa_supplicant -u -B >/dev/null 2>&1
+                sleep 1
+                pgrep -x wpa_supplicant >/dev/null 2>&1 && STARTED=1
+            fi
+            if [ "$STARTED" -eq 1 ]; then
+                echo "FIXED: wpa_supplicant was not running — started it"
+                echo "       (NM cannot use wifi devices without it)"
+                CHANGED=1
+            else
+                echo "FAILED: wpa_supplicant is installed but would not start"
+                FAILED=1
+            fi
+        else
+            echo "MISSING: wpasupplicant is not installed. NetworkManager"
+            echo "         cannot use wifi without it. Connect ethernet and:"
+            echo "         sudo apt install wpasupplicant"
+            FAILED=1
+        fi
     fi
 
     if [ -n "$IFACE" ] && command -v ip >/dev/null 2>&1; then
@@ -493,12 +529,22 @@ if [ "$CURSTATE" = "unavailable" ] || [ "$CHANGED" -eq 1 ]; then
 
     # Firmware problems also present as 'unavailable' — surface any kernel
     # complaints so it's obvious if this is a missing-firmware situation.
+    # (dmesg works here: this script runs as root via sudo.)
     if command -v dmesg >/dev/null 2>&1; then
-        FWERR=$(dmesg 2>/dev/null | grep -iE "firmware.*(fail|error|missing|not found)" | grep -i -m1 -E "wifi|wlan|iwl|ath|rtl|brcm|mt7")
+        FWERR=$(dmesg 2>/dev/null | grep -iE "(firmware|microcode).*(fail|error|missing|not found|timed out)|Direct firmware load.*failed" | grep -i -m1 -E "wifi|wlan|iwl|ath|rtl|brcm|mt7|80211")
         if [ -n "$FWERR" ]; then
             echo "FIRMWARE: kernel reports a wifi firmware problem:"
             echo "  $FWERR"
+            echo "  Likely fix: enable non-free-firmware repo and install the"
+            echo "  package for this card (Intel: firmware-iwlwifi)."
         fi
+    fi
+
+    # NM's own explanation for the device state — often names the cause
+    # directly (e.g. supplicant, firmware) so show it in the report.
+    if [ -n "$IFACE" ]; then
+        NMREASON=$(nmcli -f GENERAL.STATE,GENERAL.REASON device show "$IFACE" 2>/dev/null)
+        [ -n "$NMREASON" ] && echo "$NMREASON"
     fi
 fi
 
