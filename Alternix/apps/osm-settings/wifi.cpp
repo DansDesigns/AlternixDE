@@ -87,6 +87,24 @@ static QString getGateway() {
     return gw.isEmpty() ? "-" : gw;
 }
 
+// FIX: detect the "unmanaged" state specifically. On Devuan/Debian this is
+// almost always caused by /etc/NetworkManager/NetworkManager.conf having
+// [ifupdown] managed=false, or the interface being listed in
+// /etc/network/interfaces (NM's ifupdown plugin then hands it back to
+// ifupdown regardless of the managed= setting). Surfacing this directly
+// saves an SSH session next time an Alternix build hits it.
+static QString getDeviceState(const QString &iface) {
+    if (iface.isEmpty()) return "";
+    QString raw = runCmd("nmcli -t -f DEVICE,STATE device status");
+    for (const QString &line : raw.split("\n")) {
+        int sep = line.indexOf(':');
+        if (sep < 0) continue;
+        if (line.left(sep).trimmed() == iface)
+            return line.mid(sep + 1).trimmed();
+    }
+    return "";
+}
+
 // =========================================================
 // MAIN PAGE
 // =========================================================
@@ -131,6 +149,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     ssidLayout->setSpacing(0);
 
     QListWidget *ssidList = new QListWidget;
+    ssidList->setWordWrap(true);
     ssidList->setStyleSheet(
         "QListWidget {"
         " background:#444444;"
@@ -240,10 +259,24 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
 
         if (out.isEmpty()) {
             // Surface the actual reason instead of a generic "no networks".
-            QString diag = !err.isEmpty()
-                ? err
-                : "nmcli returned nothing (check: wifi radio on? "
-                  "wifi device present? nmcli installed?)";
+            QString diag;
+            if (!err.isEmpty()) {
+                diag = err;
+            } else {
+                QString iface = getWifiIface();
+                QString state = getDeviceState(iface);
+                if (state == "unmanaged") {
+                    diag = "Wi-Fi device '" + iface + "' is UNMANAGED by "
+                           "NetworkManager. Check [ifupdown] managed=true in "
+                           "/etc/NetworkManager/NetworkManager.conf, and that "
+                           "the interface isn't listed in /etc/network/interfaces.";
+                } else if (!state.isEmpty()) {
+                    diag = "Wi-Fi device '" + iface + "' state: " + state;
+                } else {
+                    diag = "nmcli returned nothing (check: wifi radio on? "
+                           "wifi device present? nmcli installed?)";
+                }
+            }
             QListWidgetItem *item = new QListWidgetItem(diag);
             item->setForeground(QColor("#CC6666"));
             item->setFlags(item->flags() & ~(Qt::ItemIsSelectable | Qt::ItemIsEnabled));
