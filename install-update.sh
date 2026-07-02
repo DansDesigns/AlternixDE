@@ -90,13 +90,13 @@ chmod +x osm-files && sudo mv osm-files /usr/local/bin/
 
 
 echo "• Building osm-status..."
-g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
+g++ -fPIC osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
 chmod +x osm-status && sudo mv osm-status /usr/local/bin/
 
 
 
 echo "• Building osm-clock..."
-g++ -fPIC apps/osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+g++ -fPIC osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
 
