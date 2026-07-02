@@ -136,7 +136,7 @@ sudo nala install -y \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
-    podman podman-compose \
+    podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
     sysvinit-utils pm-utils
 
 echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
