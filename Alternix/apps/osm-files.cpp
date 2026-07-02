@@ -40,6 +40,7 @@
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <functional>
+#include <unistd.h>
 
 class FileBrowser : public QWidget {
 public:
@@ -52,6 +53,7 @@ public:
           refreshBtn(nullptr),
           backBtn(nullptr),
           homeBtn(nullptr),
+          networkBtn(nullptr),
           pathBtn(nullptr),
           pathMenu(nullptr),
           pathMenuLayout(nullptr),
@@ -193,6 +195,18 @@ public:
         connect(homeBtn, &QPushButton::clicked, this, [this]() {
             listDirectory(QDir::homePath());
         });
+
+        // Network button
+        networkBtn = new QPushButton("🌐");
+        networkBtn->setFixedSize(50, 50);
+        networkBtn->setStyleSheet(
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#444; }"
+        );
+        pathRow->addWidget(networkBtn, 0);
+
+        connect(networkBtn, &QPushButton::clicked, this, &FileBrowser::showNetworkDialog);
 
         // Path dropdown button
         pathBtn = new QPushButton(currentPath);
@@ -568,6 +582,8 @@ private:
     QPushButton *refreshBtn;
     QPushButton *backBtn;
     QPushButton *homeBtn;
+    QPushButton *networkBtn;
+    QStringList savedServers;
     QPushButton *pathBtn;
     QWidget *pathMenu;
     QVBoxLayout *pathMenuLayout;
@@ -1720,6 +1736,221 @@ private:
         QProcess::startDetached("sh", QStringList() << "-c" << cmd);
         clearSelection(true);
         updateActionButtons();
+    }
+
+    // ================= NETWORK ACCESS =================
+
+    static QString gvfsRoot() {
+        return QString("/run/user/%1/gvfs").arg(getuid());
+    }
+
+    void loadSavedServers() {
+        savedServers = settings->value("network/servers").toStringList();
+    }
+
+    void saveSavedServers() {
+        settings->setValue("network/servers", savedServers);
+        settings->sync();
+    }
+
+    void showNetworkDialog() {
+        loadSavedServers();
+
+        QDialog dlg(this);
+        dlg.setWindowTitle("Network");
+        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setMinimumWidth(420);
+        QVBoxLayout *layout = new QVBoxLayout(&dlg);
+        layout->setSpacing(10);
+
+        QLabel *title = new QLabel("Saved servers");
+        title->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        layout->addWidget(title);
+
+        QListWidget *list = new QListWidget;
+        list->setStyleSheet(
+            "QListWidget { background:#333; color:white; font-size:16px; border:none; border-radius:8px; }"
+            "QListWidget::item { padding:8px; }"
+            "QListWidget::item:selected { background:#555; }"
+        );
+        QScroller::grabGesture(list, QScroller::LeftMouseButtonGesture);
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        for (const QString &s : savedServers)
+            list->addItem(s);
+        layout->addWidget(list, 1);
+
+        // Address entry
+        QLabel *addrLbl = new QLabel("Server address");
+        addrLbl->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        layout->addWidget(addrLbl);
+
+        QLineEdit *addrEdit = new QLineEdit;
+        addrEdit->setPlaceholderText("smb://server/share, sftp://host, ftp://host ...");
+        addrEdit->setStyleSheet(
+            "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:8px; font-size:16px; }"
+        );
+        layout->addWidget(addrEdit);
+
+        // Optional credentials
+        QHBoxLayout *credRow = new QHBoxLayout;
+        QLineEdit *userEdit = new QLineEdit;
+        userEdit->setPlaceholderText("Username (optional)");
+        QLineEdit *passEdit = new QLineEdit;
+        passEdit->setPlaceholderText("Password (optional)");
+        passEdit->setEchoMode(QLineEdit::Password);
+        QString credStyle =
+            "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:8px; font-size:16px; }";
+        userEdit->setStyleSheet(credStyle);
+        passEdit->setStyleSheet(credStyle);
+        credRow->addWidget(userEdit);
+        credRow->addWidget(passEdit);
+        layout->addLayout(credRow);
+
+        // Buttons
+        QHBoxLayout *btnRow = new QHBoxLayout;
+        auto makeDlgBtn = [](const QString &text) {
+            QPushButton *b = new QPushButton(text);
+            b->setFixedHeight(44);
+            b->setStyleSheet(
+                "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
+                "padding:8px 20px; font-size:15px; }"
+                "QPushButton:hover { background:#666; }"
+                "QPushButton:pressed { background:#444; }"
+            );
+            return b;
+        };
+        QPushButton *connectBtn = makeDlgBtn("Connect");
+        QPushButton *forgetBtn  = makeDlgBtn("Forget");
+        QPushButton *cancelBtn  = makeDlgBtn("Cancel");
+        btnRow->addWidget(connectBtn);
+        btnRow->addWidget(forgetBtn);
+        btnRow->addStretch(1);
+        btnRow->addWidget(cancelBtn);
+        layout->addLayout(btnRow);
+
+        // Selecting a saved server fills the address field
+        connect(list, &QListWidget::itemClicked, &dlg, [addrEdit](QListWidgetItem *item) {
+            addrEdit->setText(item->text());
+        });
+        // Double-click connects straight away
+        connect(list, &QListWidget::itemDoubleClicked, &dlg, [addrEdit, &dlg](QListWidgetItem *item) {
+            addrEdit->setText(item->text());
+            dlg.accept();
+        });
+
+        connect(forgetBtn, &QPushButton::clicked, &dlg, [this, list]() {
+            QListWidgetItem *cur = list->currentItem();
+            if (!cur) return;
+            savedServers.removeAll(cur->text());
+            saveSavedServers();
+            delete list->takeItem(list->row(cur));
+        });
+
+        connect(connectBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+        connect(cancelBtn,  &QPushButton::clicked, &dlg, &QDialog::reject);
+
+        if (dlg.exec() != QDialog::Accepted) return;
+
+        QString url = addrEdit->text().trimmed();
+        if (url.isEmpty()) return;
+
+        // Assume smb:// if no scheme given
+        if (!url.contains("://"))
+            url = "smb://" + url;
+
+        connectToServer(url, userEdit->text().trimmed(), passEdit->text());
+    }
+
+    void connectToServer(const QString &url, const QString &user, const QString &pass) {
+        if (statusLabel) statusLabel->setText("Connecting to " + url + " ...");
+        QCoreApplication::processEvents();
+
+        QProcess proc;
+        proc.setProcessChannelMode(QProcess::MergedChannels);
+        proc.start("gio", QStringList() << "mount" << url);
+        if (!proc.waitForStarted(3000)) {
+            QMessageBox::warning(this, "Network",
+                "Could not run 'gio'. Install gvfs (gvfs-backends) for network browsing.");
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        // gio mount prompts on stdin: User, Domain, Password (when auth is required)
+        if (!user.isEmpty() || !pass.isEmpty()) {
+            proc.write((user + "\n").toUtf8());   // username
+            proc.write("\n");                      // domain (default)
+            proc.write((pass + "\n").toUtf8());   // password
+        } else {
+            // try anonymous/guest if it asks
+            proc.write("\n\n\n");
+        }
+        proc.closeWriteChannel();
+
+        if (!proc.waitForFinished(20000)) {
+            proc.kill();
+            QMessageBox::warning(this, "Network", "Connection to " + url + " timed out.");
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        QString output = QString::fromUtf8(proc.readAll());
+        bool alreadyMounted = output.contains("already mounted", Qt::CaseInsensitive);
+
+        if (proc.exitCode() != 0 && !alreadyMounted) {
+            QMessageBox::warning(this, "Network",
+                "Failed to connect to " + url + "\n\n" + output.trimmed());
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        // Remember successful server
+        if (!savedServers.contains(url)) {
+            savedServers.prepend(url);
+            while (savedServers.size() > 20) savedServers.removeLast();
+            saveSavedServers();
+        }
+
+        QString mountPath = findGvfsMount(url);
+        if (mountPath.isEmpty()) {
+            // fall back to the gvfs root so the user can pick the mount manually
+            mountPath = gvfsRoot();
+        }
+
+        if (!QDir(mountPath).exists()) {
+            QMessageBox::warning(this, "Network",
+                "Connected, but the mount point was not found under " + gvfsRoot());
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        listDirectory(mountPath);
+    }
+
+    // Find the gvfs directory that corresponds to the given URL
+    QString findGvfsMount(const QString &url) {
+        QString rest = url.section("://", 1);          // host/share/path...
+        QString host = rest.section('/', 0, 0);
+        // strip user@ prefix and :port suffix
+        if (host.contains('@')) host = host.section('@', 1);
+        if (host.contains(':')) host = host.section(':', 0, 0);
+        QString share = rest.section('/', 1, 1);
+
+        QDir root(gvfsRoot());
+        if (!root.exists()) return QString();
+
+        QString hostMatch;
+        for (const QString &entry :
+             root.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+            // entries look like: smb-share:server=host,share=name  /  sftp:host=host,user=...
+            if (!entry.contains(host, Qt::CaseInsensitive)) continue;
+            if (!share.isEmpty() &&
+                entry.contains("share=" + share, Qt::CaseInsensitive)) {
+                return root.absoluteFilePath(entry);   // exact share match
+            }
+            if (hostMatch.isEmpty())
+                hostMatch = root.absoluteFilePath(entry);
+        }
+        return hostMatch;
     }
 
     void processNextThumbnail() {
