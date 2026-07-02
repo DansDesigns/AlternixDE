@@ -122,7 +122,7 @@ public:
         buttonGroup = new QButtonGroup(this);
         buttonGroup->setExclusive(true);
 
-        columns   = 2;
+        columns   = 2;                  // default until first width-based recompute
         thumbSize = QSize(260, 180);    // preview size
         cardSize  = QSize(300, 210);    // card size (bigger so rounded corners show)
 
@@ -358,8 +358,6 @@ private:
     {
         if (imagePaths.isEmpty()) return;
 
-        int row = 0, col = 0, index = 0;
-
         for (int i = 0; i < imagePaths.size(); ++i)
         {
             // Card button
@@ -406,14 +404,14 @@ private:
             // Track thumbnail labels so we can set pixmaps later
             thumbImageLabels.append(thumbLabel);
 
-            gridLayout->addWidget(card, row, col);
-            buttonGroup->addButton(card, index);
+            buttonGroup->addButton(card, i);
             thumbButtons.append(card);
-
-            ++col;
-            if (col >= columns) { col = 0; ++row; }
-            ++index;
         }
+
+        // FIX: columns are computed from the available width instead of
+        // being fixed at 2; relayoutGrid() places the cards.
+        columns = computeColumns();
+        relayoutGrid();
 
         // Select last used wallpaper
         int selectedIndex = 0;
@@ -430,22 +428,74 @@ private:
 
         nextThumbIndex = 0;
         thumbTimer->start();
+    }
 
-        // Center the grid width inside the scroll area
-        int spacing   = gridLayout->horizontalSpacing();
-        int leftM     = gridLayout->contentsMargins().left();
-        int rightM    = gridLayout->contentsMargins().right();
+    // How many card columns fit in the scroll area's current width.
+    int computeColumns() const
+    {
+        int avail = scrollArea && scrollArea->viewport()
+                        ? scrollArea->viewport()->width()
+                        : width();
+        int spacing = gridLayout->horizontalSpacing();
+        int lm = gridLayout->contentsMargins().left();
+        int rm = gridLayout->contentsMargins().right();
+
+        int usable = avail - lm - rm;
+        // n cards need n*cardW + (n-1)*spacing  ⇒  n = (usable+spacing)/(cardW+spacing)
+        int cols = (usable + spacing) / (cardSize.width() + spacing);
+        return qMax(1, cols);
+    }
+
+    // Repositions the existing cards for the current column count —
+    // no card is recreated, so thumbnails and selection are untouched.
+    void relayoutGrid()
+    {
+        // Detach all items from the layout without deleting the widgets.
+        QLayoutItem *item;
+        while ((item = gridLayout->takeAt(0)))
+            delete item;
+
+        int row = 0, col = 0;
+        for (QPushButton *card : thumbButtons) {
+            gridLayout->addWidget(card, row, col);
+            if (++col >= columns) { col = 0; ++row; }
+        }
+
+        // Fix the grid widget's width to exactly fit the columns so the
+        // scroll area's AlignHCenter keeps it centred.
+        int spacing = gridLayout->horizontalSpacing();
+        int lm = gridLayout->contentsMargins().left();
+        int rm = gridLayout->contentsMargins().right();
         int contentWidth = columns * cardSize.width()
                          + (columns - 1) * spacing
-                         + leftM + rightM;
+                         + lm + rm;
 
         gridWidget->setMinimumWidth(contentWidth);
         gridWidget->setMaximumWidth(contentWidth);
 
-        // Ensure scrollable height matches grid content for proper QScroller behaviour
+        // Height must be allowed to SHRINK too (fewer rows after widening),
+        // so reset the minimum before re-measuring.
+        gridWidget->setMinimumHeight(0);
+        gridLayout->activate();
         gridWidget->adjustSize();
         gridWidget->setMinimumHeight(gridWidget->sizeHint().height());
     }
+
+protected:
+    // Re-flow the grid whenever the window width allows a different
+    // number of columns.
+    void resizeEvent(QResizeEvent *e) override
+    {
+        QWidget::resizeEvent(e);
+        int newCols = computeColumns();
+        if (newCols != columns) {
+            columns = newCols;
+            if (!thumbButtons.isEmpty())
+                relayoutGrid();
+        }
+    }
+
+private:
 
     // ───────────────────── Async thumbnail loader ────────────────────
 
