@@ -77,23 +77,22 @@ fi
 cd "$ALT_ROOT/Alternix/apps/osm-settings"
 echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
-echo "• Installing Updated wifi.so..."
 sudo mv wifi.so /usr/local/bin/
 
 
-
 cd "$ALT_ROOT/Alternix/apps"
+
 echo "• Building osm-files..."
 g++ -fPIC osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
-
-
 
 echo "• Building osm-status..."
 g++ -fPIC osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
 chmod +x osm-status && sudo mv osm-status /usr/local/bin/
 
-
+echo "• Building osm-paper..."
+g++ -fPIC osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
 echo "• Building osm-clock..."
 g++ -fPIC osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
