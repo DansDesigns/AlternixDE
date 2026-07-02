@@ -21,6 +21,19 @@
 #include <QDateTime>
 #include <QTextStream>
 #include <QPainter>
+#include <QRegularExpression>
+#include <QMap>
+#include <QSet>
+#include <QStandardPaths>
+#include <QProcess>
+
+#include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusConnectionInterface>
+#include <QtDBus/QDBusMessage>
+#include <QtDBus/QDBusVariant>
+#include <QtDBus/QDBusVirtualObject>
+#include <QtDBus/QDBusArgument>
+#include <QtDBus/QDBusMetaType>
 
 #include <functional>
 
@@ -700,6 +713,344 @@ private:
     QTimer      *m_raiseTimer;
 };
 
+// ───────────────────────────────────────────── Notification helpers
+
+static QString stripMarkup(QString s) {
+    // The fdo spec allows a small HTML subset in the body – flatten it.
+    s.replace(QRegularExpression("<br\\s*/?>", QRegularExpression::CaseInsensitiveOption), "\n");
+    s.remove(QRegularExpression("<[^>]*>"));
+    s.replace("&lt;", "<").replace("&gt;", ">")
+     .replace("&quot;", "\"").replace("&apos;", "'")
+     .replace("&amp;", "&");
+    return s.trimmed();
+}
+
+static QString notifyDirPath() {
+    return QDir::homePath() + "/.osm-notify";
+}
+
+// Write one notification file. Returns the file path (empty on failure).
+// File format matches what StatusPanel::refreshNotifications() expects:
+//   first non-empty line = title, rest = body.
+static QString writeNotificationFile(const QString &title,
+                                     const QString &body,
+                                     quint32 id)
+{
+    QDir d(notifyDirPath());
+    if (!d.exists()) d.mkpath(".");
+
+    // sortable, unique name: epoch-ms + dbus id
+    QString name = QString("%1-%2.txt")
+        .arg(QDateTime::currentMSecsSinceEpoch())
+        .arg(id);
+
+    QFile f(d.absoluteFilePath(name));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+        return QString();
+
+    QTextStream out(&f);
+    QString t = title.trimmed();
+    if (t.isEmpty()) t = "Notification";
+    // keep title single-line so the panel parser stays happy
+    t.replace('\n', ' ');
+    out << t << "\n";
+    QString b = body.trimmed();
+    if (!b.isEmpty())
+        out << b << "\n";
+    f.close();
+    return f.fileName();
+}
+
+// ───────────────────────────────────────────── NotificationServer
+// Implements org.freedesktop.Notifications so ordinary apps
+// (Firefox, mail, chat, notify-send, …) land in ~/.osm-notify
+// and therefore in the StatusPanel.
+
+// Implemented as a QDBusVirtualObject (raw message handling) instead of a
+// Q_OBJECT slots class, so NO moc step is needed — plain g++ build.
+
+class NotificationServer : public QDBusVirtualObject {
+public:
+    explicit NotificationServer(OverlayRoot *overlay, QObject *parent = nullptr)
+        : QDBusVirtualObject(parent), m_overlay(overlay), m_nextId(1) {}
+
+    bool registerOnBus() {
+        QDBusConnection bus = QDBusConnection::sessionBus();
+        if (!bus.isConnected()) {
+            qWarning() << "osm-status: no D-Bus session bus – app notifications disabled";
+            return false;
+        }
+        if (!bus.registerService("org.freedesktop.Notifications")) {
+            qWarning() << "osm-status: org.freedesktop.Notifications already owned"
+                       << "(another notification daemon running?)";
+            return false;
+        }
+        return bus.registerVirtualObject("/org/freedesktop/Notifications", this);
+    }
+
+    // ---- QDBusVirtualObject interface -------------------------------
+
+    QString introspect(const QString &path) const override {
+        Q_UNUSED(path);
+        return QStringLiteral(
+            "<interface name=\"org.freedesktop.Notifications\">"
+            " <method name=\"Notify\">"
+            "  <arg direction=\"in\"  type=\"s\"/>"
+            "  <arg direction=\"in\"  type=\"u\"/>"
+            "  <arg direction=\"in\"  type=\"s\"/>"
+            "  <arg direction=\"in\"  type=\"s\"/>"
+            "  <arg direction=\"in\"  type=\"s\"/>"
+            "  <arg direction=\"in\"  type=\"as\"/>"
+            "  <arg direction=\"in\"  type=\"a{sv}\"/>"
+            "  <arg direction=\"in\"  type=\"i\"/>"
+            "  <arg direction=\"out\" type=\"u\"/>"
+            " </method>"
+            " <method name=\"CloseNotification\">"
+            "  <arg direction=\"in\" type=\"u\"/>"
+            " </method>"
+            " <method name=\"GetCapabilities\">"
+            "  <arg direction=\"out\" type=\"as\"/>"
+            " </method>"
+            " <method name=\"GetServerInformation\">"
+            "  <arg direction=\"out\" type=\"s\"/>"
+            "  <arg direction=\"out\" type=\"s\"/>"
+            "  <arg direction=\"out\" type=\"s\"/>"
+            "  <arg direction=\"out\" type=\"s\"/>"
+            " </method>"
+            " <signal name=\"NotificationClosed\">"
+            "  <arg type=\"u\"/><arg type=\"u\"/>"
+            " </signal>"
+            " <signal name=\"ActionInvoked\">"
+            "  <arg type=\"u\"/><arg type=\"s\"/>"
+            " </signal>"
+            "</interface>");
+    }
+
+    bool handleMessage(const QDBusMessage &msg,
+                       const QDBusConnection &connection) override
+    {
+        const QString member = msg.member();
+
+        if (member == "Notify") {
+            const QList<QVariant> a = msg.arguments();
+            if (a.size() < 8) return false;
+
+            QString     app_name    = a.at(0).toString();
+            uint        replaces_id = a.at(1).toUInt();
+            QString     summary     = a.at(3).toString();
+            QString     body        = a.at(4).toString();
+
+            // hints arrive as a marshalled a{sv}
+            QVariantMap hints;
+            if (a.at(6).canConvert<QDBusArgument>())
+                hints = qdbus_cast<QVariantMap>(
+                    a.at(6).value<QDBusArgument>());
+            else
+                hints = a.at(6).toMap();
+
+            uint id = doNotify(app_name, replaces_id, summary, body, hints);
+            QDBusConnection(connection).send(msg.createReply(QVariant(id)));
+            return true;
+        }
+
+        if (member == "CloseNotification") {
+            uint id = msg.arguments().value(0).toUInt();
+            if (m_files.contains(id))
+                QFile::remove(m_files.take(id));
+
+            QDBusConnection bus(connection);
+            bus.send(msg.createReply());
+
+            QDBusMessage sig = QDBusMessage::createSignal(
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "NotificationClosed");
+            sig << id << uint(3) /* closed by call */;
+            bus.send(sig);
+            return true;
+        }
+
+        if (member == "GetCapabilities") {
+            QDBusConnection(connection).send(msg.createReply(
+                QVariant(QStringList()
+                         << "body" << "body-markup" << "persistence")));
+            return true;
+        }
+
+        if (member == "GetServerInformation") {
+            QDBusConnection(connection).send(msg.createReply(
+                QVariantList() << "osm-status"      // name
+                               << "AlterniTech"     // vendor
+                               << "1.0"             // version
+                               << "1.2"));          // spec version
+            return true;
+        }
+
+        return false;   // unknown member → let Qt reply with an error
+    }
+
+private:
+    uint doNotify(const QString &app_name,
+                  uint replaces_id,
+                  const QString &summary,
+                  const QString &body,
+                  const QVariantMap &hints)
+    {
+        uint id = replaces_id != 0 ? replaces_id : m_nextId++;
+
+        // Replacing an existing notification? Drop the old file first.
+        if (replaces_id != 0 && m_files.contains(replaces_id))
+            QFile::remove(m_files.take(replaces_id));
+
+        QString title = summary.trimmed();
+        if (title.isEmpty()) title = app_name.trimmed();
+
+        QString cleanBody = stripMarkup(body);
+
+        // Prefix the app name when it adds information
+        if (!app_name.trimmed().isEmpty() &&
+            app_name.trimmed().compare(title, Qt::CaseInsensitive) != 0)
+        {
+            cleanBody = cleanBody.isEmpty()
+                ? QString("(%1)").arg(app_name.trimmed())
+                : QString("%1\n(%2)").arg(cleanBody, app_name.trimmed());
+        }
+
+        QString path = writeNotificationFile(title, cleanBody, id);
+        if (!path.isEmpty())
+            m_files.insert(id, path);
+
+        // urgency: 0 low, 1 normal, 2 critical.  Alarms/critical pop the panel.
+        int urgency = 1;
+        if (hints.contains("urgency"))
+            urgency = hints.value("urgency").toInt();
+        QString category = hints.value("category").toString();
+
+        bool isAlarm = category.startsWith("alarm") || urgency >= 2;
+        if (isAlarm && m_overlay)
+            m_overlay->showPanel();
+
+        return id;
+    }
+
+    OverlayRoot        *m_overlay;
+    uint                m_nextId;
+    QMap<uint, QString> m_files;
+};
+
+// ───────────────────────────────────────────── AlarmWatcher
+// Reads ~/.osm-alarms, one alarm per line:
+//   HH:MM|Title|Body                  → one-shot today (removed after firing)
+//   yyyy-MM-dd HH:MM|Title|Body       → one-shot at date (removed after firing)
+//   daily HH:MM|Title|Body            → repeats every day
+// Fires as a critical notification, so the panel slides out.
+
+class AlarmWatcher : public QObject {
+public:
+    explicit AlarmWatcher(OverlayRoot *overlay, QObject *parent = nullptr)
+        : QObject(parent), m_overlay(overlay)
+    {
+        m_path = QDir::homePath() + "/.osm-alarms";
+
+        // ensure the file exists so users can just edit it
+        if (!QFile::exists(m_path)) {
+            QFile f(m_path);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&f);
+                out << "# osm-status alarms\n"
+                       "# HH:MM|Title|Body            one-shot today\n"
+                       "# yyyy-MM-dd HH:MM|Title|Body one-shot on date\n"
+                       "# daily HH:MM|Title|Body      repeats every day\n";
+            }
+        }
+
+        QTimer *t = new QTimer(this);
+        t->setInterval(15 * 1000);   // check ~4× per minute
+        connect(t, &QTimer::timeout, [this]() { check(); });
+        t->start();
+        check();
+    }
+
+private:
+    void check() {
+        QFile f(m_path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+            return;
+
+        QStringList lines = QString::fromUtf8(f.readAll()).split('\n');
+        f.close();
+
+        QDateTime now = QDateTime::currentDateTime();
+        QString nowHM = now.toString("HH:mm");
+        QString today = now.date().toString("yyyy-MM-dd");
+
+        bool changed = false;
+        QStringList keep;
+
+        for (const QString &raw : lines) {
+            QString line = raw.trimmed();
+            if (line.isEmpty() || line.startsWith('#')) {
+                keep << raw;
+                continue;
+            }
+
+            QStringList parts = line.split('|');
+            QString when = parts.value(0).trimmed();
+            QString title = parts.value(1, "Alarm").trimmed();
+            QString body  = parts.value(2).trimmed();
+            if (title.isEmpty()) title = "Alarm";
+
+            bool fire = false;
+            bool oneShot = true;
+
+            if (when.startsWith("daily ", Qt::CaseInsensitive)) {
+                oneShot = false;
+                fire = (when.mid(6).trimmed() == nowHM);
+            } else if (when.contains(' ')) {
+                // dated: yyyy-MM-dd HH:mm  – also fire if overdue (missed while off)
+                QDateTime dt = QDateTime::fromString(when, "yyyy-MM-dd HH:mm");
+                fire = dt.isValid() && dt <= now;
+            } else {
+                fire = (when == nowHM);
+            }
+
+            // debounce: don't refire the same daily alarm within the same minute
+            QString fireKey = when + "|" + title + "|" + today + " " + nowHM;
+            if (fire && m_fired.contains(fireKey))
+                fire = false;
+
+            if (fire) {
+                m_fired.insert(fireKey);
+                if (m_fired.size() > 200) m_fired.clear();
+
+                QString b = body.isEmpty()
+                    ? now.toString("HH:mm")
+                    : body;
+                writeNotificationFile("⏰ " + title, b,
+                                      QDateTime::currentMSecsSinceEpoch() % 100000);
+                if (m_overlay)
+                    m_overlay->showPanel();
+
+                if (oneShot) { changed = true; continue; }  // drop the line
+            }
+
+            keep << raw;
+        }
+
+        if (changed) {
+            QFile w(m_path);
+            if (w.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&w);
+                out << keep.join('\n');
+            }
+        }
+    }
+
+    OverlayRoot  *m_overlay;
+    QString       m_path;
+    QSet<QString> m_fired;
+};
+
 // ───────────────────────────────────────────── main
 
 int main(int argc,char**argv) {
@@ -713,5 +1064,13 @@ int main(int argc,char**argv) {
     OverlayRoot root;          // overlay window
     ActivationEdgeBar bar(&root);   // always-on-top gesture edge
 
+    // become the desktop notification daemon (app push notifications)
+    NotificationServer server(&root);
+    server.registerOnBus();
+
+    // alarms → notifications
+    AlarmWatcher alarms(&root);
+
     return app.exec();
 }
+

@@ -358,7 +358,7 @@ echo "[4/10] Creating .xinitrc autostart..."
 cat <<EOF > "$HOME/.xinitrc"
 #!/bin/sh
 source "\$HOME/.qtile_venv/bin/activate"
-exec "\$HOME/.qtile_venv/bin/qtile" start
+exec dbus-launch --exit-with-session "\$HOME/.qtile_venv/bin/qtile" start
 EOF
 chmod +x "$HOME/.xinitrc"
 
@@ -411,8 +411,25 @@ chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
 
 echo "• Building osm-status..."
-g++ apps/osm-status.cpp -o osm-status -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
+g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
 chmod +x osm-status && sudo mv osm-status /usr/local/bin/
+
+echo "• Building osm-clock..."
+g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
+chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
+
+cat <<EOF > "$HOME/.local/share/applications/osm-clock.desktop"
+[Desktop Entry]
+Type=Application
+Name=Clock
+Comment=Clock, Alarms, Timer & Stopwatch for Alternix / OSM-Phone
+Exec=/usr/local/bin/osm-clock
+Icon=osm-clock
+Terminal=false
+Categories=Utility;Clock;
+StartupNotify=false
+EOF
+chmod +x "$HOME/.local/share/applications/osm-clock.desktop"
 
 
 
