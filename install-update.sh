@@ -98,6 +98,9 @@ echo "• Building osm-clock..."
 g++ -fPIC osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
+echo "• Building kernel.so..."
+g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
+sudo mv kernel.so /usr/local/bin/
 
 echo "• Update & Install Complete."
 echo ""
