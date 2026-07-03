@@ -293,7 +293,7 @@ public:
         // -----------------------------
         QFont f = QApplication::font();
         f.setPixelSize(26);          // global size
-        QApplication::setFont(f);
+        setFont(f);   // page-local: do NOT change the app-wide font
 
         // Global white text + dark bg
         QPalette pal = qApp->palette();
@@ -418,6 +418,7 @@ public:
             " border:1px solid #222222;"
             " border-radius:16px;"
             " font-size:34px;"
+            " font-family:'DejaVu Sans';"
             "}"
             "QPushButton:hover { background:#555555; }"
             "QPushButton:pressed { background:#333333; }"

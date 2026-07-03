@@ -3,13 +3,13 @@ set -e
 clear
 
 echo "=============================================="
-echo "          Alternix Desktop Installer"
-echo "                 Debian Version"
+echo "       Alternix Desktop Installer"
+echo "          (Devuan Edition)"
 echo "=============================================="
 echo "--------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
-echo " Setup can take a while, be sure to have a tasty beverage & some good music!"
+echo " Setup can take a while, be sure to have a cuppa & some good music!"
 echo "--------------------------------------------------------------------"
 echo ""
 echo ""
@@ -68,57 +68,36 @@ echo ""
 # ────────────────────────────────────────────────
 echo "[1/10] Installing system dependencies..."
 
+# NOTE: nala's volian repo targets Debian codenames. On Devuan, the codename
+# (e.g. "daedalus") maps to Debian bookworm, so the repo entry should still
+# work — but if nala install fails, the script falls back to plain apt.
+
 echo "- Adding nala dependencies.."
 echo "deb http://deb.volian.org/volian/ nala main" | sudo tee /etc/apt/sources.list.d/volian.list
 wget -qO - https://deb.volian.org/volian/volian.gpg | sudo tee /etc/apt/trusted.gpg.d/volian.gpg
 
-
 echo "[System] Installing nala.."
-sudo apt install nala nala -y
+if ! sudo apt install nala -y 2>/dev/null; then
+    echo "[System] nala not available for this Devuan release — using apt instead."
+    # Define nala as an alias to apt for the rest of this script
+    nala() { sudo apt "$@"; }
+    export -f nala
+fi
 
 echo "[System] Removing nala Install Components.."
-sudo rm /etc/apt/sources.list.d/volian.list
-sudo rm /etc/apt/trusted.gpg.d/volian.gpg
+sudo rm -f /etc/apt/sources.list.d/volian.list
+sudo rm -f /etc/apt/trusted.gpg.d/volian.gpg
 
-# --------------- needs fixing --------------------
-#echo "- Converting APT to Nala.."
-#cat <<EOF >> "$HOME/.bashrc"
-#apt() { 
-#  command nala "$@"
-#}
-#sudo() {
-#  if [ "$1" = "apt" ]; then
-#    shift
-#    command sudo nala "$@"
-#  else
-#    command sudo "$@"
-#  fi
-#}
-#EOF
-#
-#echo "- Adding root Nala.."
-#sudo cat <<EOF >> "/root/.bashrc"
-#apt() { 
-#  command nala "$@"
-#}
-#sudo() {
-#  if [ "$1" = "apt" ]; then
-#    shift
-#    command sudo nala "$@"
-#  else
-#    command sudo "$@"
-#  fi
-#}
-#EOF
-#echo "- Nala conversion complete.."
-
-echo "[System] Running nala server fetch.."
-echo " "
-echo "----------------------------------------"
-echo " PLEASE ENTER 1, 2, 3, 4, WHEN PROMPTED"
-echo "----------------------------------------"
-echo " "
-sudo nala fetch
+#echo "[System] Running nala server fetch.."
+#echo " "
+#echo "----------------------------------------"
+#echo " PLEASE ENTER 1, 2, 3, 4, WHEN PROMPTED"
+#echo "----------------------------------------"
+#echo " "
+# nala fetch is nala-specific; skip if using plain apt
+#if command -v nala >/dev/null 2>&1; then
+#    sudo nala fetch
+#fi
 
 echo "[System] Running nala update.."
 sudo nala update
@@ -130,15 +109,18 @@ sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
 sudo chmod a+r /etc/apt/keyrings/xlibre-deb.asc
 
-cat <<EOF | sudo tee /etc/apt/sources.list.d/xlibre-deb.sources
+# Use the dedicated Devuan repo — Devuan codenames used directly
+DEVUAN_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+ARCH=$(dpkg --print-architecture)
+echo "[System] Installing XLibre for Devuan '$DEVUAN_CODENAME'..."
+sudo tee /etc/apt/sources.list.d/xlibre-deb.sources > /dev/null << XLIBRESRC
 Types: deb deb-src
-URIs: https://xlibre-deb.github.io/debian/
-Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+URIs: https://xlibre-deb.github.io/devuan/
+Suites: ${DEVUAN_CODENAME}
 Components: main
-Architectures: $(dpkg --print-architecture)
+Architectures: ${ARCH}
 Signed-By: /etc/apt/keyrings/xlibre-deb.asc
-EOF
-
+XLIBRESRC
 
 sudo nala update
 sudo nala install xlibre -y
@@ -150,11 +132,15 @@ sudo nala install -y \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
-    snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
+    elogind libpam-elogind xserver-xlibre-input-libinput \
+    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
-    podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11
-    
+    podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
+    sysvinit-utils pm-utils
+
+echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
+echo "If snap packages are needed, use flatpak equivalents instead."
 
 # ────────────────────────────────────────────────
 # Mobile Telephony Components (optional)
@@ -184,22 +170,19 @@ while true; do
     fi
 done
 
-echo "[System] Enabling Power Profile Daemon.."
-sudo systemctl enable --now power-profiles-daemon
 
 # ────────────────────────────────────────────────
 #  Install Flatpaks
 # ────────────────────────────────────────────────
 
 echo "[System] Clearing space in /var/cache/apt/archive..."
-sudo rm -r /var/cache/apt/archives
+sudo rm -rf /var/cache/apt/archives
 
 echo "[System] Adding flatpak Components.."
 sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
 echo "[System] Installing Flatpaks..."
 
-# Install flatpaks
 flatpak install -y flathub com.github.joseexposito.touche
 flatpak install -y flathub chat.delta.desktop
 flatpak install -y flathub org.kde.kweather
@@ -207,12 +190,6 @@ flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
 flatpak install -y flathub net.retrodeck.retrodeck
-
-# Flatpak Games (disabled by default)
-#flatpak install -y flathub net.sourceforge.ExtremeTuxRacer
-#flatpak install -y flathub io.github.swordpuffin.hunt
-#flatpak install -y flathub com.github.avojak.warble
-
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages
@@ -231,17 +208,9 @@ if [ -d "$INSTALLER_DIR" ]; then
 
     if [ "$DEB_COUNT" -gt 0 ]; then
         echo "• Found $DEB_COUNT installer package(s). Installing..."
-
-        # Install each .deb file
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
-
-        # Fix missing dependencies automatically
-        #sudo apt-get update -y
         sudo nala install -f -y
-
-        # try to Install each .deb file AGAIN
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
-
         echo "• Local installer packages installed."
     else
         echo "• No .deb files in installers folder, skipping."
@@ -258,16 +227,13 @@ fi
 
 cd "$ALT_ROOT/Alternix"
 
-# Install Starship
 echo "[System] Installing Starship prompt..."
 curl -sS https://starship.rs/install.sh | sh -s -- --yes
 
-# Add starship init to ~/.bashrc if it's not already present
 if ! grep -Fxq 'eval "$(starship init bash)"' "$HOME/.bashrc"; then
     echo 'eval "$(starship init bash)"' >> "$HOME/.bashrc"
 fi
 
-# Install Brave
 echo "[System] Installing Brave Browser..."
 curl -fsS https://dl.brave.com/install.sh | sh -s -- --yes
 
@@ -287,22 +253,19 @@ sudo cp "$ALT_ROOT/Alternix/configs/.alacritty.toml" ~/
 mkdir -p "$CONFIG_DST"
 
 if [ -d "$CONFIG_SRC" ]; then
-    # Move everything (folders AND files) into ~/.config
     echo "• Copying configs from $CONFIG_SRC → $CONFIG_DST"
     cp -r "$CONFIG_SRC/"* "$CONFIG_DST/"
     echo "• Configs installed."
-    #echo " "
 else
     echo "• No configs folder found, skipping."
 fi
-
 
 sudo cp -r "$ALT_ROOT/Alternix/onboard" /usr/share/onboard
 
 
 
 # ────────────────────────────────────────────────
-# Install Fonts (from ~/Alternix/fonts)
+# Install Fonts
 # ────────────────────────────────────────────────
 echo " "
 echo "[Config] Installing Fonts..."
@@ -317,10 +280,9 @@ else
 fi
 
 # ────────────────────────────────────────────────
-# Install Wallpapers (to ~/Pictures/wallpapers)
+# Install Wallpapers
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[Config] Installing Wallpapers..."
 
 WALL_DST="$HOME/Pictures/wallpapers"
@@ -337,7 +299,6 @@ fi
 # 2. Create & activate Qtile venv
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[2/10] Creating virtual environment (qtile_venv)..."
 
 if [ ! -d "$HOME/.qtile_venv" ]; then
@@ -349,11 +310,15 @@ source "$HOME/.qtile_venv/bin/activate"
 echo "[3/10] Installing Python pip dependencies..."
 pip3 install qtile qtile-extras mypy
 
+# Symlink qtile binary to where udev rules expect it
+sudo mkdir -p /usr/lib/udev
+sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
+sudo udevadm control --reload-rules
+
 # ────────────────────────────────────────────────
 # 3. Configure xinitrc autostart
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[4/10] Creating .xinitrc autostart..."
 cat <<EOF > "$HOME/.xinitrc"
 #!/bin/sh
@@ -367,7 +332,6 @@ chmod +x "$HOME/.xinitrc"
 # 4. Bash profile auto startx
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[6/10] Creating ~/.bash_profile auto-start..."
 cat <<EOF > "$HOME/.bash_profile"
 # auto-start X only on tty1 and only if not already running
@@ -377,38 +341,27 @@ fi
 EOF
 
 # ────────────────────────────────────────────────
-# 5. Build Alternix Apps (from ~/Alternix/apps)
+# 5. Build Alternix Apps
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[7/10] Building Alternix apps..."
 cd "$ALT_ROOT/Alternix" || { echo "ERROR: $ALT_ROOT not found"; exit 1; }
-
-
 
 echo "• Building osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-launcher && sudo mv osm-launcher /usr/local/bin/
 
-
-
 echo "• Building osm-lock..."
 g++ apps/osm-lock.cpp -o osm-lock -fPIC $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-lock && sudo mv osm-lock /usr/local/bin/
-
-
 
 echo "• Building osm-running..."
 g++ apps/osm-running.cpp -o osm-running -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-running && sudo mv osm-running /usr/local/bin/
 
-
-
 echo "• Building osm-notify..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
-
-
 
 echo "• Building osm-status..."
 mkdir -p "$HOME/.config/Alternix/sounds"
@@ -433,13 +386,10 @@ StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-clock.desktop"
 
-
-
 echo "• Building osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
-# Icons
 if [ -f "icons/osm-paper.png" ]; then
     sudo cp icons/osm-paper.png /usr/share/icons/hicolor/64x64/apps/osm-paper.png
 fi
@@ -458,29 +408,21 @@ StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-paper.desktop"
 
-
-
 echo "• Installing osm-paper-restore..."
 chmod +x apps/osm-paper-restore && sudo cp apps/osm-paper-restore /usr/local/bin/
-
-
 
 echo "• Building osm-styling..."
 g++ -fPIC apps/osm-styling.cpp -o osm-styling $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-styling && sudo mv osm-styling /usr/local/bin/
 
-
-
 echo "• Building osm-files..."
 g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
 
-# Icons
 if [ -f "icons/osm-files.png" ]; then
     sudo cp icons/osm-files.png /usr/share/icons/hicolor/64x64/apps/osm-files.png
 fi
 
-mkdir -p "$HOME/.local/share/applications"
 cat <<EOF > "$HOME/.local/share/applications/osm-files.desktop"
 [Desktop Entry]
 Type=Application
@@ -493,8 +435,6 @@ Categories=Utility;FileManager;
 StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-files.desktop"
-
-
 
 echo "• Building osm-viewer..."
 g++ -fPIC apps/osm-viewer.cpp -o osm-viewer $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core poppler-qt5) -Wno-deprecated-declarations
@@ -518,31 +458,6 @@ StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-viewer.desktop"
 
-
-
-#echo "• Building osm-notes..."
-#g++ -fPIC apps/osm-notes.cpp -o osm-notes -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
-#chmod +x osm-notes && sudo mv osm-notes /usr/local/bin/
-#
-#if [ -f "icons/osm-notes.png" ]; then
-#    sudo cp icons/osm-notes.png /usr/share/icons/hicolor/64x64/apps/osm-notes.png
-#fi
-#
-#cat <<EOF > "$HOME/.local/share/applications/osm-notes.desktop"
-#[Desktop Entry]
-#Type=Application
-#Name=Notes
-#Comment=Notes App for Alternix / OSM-Phone
-#Exec=/usr/local/bin/osm-notes %U
-#Icon=osm-notes
-#Terminal=false
-#Categories=Utility;Notes;
-#StartupNotify=false
-#EOF
-#chmod +x "$HOME/.local/share/applications/osm-notes.desktop"
-
-
-
 echo "• Building osm-draw..."
 g++ -fPIC apps/osm-draw.cpp -o osm-draw -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-draw && sudo mv osm-draw /usr/local/bin/
@@ -564,32 +479,17 @@ StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-draw.desktop"
 
-
-
 echo "• Building osm-rocker..."
 g++ -fPIC apps/osm-rocker.cpp -o osm-rocker $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-rocker && sudo mv osm-rocker /usr/local/bin/
-
-
 
 echo "• Installing osm-sudo..."
 sudo cp apps/osm-sudo /usr/local/bin/osm-sudo
 sudo chmod 755 /usr/local/bin/osm-sudo
 
-#echo "• Adding osm-sudo alias to ~/.bashrc..."
-#if ! grep -q "alias sudo='/usr/local/bin/osm-sudo'" "$HOME/.bashrc" 2>/dev/null; then
-#    echo "alias sudo='/usr/local/bin/osm-sudo'" >> "$HOME/.bashrc"
-#fi
-#
-#echo "• osm-sudo installed..."
-
-
-
 echo "• Building osm-power..."
 g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
-
-
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
@@ -597,13 +497,9 @@ sudo chmod +x osm-powerd && sudo mv osm-powerd /usr/local/bin/
 sudo chown root:root /usr/local/bin/osm-powerd
 sudo chmod 4755 /usr/local/bin/osm-powerd
 
-
-
-
 echo "• Building osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-lockscreen && sudo mv osm-lockscreen /usr/local/bin/
-
 
 
 
@@ -611,7 +507,6 @@ chmod +x osm-lockscreen && sudo mv osm-lockscreen /usr/local/bin/
 # 6. Build OSM Settings + modules
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[8/10] Building osm-settings..."
 
 cd "$ALT_ROOT/Alternix/apps/osm-settings" || { echo "ERROR: apps/osm-settings folder missing"; exit 1; }
@@ -635,7 +530,6 @@ Categories=Utility;
 StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-settings.desktop"
-
 
 echo "• Building wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
@@ -697,10 +591,14 @@ echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv system.so /usr/local/bin/
 
+echo "• Building ui.so..."
+g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv ui.so /usr/local/bin/
 
-#────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────
 #            Custom App Shortcuts & Icons
-#────────────────────────────────────────────────
+# ────────────────────────────────────────────────
 echo " "
 echo "• Installing App Icons..."
 
@@ -710,7 +608,6 @@ sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png
 sudo cp icons/os-check-update.png /usr/share/icons/hicolor/64x64/apps/os-check-update.png
-
 
 echo "• Creating htop.desktop launcher..."
 sudo tee /usr/share/applications/htop.desktop >/dev/null <<EOF
@@ -724,31 +621,6 @@ Icon=htop
 Categories=System;
 EOF
 
-
-#echo "• Creating system-update launcher..."
-#sudo tee /usr/share/applications/update.desktop >/dev/null <<EOF
-#[Desktop Entry]
-#Type=Application
-#Name=System Update (Linux)
-#Comment=System Update
-#Exec=alacritty -e sudo nala update
-#Terminal=false
-#Icon=update
-#Categories=System;
-#EOF
-
-#echo "• Creating system-upgrade launcher..."
-#sudo tee /usr/share/applications/upgrade.desktop >/dev/null <<EOF
-#[Desktop Entry]
-#Type=Application
-#Name=System Upgrade (Linux)
-#Comment=System Upgrade
-#Exec=alacritty -e sudo nala upgrade
-#Terminal=false
-#Icon=upgrade
-#Categories=System;
-#EOF
-
 echo "• Creating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
 [Desktop Entry]
@@ -760,12 +632,11 @@ Icon=bauh
 Categories=System;
 EOF
 
-
 echo "• Installing Alternix Updater..."
 sudo chmod +x "$HOME/Alternix/update/os-check-update"
-sudo cp $HOME/Alternix/update/os-check-update /usr/bin/
-sudo mkdir /usr/share/alternix/
-sudo cp $HOME/Alternix/update/version.txt /usr/share/alternix/
+sudo cp "$HOME/Alternix/update/os-check-update" /usr/bin/
+sudo mkdir -p /usr/share/alternix/
+sudo cp "$HOME/Alternix/update/version.txt" /usr/share/alternix/
 
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
@@ -783,13 +654,11 @@ EOF
 # Create Brave YouTube WebApp launcher
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[System] Installing Brave WebApps..."
 
 APP_DIR="$HOME/.local/share/applications"
 mkdir -p "$APP_DIR"
 
-# Optional: install an icon (replace if you have your own)
 YOUTUBE_ICON="/usr/share/icons/hicolor/256x256/apps/youtube.png"
 if [ -f "$ALT_ROOT/Alternix/icons/youtube.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/icons/youtube.png" "$YOUTUBE_ICON"
@@ -808,17 +677,10 @@ Terminal=false
 Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
-
 chmod +x "$APP_DIR/youtube-webapp.desktop"
-
 echo "• YouTube WebApp installed."
 
-# ────────────────────────────────────────────────
-# Create Alternitech Forums WebApp 
-# ────────────────────────────────────────────────
 echo "[Apps] Installing AlterniTech Forum WebApp..."
-
-
 if [ -f "icons/alternitech-forum.png" ]; then
     sudo cp icons/alternitech-forum.png /usr/share/icons/hicolor/64x64/apps/alternitech-forum.png
 fi
@@ -835,19 +697,11 @@ Terminal=false
 Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
-
 chmod +x "$HOME/.local/share/applications/alternitech-forums.desktop"
-
 echo "• Alternitech Forums WebApp installed."
 
-
-# ────────────────────────────────────────────────
-# Create OpenStreetMap Forums WebApp 
-# ────────────────────────────────────────────────
-echo "[Apps] Installing AlterniTech Forum WebApp..."
-
-
-if [ -f "icons/alternitech-forum.png" ]; then
+echo "[Apps] Installing OpenStreetMap WebApp..."
+if [ -f "icons/openmap.png" ]; then
     sudo cp icons/openmap.png /usr/share/icons/hicolor/64x64/apps/openmap.png
 fi
 
@@ -856,48 +710,38 @@ cat <<EOF > "$HOME/.local/share/applications/openmap.desktop"
 Version=1.0
 Type=Application
 Name=OpenStreetMap
-Comment=OpenStreenMap WebApp (Brave)
+Comment=OpenStreetMap WebApp (Brave)
 Exec=brave-browser --app=https://openstreetmap.org/ --new-window --force-device-scale-factor=1.3
 Icon=openmap
 Terminal=false
 Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
-
 chmod +x "$HOME/.local/share/applications/openmap.desktop"
 
-# Refresh desktop database
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$HOME/.local/share/applications" || true
 fi
-
 echo "• OpenStreetMap WebApp installed."
 
 
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# 	^^^^	Add more WebApps here:	^^^^
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 # ────────────────────────────────────────────────
-# 7. Installing Samba Network Updates
+# 7. Samba Network Updates
 # ────────────────────────────────────────────────
 echo " "
-
-
 echo "• Updating /etc/samba/smb.conf..."
-
 sudo sed -i '/workgroup = WORKGROUP/a client min protocol = NT1\nserver min protocol = NT1' /etc/samba/smb.conf
 
 echo "• Restarting Samba service..."
-sudo systemctl restart smbd nmbd || true
+# SysVinit: use service(8) instead of systemctl
+sudo service smbd restart || true
+sudo service nmbd restart || true
+
 
 # ────────────────────────────────────────────────
 # OSM-Lockscreen Security Layer
-# Prevents killing osm-lockscreen via SSH or pkill
 # ────────────────────────────────────────────────
 echo " "
-
-
 echo "[X] Setting up secure lockscreen supervisor..."
 
 # 1. Create dedicated lockscreen user (no login, no shell)
@@ -906,18 +750,15 @@ if ! id "lockscreen" >/dev/null 2>&1; then
 fi
 
 # 2. Install supervisor daemon (osm-lockd)
-sudo tee /usr/local/bin/osm-lockd >/dev/null <<'EOF'
+sudo tee /usr/local/bin/osm-lockd >/dev/null <<'LOCKD'
 #!/bin/bash
 
 FLAG="/tmp/osm_unlock_success"
 
 while true; do
-    # Clear flag before launching
     rm -f "$FLAG"
-
     /usr/local/bin/osm-lockscreen
 
-    # If flag exists, stop (unlock was successful)
     if [ -f "$FLAG" ]; then
         rm -f "$FLAG"
         # signal the user session (osm-status plays the boot sound once per boot)
@@ -926,187 +767,141 @@ while true; do
         exit 0
     fi
 
-    # Otherwise restart the lockscreen after short delay
     sleep 0.05
 done
-EOF
-
+LOCKD
 sudo chmod +x /usr/local/bin/osm-lockd
 
-# 3. Create systemd service
-sudo tee /etc/systemd/system/osm-lockscreen.service >/dev/null <<'EOF'
-[Unit]
-Description=OSM-Phone Lockscreen Supervisor
-After=graphical.target
+# 3. Create a SysVinit init script for osm-lockscreen
+# ── This replaces the systemd .service unit ───────────────────────────────
+sudo tee /etc/init.d/osm-lockscreen >/dev/null <<'INITSCRIPT'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          osm-lockscreen
+# Required-Start:    $remote_fs $syslog $local_fs
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: OSM-Phone Lockscreen Supervisor
+# Description:       Runs osm-lockd as the lockscreen user, restarting on crash.
+### END INIT INFO
 
-[Service]
-Type=simple
-User=lockscreen
-ExecStart=/usr/local/bin/osm-lockd
-Restart=always
-RestartSec=0.05
+NAME="osm-lockscreen"
+DAEMON="/usr/local/bin/osm-lockd"
+DAEMON_USER="lockscreen"
+PIDFILE="/var/run/$NAME.pid"
 
-[Install]
-WantedBy=graphical.target
-EOF
+. /lib/lsb/init-functions
 
-sudo systemctl daemon-reload
-sudo systemctl enable osm-lockscreen.service
+case "$1" in
+  start)
+    log_daemon_msg "Starting $NAME"
+    start-stop-daemon --start --quiet --background \
+        --make-pidfile --pidfile "$PIDFILE" \
+        --chuid "$DAEMON_USER" \
+        --exec "$DAEMON"
+    log_end_msg $?
+    ;;
+  stop)
+    log_daemon_msg "Stopping $NAME"
+    start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
+    rm -f "$PIDFILE"
+    log_end_msg $?
+    ;;
+  restart|force-reload)
+    $0 stop
+    sleep 1
+    $0 start
+    ;;
+  status)
+    status_of_proc -p "$PIDFILE" "$DAEMON" "$NAME" && exit 0 || exit $?
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|force-reload|status}"
+    exit 1
+    ;;
+esac
+INITSCRIPT
+
+sudo chmod +x /etc/init.d/osm-lockscreen
+
+# Enable at runlevels 2-5, disable at 0/1/6
+sudo update-rc.d osm-lockscreen defaults
+sudo service osm-lockscreen start || true
+
 echo "[✓] Lockscreen security layer installed."
 
 
-
 # ────────────────────────────────────────────────
-# Lockscreen auto-activate on wake (Sleep / Hibernate)
-# Debian 13 Compatible (systemd 255+)
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ NEEDS FIXING
-# ────────────────────────────────────────────────
-#echo " "
-
-#
-#echo "[X] Enabling wake lockscreen auto-launch..."
-#
-#sudo mkdir -p /etc/systemd/system-sleep
-#
-#sudo tee /etc/systemd/system-sleep/osm-lockscreen >/dev/null <<'EOF'
-##!/bin/bash
-#case "$1" in
-#    post)
-#        systemctl restart osm-lockscreen.service
-#        ;;
-#esac
-#EOF
-#
-#sudo chmod +x /etc/systemd/system-sleep/osm-lockscreen
-#echo "[✓] Lockscreen wake handler installed."
-
-
-
-# ────────────────────────────────────────────────
-# Alternix Idle Lock (auto-lock after N seconds)
-# ────────────────────────────────────────────────
-#echo " "
-#
-#
-#echo "[X] Installing Alternix auto-idle lock..."
-#
-#
-#sudo tee /usr/local/bin/osm-idle-lockd >/dev/null <<'EOF'
-##!/bin/bash
-#
-#LOCKSCREEN_TIMEOUT=30
-#FLAG="/tmp/osm_unlock_success"
-#
-#while true; do
-#    IDLE_MS=$(xprintidle 2>/dev/null)
-#    if [ -z "$IDLE_MS" ]; then
-#        sleep 1
-#        continue
-#    fi
-#
-#    IDLE=$((IDLE_MS / 1000))
-#
-#    if [ $IDLE -ge $LOCKSCREEN_TIMEOUT ]; then
-#        rm -f "$FLAG"
-#        systemctl restart osm-lockscreen.service
-#    fi
-#
-#    sleep 1
-#done
-#EOF
-#
-#sudo chmod +x /usr/local/bin/osm-idle-lockd
-#
-#sudo tee /etc/systemd/system/osm-idle-lockd.service >/dev/null <<'EOF'
-#[Unit]
-#Description=Alternix Idle Auto-Lock Daemon
-#After=graphical.target
-#
-#[Service]
-#ExecStart=/usr/local/bin/osm-idle-lockd
-#Restart=always
-#RestartSec=1
-#
-#[Install]
-#WantedBy=graphical.target
-#EOF
-#
-#sudo systemctl daemon-reload
-#sudo systemctl enable --now osm-idle-lockd.service
-#echo "[✓] Idle lock enabled."
-
-
-
-# ────────────────────────────────────────────────
-# systemd-logind override
-# Ignore power button ACTIONS, but do NOT swallow events
+# logind / elogind power key handling
+# Devuan ships elogind as a drop-in for systemd-logind.
+# Its config lives in /etc/elogind/logind.conf (same format).
 # ────────────────────────────────────────────────
 echo " "
+echo "[X] Configuring elogind power key handling..."
 
+sudo mkdir -p /etc/elogind/logind.conf.d
 
-echo "[X] Configuring systemd-logind power key handling..."
-
-sudo mkdir -p /etc/systemd/logind.conf.d
-
-sudo tee /etc/systemd/logind.conf.d/alternix-power.conf >/dev/null <<'EOF'
+sudo tee /etc/elogind/logind.conf.d/alternix-power.conf >/dev/null <<'EOF'
 [Login]
 HandlePowerKey=ignore
 PowerKeyIgnoreInhibition=no
 EOF
 
-#sudo systemctl restart systemd-logind
+# Also update the main logind.conf as a fallback for older elogind versions
+# that don't support drop-in dirs
+sudo sed -i 's/^#*HandlePowerKey=.*/HandlePowerKey=ignore/' /etc/elogind/logind.conf 2>/dev/null || true
 
-echo "[✓] logind configured."
+sudo service elogind restart || true
 
-
-# ────────────────────────────────────────────────
-# Unified Lock Trigger - NEEDS FIXING
-# ────────────────────────────────────────────────
-#echo " "
-#
-#
-#sudo tee /usr/local/bin/alternix-lock-now >/dev/null <<'EOF'
-##!/bin/bash
-#FLAG="/tmp/osm_unlock_success"
-#
-#rm -f "$FLAG"
-#systemctl restart osm-lockscreen.service
-#EOF
-#
-#sudo chmod +x /usr/local/bin/alternix-lock-now
-#
-#
-#echo "[✓] Unified lock trigger installed.."
+echo "[✓] elogind configured."
 
 
 # ────────────────────────────────────────────────
-# 8. Autologin via systemd
+# 8. Autologin via agetty override
+# Devuan uses /etc/inittab (SysVinit) rather than systemd drop-ins.
+# We replace the tty1 line to pass --autologin.
 # ────────────────────────────────────────────────
 echo " "
-
 echo "[5/10] Enabling autologin on tty1 for user $TARGET_USER..."
 
-sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+INITTAB="/etc/inittab"
 
-sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null <<EOF
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin $TARGET_USER --noclear %I \$TERM
-Type=idle
-EOF
+if [ -f "$INITTAB" ]; then
+    # Back up inittab before editing
+    sudo cp "$INITTAB" "${INITTAB}.bak"
 
-sudo systemctl daemon-reload
-#sudo systemctl restart getty@tty1
+    # Replace the tty1 getty line with an autologin version.
+    # Typical Devuan line:  1:2345:respawn:/sbin/getty 38400 tty1
+    # We change it to use agetty with --autologin.
+    if grep -q "^1:.*getty.*tty1" "$INITTAB"; then
+        sudo sed -i "s|^1:.*getty.*tty1.*|1:2345:respawn:/sbin/agetty --autologin $TARGET_USER --noclear tty1 linux|" "$INITTAB"
+        echo "• inittab tty1 line updated for autologin."
+    else
+        # Line not found in expected format — append a safe fallback
+        echo "1:2345:respawn:/sbin/agetty --autologin $TARGET_USER --noclear tty1 linux" | sudo tee -a "$INITTAB" >/dev/null
+        echo "• Autologin line appended to inittab."
+    fi
+
+    # Signal init to re-read inittab (SysVinit equivalent of daemon-reload)
+    sudo kill -HUP 1 || true
+else
+    echo "WARNING: /etc/inittab not found."
+    echo "If using OpenRC or runit, configure autologin in your getty service config."
+    echo "For OpenRC: edit /etc/conf.d/agetty.tty1 and set agetty_options."
+fi
 
 echo "Setting NOPASSWD for $TARGET_USER..."
 echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-nopasswd >/dev/null
 sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 
+sudo usermod -aG video,input "$TARGET_USER"
+
 # ────────────────────────────────────────────────
 # 9. Cleanup Alternix folder
 # ────────────────────────────────────────────────
-echo " "
 
+echo " "
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
 cd ~
 rm -rf "$ALT_ROOT"
@@ -1116,37 +911,114 @@ rm -rf "$ALT_ROOT"
 # 10. Install grub theme
 # ────────────────────────────────────────────────
 echo " "
-
-cd $HOME
+cd "$HOME"
 git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
 cd forest-dawn-grub-theme
 chmod +x install.sh
 sudo ./install.sh
+
+# Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
+sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
+
 sudo update-grub
+
 
 # ────────────────────────────────────────────────
 # 11. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
-
 echo "- Installing auto-cpufreq..."
-cd $HOME
+cd "$HOME"
 git clone https://github.com/AdnanHodzic/auto-cpufreq.git
 cd auto-cpufreq
 sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
 
-# ──────────────────────────────────────────────── 
-# install rounded-corners
+
+# ────────────────────────────────────────────────
+# 12. rounded-corners
 # ────────────────────────────────────────────────
 echo " "
-
 echo "- Installing rounded-corners..."
-cd $HOME
+cd "$HOME"
 git clone https://github.com/DansDesigns/rounded_corners
 cd rounded_corners
 chmod +x install_corners.sh
 sudo ./install_corners.sh
+
+
+# ────────────────────────────────────────────────
+# GLX compatibility check → patch picom.conf
+# Detects whether the GPU supports GLX/OpenGL well
+# enough for picom's glx backend. If not, switches
+# picom.conf to xrender (safe on all hardware).
+# ────────────────────────────────────────────────
+echo " "
+echo "[Picom] Checking GLX compatibility..."
+
+PICOM_CONF="$HOME/.config/picom/picom.conf"
+GLX_OK=false
+
+# glxinfo must be available — install if missing
+if ! command -v glxinfo >/dev/null 2>&1; then
+    echo "• glxinfo not found, installing mesa-utils..."
+    sudo nala install -y mesa-utils 2>/dev/null || sudo apt install -y mesa-utils 2>/dev/null || true
+fi
+
+if command -v glxinfo >/dev/null 2>&1; then
+    GL_RENDERER=$(glxinfo 2>/dev/null | grep "OpenGL renderer" | head -1)
+    GL_VERSION=$(glxinfo 2>/dev/null | grep "OpenGL version" | head -1)
+
+    echo "• Renderer : $GL_RENDERER"
+    echo "• Version  : $GL_VERSION"
+
+    # Extract the major OpenGL version number
+    GL_MAJOR=$(echo "$GL_VERSION" | grep -oP 'OpenGL version string: \K[0-9]+' | head -1)
+
+    # GLX backend requires OpenGL 2.0+ and a real renderer (not software/llvm)
+    if [[ "$GL_MAJOR" -ge 2 ]] 2>/dev/null && \
+       ! echo "$GL_RENDERER" | grep -qiE "llvmpipe|softpipe|software|swrast|virgl"; then
+        GLX_OK=true
+    fi
+else
+    echo "• glxinfo unavailable — assuming GLX not supported."
+fi
+
+if [ "$GLX_OK" = true ]; then
+    echo "[✓] GLX compatible — picom will use glx backend."
+else
+    echo "[!] GLX not supported or too limited — switching picom to xrender backend."
+
+    if [ -f "$PICOM_CONF" ]; then
+        # Replace backend line if it exists
+        if grep -q "^backend" "$PICOM_CONF"; then
+            sed -i 's/^backend\s*=\s*"glx"/backend = "xrender"/' "$PICOM_CONF"
+            sed -i 's/^backend\s*=\s*"egl"/backend = "xrender"/' "$PICOM_CONF"
+        else
+            # Prepend if no backend line found
+            sed -i '1s/^/backend = "xrender";\n/' "$PICOM_CONF"
+        fi
+
+        # Disable vsync — unreliable with xrender on old Intel
+        if grep -q "^vsync" "$PICOM_CONF"; then
+            sed -i 's/^vsync\s*=\s*true/vsync = false/' "$PICOM_CONF"
+        else
+            echo "vsync = false;" >> "$PICOM_CONF"
+        fi
+
+        echo "[✓] picom.conf patched: backend = xrender, vsync = false"
+    else
+        echo "• $PICOM_CONF not found — creating minimal xrender config..."
+        mkdir -p "$(dirname "$PICOM_CONF")"
+        cat <<'PICOMCFG' > "$PICOM_CONF"
+# picom config — xrender backend (auto-set: GLX not supported on this GPU)
+backend = "xrender";
+vsync = false;
+PICOMCFG
+        echo "[✓] Minimal xrender picom.conf created."
+    fi
+fi
+
 
 # ────────────────────────────────────────────────
 # Finish + prompt
@@ -1157,18 +1029,18 @@ echo " "
 echo " "
 echo "=============================================="
 echo "     Alternix installation complete!"
+echo "     (Devuan / SysVinit Edition)"
 echo "=============================================="
 echo " "
-echo " "
-echo " "
-echo " "
+echo ""
 echo "Everything installed to /usr/local/bin/"
-echo " "
+echo ""
 echo "Autologin + startx enabled for user: $TARGET_USER"
-echo " "
+echo ""
 echo ".xinitrc configured for Qtile."
-echo " "
-
+echo ""
+echo "Init system: SysVinit  |  logind: elogind"
+echo ""
 echo "Press 1 to Restart"
 echo "Press 2 to Continue"
 echo ""
@@ -1176,19 +1048,14 @@ echo ""
 while true; do
     read -n 1 -s -r KEY
     if [[ "$KEY" == "1" ]]; then
-        echo "Begining Reboot Sequence..."
+        echo "Beginning Reboot Sequence..."
         echo " "
         echo "This window will self-destruct in 5 seconds..."
-        sleep 1
-        echo "5.."
-        sleep 1
-        echo "4.."
-        sleep 1
-        echo "3.."
-        sleep 1
-        echo "2.."
-        sleep 1
-        echo "1.."
+        sleep 1; echo "5.."
+        sleep 1; echo "4.."
+        sleep 1; echo "3.."
+        sleep 1; echo "2.."
+        sleep 1; echo "1.."
         sleep 1
         sudo reboot
         break

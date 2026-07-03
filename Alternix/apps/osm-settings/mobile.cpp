@@ -160,7 +160,7 @@ public:
         QFont f;
         f.setFamily("Noto Sans");
         f.setPointSize(26);
-        QApplication::setFont(f);
+        setFont(f);   // page-local: do NOT change the app-wide font
 
         setStyleSheet("background:#282828;");
 
@@ -239,7 +239,7 @@ public:
         backButton->setFixedSize(140, 60);
         backButton->setStyleSheet(
             "QPushButton { background:#444444; color:white; border:1px solid #222222; "
-            "border-radius:16px; font-size:34px; } "
+            "border-radius:16px; font-size:34px; font-family:'DejaVu Sans'; } "
             "QPushButton:hover { background:#555555; }"
             "QPushButton:pressed { background:#333333; }"
         );

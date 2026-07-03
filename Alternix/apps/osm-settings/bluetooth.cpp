@@ -317,6 +317,7 @@ public:
             " border:1px solid #222222;"
             " border-radius:16px;"
             " font-size:34px;"
+            " font-family:'DejaVu Sans';"
             "}"
             "QPushButton:hover { background:#555555; }"
             "QPushButton:pressed { background:#333333; }"
