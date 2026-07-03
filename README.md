@@ -68,6 +68,42 @@ Follow the onscreen prompts..
 You can edit the install-alternix.sh script to enable or disable packages.
 
 
+# Notification & Alarm Sounds
+
+Alternix plays alert sounds through osm-status (the notification panel).
+Sound files live in:
+```
+~/.config/Alternix/sounds/
+```
+
+Drop your own files in with these names:
+```
+notify.*   plays for ordinary app notifications
+alarm.*    plays for alarms and critical notifications
+boot.*     plays once per boot, after the first unlock
+```
+
+Supported formats: WAV, OGG, FLAC and MP3 (checked in that order).
+For example, alarm.wav, alarm.ogg, alarm.flac or alarm.mp3 all work.
+Playback uses paplay/aplay for WAV, OGG and FLAC, and mpg123 for MP3,
+with VLC (cvlc) as an automatic fallback for anything else.
+
+Per-alarm sounds: the osm-clock app has a Sound browse button when
+adding an alarm and on the timer page, so each alarm or timer can use
+its own sound file instead of the defaults above. Alarms are stored in
+~/.osm-alarms, one per line:
+```
+HH:MM|Title|Body                       one-shot today
+yyyy-MM-dd HH:MM|Title|Body            one-shot on a date
+daily HH:MM|Title|Body                 repeats every day
+HH:MM|Title|Body|/path/to/sound.mp3    optional 4th field = custom sound
+```
+
+Apps can also send standard desktop notifications (notify-send and
+anything using org.freedesktop.Notifications), which appear in the
+osm-status pop-out panel with the notify sound.
+
+
 # The utilization of this Linux distribution is prohibited in jurisdictions mandating age verification.
 Any penalties or charges incurred due to non-compliance will be transferred to the user
 
