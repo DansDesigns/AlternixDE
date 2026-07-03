@@ -411,6 +411,8 @@ chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
 
 echo "• Building osm-status..."
+mkdir -p "$HOME/.config/Alternix/sounds"
+# Drop notify.wav and alarm.wav in ~/.config/Alternix/sounds/ for alert sounds
 g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
 chmod +x osm-status && sudo mv osm-status /usr/local/bin/
 

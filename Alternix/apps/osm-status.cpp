@@ -43,8 +43,41 @@ struct NotificationInfo {
     QString title;
     QString body;
     QString path;
+    QString sound;     // "" = default, "none" = silent, else file path
     QDateTime when;
 };
+
+// ───────────────────────────────────────────── Sounds
+// Default sound files (drop your own .wav files here):
+//   ~/.config/Alternix/sounds/notify.wav   – ordinary notifications
+//   ~/.config/Alternix/sounds/alarm.wav    – alarms / critical
+
+static QString soundDirPath() {
+    return QDir::homePath() + "/.config/Alternix/sounds";
+}
+
+static void playSoundFile(const QString &file) {
+    if (file.isEmpty() || !QFile::exists(file))
+        return;
+    // paplay (pulseaudio) first, aplay (alsa) as fallback
+    QProcess::startDetached("sh", QStringList() << "-c",
+        QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null")
+            .arg("'" + QString(file).replace("'", "'\\''") + "'"));
+}
+
+// sound: "" → default by kind, "none" → silent, path → that file
+static void playNotificationSound(const QString &sound, bool alarmish) {
+    if (sound.compare("none", Qt::CaseInsensitive) == 0)
+        return;
+    if (!sound.isEmpty() && QFile::exists(sound)) {
+        playSoundFile(sound);
+        return;
+    }
+    QString def = soundDirPath() + (alarmish ? "/alarm.wav" : "/notify.wav");
+    if (alarmish && !QFile::exists(def))
+        def = soundDirPath() + "/notify.wav";   // fall back to notify
+    playSoundFile(def);
+}
 
 class StatusPanel;
 class NotificationCard;
@@ -63,8 +96,13 @@ public:
 
     // overlay width from edge of screen
     int computeRequiredWidth(const QStringList &titles) {
-        int base = 360;
-        QFont f; f.setPointSize(32);
+        // fixed horizontal overhead around the title text:
+        // outer margin 20 + inner 32 + list 15 + card 20 + time 64
+        // + close 48 + spacings + text margins ≈ 260
+        int base = 280;
+        QFont f;
+        f.setPixelSize(28);        // matches the card title style
+        f.setBold(true);
         QFontMetrics fm(f);
         int max = 0;
         for (const QString &t : titles)
@@ -88,6 +126,8 @@ private:
     int          m_maxH;
     QString      m_dirPath;
     int          m_notificationCount;
+    QSet<QString> m_seenPaths;
+    bool          m_firstScan = true;
 };
 
 // ───────────────────────────────────────────── NotificationCard
@@ -207,13 +247,21 @@ void StatusPanel::resizeToItems(int count) {
     int totalH = 0;
 
     if (m_list) {
+        // real width each card will get:
+        // panel − outer(20) − inner(16+16) − list margins(10+5)
+        int cardW = m_width - 20 - 32 - 15;
+
         int itemCount = m_list->count();
         for (int i = 0; i < itemCount; ++i) {
             QLayoutItem *it = m_list->itemAt(i);
             if (!it) continue;
             QWidget *w = it->widget();
             if (!w) continue;
-            totalH += w->sizeHint().height();
+
+            // word-wrapped labels need height-for-width, not sizeHint
+            int hh = w->hasHeightForWidth() ? w->heightForWidth(cardW) : -1;
+            if (hh <= 0) hh = w->sizeHint().height();
+            totalH += hh;
         }
 
         if (itemCount > 1)
@@ -224,7 +272,7 @@ void StatusPanel::resizeToItems(int count) {
     }
 
     // inner + outer margins overhead (approx), similar to osm-running
-    int h = totalH + 40;
+    int h = totalH + 72;
     h = qBound(120, h, m_maxH);
 
     QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
@@ -253,6 +301,7 @@ void StatusPanel::refreshNotifications() {
     std::reverse(files.begin(), files.end());
 
     QStringList titles;
+    QSet<QString> newSeen;
     int count = 0;
 
     for (const QFileInfo &fi : files) {
@@ -269,6 +318,7 @@ void StatusPanel::refreshNotifications() {
 
         QString rawTitle;
         QString body;
+        QString soundLine;
 
         int firstNonEmpty = -1;
         for (int i = 0; i < lines.size(); ++i) {
@@ -281,8 +331,14 @@ void StatusPanel::refreshNotifications() {
         if (firstNonEmpty >= 0) {
             rawTitle = lines[firstNonEmpty];
             QStringList rest;
-            for (int i = firstNonEmpty + 1; i < lines.size(); ++i)
+            for (int i = firstNonEmpty + 1; i < lines.size(); ++i) {
+                // optional "sound:" control line – not shown in the body
+                if (lines[i].startsWith("sound:", Qt::CaseInsensitive)) {
+                    soundLine = lines[i].mid(6).trimmed();
+                    continue;
+                }
                 rest << lines[i];
+            }
             body = rest.join('\n').trimmed();
         } else {
             rawTitle.clear();
@@ -303,20 +359,32 @@ void StatusPanel::refreshNotifications() {
         info.title = title;
         info.body  = body;
         info.path  = fi.absoluteFilePath();
+        info.sound = soundLine;
         info.when  = fi.lastModified();
 
         titles << title;
+
+        // sound for newly-appeared notifications (skip initial scan)
+        newSeen.insert(info.path);
+        if (!m_seenPaths.contains(info.path) && !m_firstScan) {
+            bool alarmish = title.startsWith("⏰");
+            playNotificationSound(info.sound, alarmish);
+        }
 
         NotificationCard *card = new NotificationCard(this, info, m_content);
         m_list->addWidget(card);
         count++;
     }
 
+    m_seenPaths = newSeen;
+    m_firstScan = false;
+
     m_notificationCount = count;
 
     // compute and apply width (same logic as osm-running)
     int needed = computeRequiredWidth(titles);
-    m_width = qMin(needed, 1080);
+    QRect scr = QGuiApplication::primaryScreen()->geometry();
+    m_width = qMin(qMin(needed, 1080), scr.width());
 
     QRect g = geometry();
     int x = QGuiApplication::primaryScreen()->geometry().width() - m_width;
@@ -374,6 +442,7 @@ NotificationCard::NotificationCard(
 
     QLabel *title = new QLabel(m_info.title, this);
     title->setStyleSheet("color:white;font-size:28px;font-weight:bold;");
+    title->setWordWrap(true);
     title->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_titleLabel = title;
     v->addWidget(title);
@@ -734,7 +803,8 @@ static QString notifyDirPath() {
 //   first non-empty line = title, rest = body.
 static QString writeNotificationFile(const QString &title,
                                      const QString &body,
-                                     quint32 id)
+                                     quint32 id,
+                                     const QString &sound = QString())
 {
     QDir d(notifyDirPath());
     if (!d.exists()) d.mkpath(".");
@@ -757,6 +827,8 @@ static QString writeNotificationFile(const QString &title,
     QString b = body.trimmed();
     if (!b.isEmpty())
         out << b << "\n";
+    if (!sound.trimmed().isEmpty())
+        out << "sound:" << sound.trimmed() << "\n";
     f.close();
     return f.fileName();
 }
@@ -943,6 +1015,8 @@ private:
 //   HH:MM|Title|Body                  → one-shot today (removed after firing)
 //   yyyy-MM-dd HH:MM|Title|Body       → one-shot at date (removed after firing)
 //   daily HH:MM|Title|Body            → repeats every day
+// An optional 4th field is a per-alarm sound file:
+//   HH:MM|Title|Body|/path/to/sound.wav
 // Fires as a critical notification, so the panel slides out.
 
 class AlarmWatcher : public QObject {
@@ -998,6 +1072,7 @@ private:
             QString when = parts.value(0).trimmed();
             QString title = parts.value(1, "Alarm").trimmed();
             QString body  = parts.value(2).trimmed();
+            QString sound = parts.value(3).trimmed();   // optional per-alarm sound file
             if (title.isEmpty()) title = "Alarm";
 
             bool fire = false;
@@ -1027,7 +1102,8 @@ private:
                     ? now.toString("HH:mm")
                     : body;
                 writeNotificationFile("⏰ " + title, b,
-                                      QDateTime::currentMSecsSinceEpoch() % 100000);
+                                      QDateTime::currentMSecsSinceEpoch() % 100000,
+                                      sound);
                 if (m_overlay)
                     m_overlay->showPanel();
 
@@ -1063,6 +1139,9 @@ int main(int argc,char**argv) {
 
     OverlayRoot root;          // overlay window
     ActivationEdgeBar bar(&root);   // always-on-top gesture edge
+
+    // ensure the default sound folder exists
+    QDir().mkpath(soundDirPath());
 
     // become the desktop notification daemon (app push notifications)
     NotificationServer server(&root);

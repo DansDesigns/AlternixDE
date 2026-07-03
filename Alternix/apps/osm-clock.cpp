@@ -31,6 +31,8 @@
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QSettings>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <functional>
 
 static const int CARD_PADDING = 22;
@@ -133,13 +135,16 @@ struct Alarm {
     QString when;    // "HH:MM", "yyyy-MM-dd HH:MM", or "daily HH:MM"
     QString title;
     QString body;
+    QString sound;   // optional per-alarm sound file
 
     bool daily() const { return when.startsWith("daily ", Qt::CaseInsensitive); }
     QString timePart() const {
         return daily() ? when.mid(6).trimmed() : when;
     }
     QString toLine() const {
-        return when + "|" + title + "|" + body;
+        QString l = when + "|" + title + "|" + body;
+        if (!sound.isEmpty()) l += "|" + sound;
+        return l;
     }
 };
 
@@ -166,6 +171,7 @@ static QList<Alarm> loadAlarms(QStringList *commentsOut = nullptr) {
         a.when  = parts.value(0).trimmed();
         a.title = parts.value(1, "Alarm").trimmed();
         a.body  = parts.value(2).trimmed();
+        a.sound = parts.value(3).trimmed();
         if (a.title.isEmpty()) a.title = "Alarm";
         if (!a.when.isEmpty()) out << a;
     }
@@ -194,7 +200,8 @@ static void saveAlarms(const QList<Alarm> &alarms) {
 }
 
 // Direct drop into the osm-status notification folder (timer done, etc.)
-static void dropNotification(const QString &title, const QString &body) {
+static void dropNotification(const QString &title, const QString &body,
+                             const QString &sound = QString()) {
     QDir d(QDir::homePath() + "/.osm-notify");
     if (!d.exists()) d.mkpath(".");
     QFile f(d.absoluteFilePath(
@@ -204,6 +211,20 @@ static void dropNotification(const QString &title, const QString &body) {
     QTextStream out(&f);
     out << title << "\n";
     if (!body.isEmpty()) out << body << "\n";
+    if (!sound.trimmed().isEmpty()) out << "sound:" << sound.trimmed() << "\n";
+}
+
+// touch-friendly audio file picker; returns empty if cancelled
+static QString pickSoundFile(QWidget *parent) {
+    QString start = QDir::homePath() + "/Music";
+    if (!QDir(start).exists()) start = QDir::homePath();
+    return QFileDialog::getOpenFileName(parent, "Choose sound",
+        start, "Audio files (*.wav *.ogg *.mp3 *.flac);;All files (*)");
+}
+
+static QString soundButtonText(const QString &sound) {
+    if (sound.isEmpty()) return QString::fromUtf8("\xf0\x9f\x8e\xb5  Sound: Default");
+    return QString::fromUtf8("\xf0\x9f\x8e\xb5  ") + QFileInfo(sound).fileName();
 }
 
 // ------------------------------------------------------
@@ -419,7 +440,9 @@ private:
             QLabel *ttl = new QLabel(a.title);
             ttl->setStyleSheet(
                 "font-size:26px; font-weight:bold; color:white; border:none;");
-            QLabel *subt = new QLabel(a.daily() ? "🔁 Daily" : "1️⃣ One-shot");
+            QLabel *subt = new QLabel(QString(a.daily() ? "\xF0\x9F\x94\x81 Daily"
+                                            : "1\xEF\xB8\x8F\xE2\x83\xA3 One-shot")
+                + (a.sound.isEmpty() ? "" : "   \xF0\x9F\x8E\xB5 " + QFileInfo(a.sound).fileName()));
             subt->setStyleSheet("font-size:20px; color:#bbbbbb; border:none;");
             textCol->addWidget(ttl);
             textCol->addWidget(subt);
@@ -552,6 +575,22 @@ private:
             " border:3px dashed #777; border-radius:12px; padding:0 18px; }");
         col->addWidget(name, 0, Qt::AlignHCenter);
 
+        // sound picker
+        QString *sound = new QString;
+        QPushButton *sndBtn = new QPushButton(soundButtonText(""));
+        sndBtn->setFixedSize(CARD_WIDTH, 80);
+        sndBtn->setStyleSheet(bigButtonStyle() +
+                              "QPushButton { font-size:26px; }");
+        QObject::connect(sndBtn, &QPushButton::clicked,
+            [this, sound, sndBtn]() {
+                QString f = pickSoundFile(this);
+                if (!f.isEmpty()) {
+                    *sound = f;
+                    sndBtn->setText(soundButtonText(f));
+                }
+            });
+        col->addWidget(sndBtn, 0, Qt::AlignHCenter);
+
         // daily toggle
         QPushButton *repeat = new QPushButton("🔁  Repeat daily: OFF");
         repeat->setFixedSize(CARD_WIDTH, 80);
@@ -573,7 +612,7 @@ private:
         save->setFixedSize(CARD_WIDTH, 90);
         save->setStyleSheet(bigButtonStyle());
         QObject::connect(save, &QPushButton::clicked,
-            [this, hour, minute, daily, name]() {
+            [this, hour, minute, daily, name, sound]() {
                 QString hm = QString("%1:%2")
                     .arg(*hour, 2, 10, QChar('0'))
                     .arg(*minute, 2, 10, QChar('0'));
@@ -593,6 +632,7 @@ private:
                 }
                 a.title = name->text().trimmed();
                 if (a.title.isEmpty()) a.title = "Alarm";
+                a.sound = *sound;
 
                 QList<Alarm> all = loadAlarms();
                 all << a;
@@ -666,6 +706,27 @@ private:
         }
         col->addWidget(adj);
 
+        // sound picker (persisted between launches)
+        QSettings cfg(QDir::homePath() + "/.config/Alternix/osm-clock.conf",
+                      QSettings::IniFormat);
+        QString *tSound = new QString(cfg.value("Timer/Sound").toString());
+        QPushButton *sndBtn = new QPushButton(soundButtonText(*tSound));
+        sndBtn->setFixedSize(CARD_WIDTH, 80);
+        sndBtn->setStyleSheet(bigButtonStyle() +
+                              "QPushButton { font-size:26px; }");
+        QObject::connect(sndBtn, &QPushButton::clicked,
+            [this, tSound, sndBtn]() {
+                QString f = pickSoundFile(this);
+                if (!f.isEmpty()) {
+                    *tSound = f;
+                    sndBtn->setText(soundButtonText(f));
+                    QSettings c(QDir::homePath()
+                                + "/.config/Alternix/osm-clock.conf",
+                                QSettings::IniFormat);
+                    c.setValue("Timer/Sound", f);
+                }
+            });
+
         // start / pause / reset
         QPushButton *startBtn = new QPushButton("▶️  Start");
         startBtn->setFixedSize(CARD_WIDTH, 90);
@@ -696,7 +757,7 @@ private:
             });
 
         QObject::connect(tick, &QTimer::timeout,
-            [remaining, setValue, running, startBtn, tick, refresh]() {
+            [remaining, setValue, running, startBtn, tick, refresh, tSound]() {
                 if (*remaining > 0) --*remaining;
                 refresh();
                 if (*remaining <= 0) {
@@ -708,9 +769,12 @@ private:
                     dropNotification("⏰ Timer finished",
                         QString("%1:%2 timer done")
                             .arg(m, 2, 10, QChar('0'))
-                            .arg(s, 2, 10, QChar('0')));
+                            .arg(s, 2, 10, QChar('0')),
+                        *tSound);
                 }
             });
+
+        col->addWidget(sndBtn, 0, Qt::AlignHCenter);
 
         col->addSpacing(10);
         col->addWidget(startBtn, 0, Qt::AlignHCenter);
