@@ -414,10 +414,32 @@ private:
         for (int i = 0; i < alarms.size(); ++i) {
             const Alarm &a = alarms[i];
 
+            // ---- state → border colour
+            // daily: orange | time already passed: grey | active: green
+            bool passed = false;
+            if (!a.daily()) {
+                QString w = a.when;
+                if (w.contains(' ')) {
+                    QDateTime dt = QDateTime::fromString(w, "yyyy-MM-dd HH:mm");
+                    passed = dt.isValid() && dt < QDateTime::currentDateTime();
+                } else {
+                    QTime t = QTime::fromString(w, "HH:mm");
+                    passed = t.isValid() && t < QTime::currentTime();
+                }
+            }
+            QString borderCol = a.daily() ? "#e08a2e"          // orange
+                              : passed    ? "#8a8a8a"          // grey
+                                          : "#4fae4f";         // green
+
             QFrame *card = new QFrame;
-            card->setStyleSheet(
-                "QFrame { background:#303030; border:3px dashed #777;"
-                " border-radius:12px; }");
+            card->setObjectName("alarmCard");
+            // only the card itself gets the background/border; every
+            // child stays transparent so no dark corner boxes appear
+            card->setStyleSheet(QString(
+                "QFrame#alarmCard { background:#303030;"
+                " border:3px dashed %1; border-radius:12px; }"
+                "QFrame#alarmCard QWidget { background:transparent;"
+                " border:none; }").arg(borderCol));
             card->setMinimumWidth(CARD_WIDTH);
             card->setMaximumWidth(CARD_WIDTH);
             card->setFixedHeight(130);
@@ -426,31 +448,34 @@ private:
             row->setContentsMargins(CARD_PADDING, 10, CARD_PADDING, 10);
             row->setSpacing(ICON_TEXT_SPACING);
 
-            QLabel *timeLbl = new QLabel(a.timePart());
+            // 🎵 symbol next to the time when a custom sound is set
+            QLabel *timeLbl = new QLabel(
+                a.timePart() + (a.sound.isEmpty() ? "" : " \xF0\x9F\x8E\xB5"));
             timeLbl->setStyleSheet(
-                "font-size:44px; font-weight:bold; color:white; border:none;");
-            timeLbl->setFixedWidth(220);
+                "font-size:44px; font-weight:bold; color:white;");
+            timeLbl->setFixedWidth(a.sound.isEmpty() ? 220 : 280);
 
             QWidget *textWrapper = new QWidget;
-            textWrapper->setStyleSheet("border:none;");
             QVBoxLayout *textCol = new QVBoxLayout(textWrapper);
             textCol->setContentsMargins(0, 0, 0, 0);
             textCol->setSpacing(0);
 
             QLabel *ttl = new QLabel(a.title);
             ttl->setStyleSheet(
-                "font-size:26px; font-weight:bold; color:white; border:none;");
-            QLabel *subt = new QLabel(QString(a.daily() ? "\xF0\x9F\x94\x81 Daily"
-                                            : "1\xEF\xB8\x8F\xE2\x83\xA3 One-shot")
-                + (a.sound.isEmpty() ? "" : "   \xF0\x9F\x8E\xB5 " + QFileInfo(a.sound).fileName()));
-            subt->setStyleSheet("font-size:20px; color:#bbbbbb; border:none;");
+                "font-size:26px; font-weight:bold; color:white;");
+            QLabel *subt = new QLabel(
+                a.daily() ? "\xF0\x9F\x94\x81 Daily"
+                : passed  ? "One-shot (passed)"
+                          : "One-shot");
+            subt->setStyleSheet("font-size:20px; color:#bbbbbb;");
             textCol->addWidget(ttl);
             textCol->addWidget(subt);
 
             QPushButton *del = new QPushButton(" ❌");
             del->setFixedSize(64, 64);
             del->setStyleSheet(
-                "QPushButton { border:none; font-size:26px; }"
+                "QPushButton { border:none; font-size:26px;"
+                " background:transparent; }"
                 "QPushButton:hover { color:#ff1616; background:#ad1236;"
                 " border-radius:18px; }"
                 "QPushButton:pressed { color:#ffffff; background:#550000;"
