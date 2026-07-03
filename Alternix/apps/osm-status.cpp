@@ -48,9 +48,9 @@ struct NotificationInfo {
 };
 
 // ───────────────────────────────────────────── Sounds
-// Default sound files (drop your own .wav files here):
-//   ~/.config/Alternix/sounds/notify.wav   – ordinary notifications
-//   ~/.config/Alternix/sounds/alarm.wav    – alarms / critical
+// Default sound files (wav, ogg, flac, or mp3 – drop your own here):
+//   ~/.config/Alternix/sounds/notify.*   – ordinary notifications
+//   ~/.config/Alternix/sounds/alarm.*    – alarms / critical
 
 static QString soundDirPath() {
     return QDir::homePath() + "/.config/Alternix/sounds";
@@ -59,10 +59,32 @@ static QString soundDirPath() {
 static void playSoundFile(const QString &file) {
     if (file.isEmpty() || !QFile::exists(file))
         return;
-    // paplay (pulseaudio) first, aplay (alsa) as fallback
-    QProcess::startDetached("sh", QStringList() << "-c",
-        QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null")
-            .arg("'" + QString(file).replace("'", "'\\''") + "'"));
+
+    QString q = "'" + QString(file).replace("'", "'\\''") + "'";
+    QString ext = QFileInfo(file).suffix().toLower();
+
+    // pick players by format:
+    //  mp3            → mpg123, cvlc fallback
+    //  wav/ogg/flac/… → paplay (libsndfile), aplay, cvlc fallback
+    QString cmd;
+    if (ext == "mp3")
+        cmd = QString("mpg123 -q %1 2>/dev/null || "
+                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q);
+    else
+        cmd = QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
+                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q);
+
+    QProcess::startDetached("sh", QStringList() << "-c" << cmd);
+}
+
+// find notify.* / alarm.* in the sounds folder, any supported format
+static QString findDefaultSound(const QString &baseName) {
+    static const QStringList exts = {"wav", "ogg", "flac", "mp3"};
+    for (const QString &e : exts) {
+        QString p = soundDirPath() + "/" + baseName + "." + e;
+        if (QFile::exists(p)) return p;
+    }
+    return QString();
 }
 
 // sound: "" → default by kind, "none" → silent, path → that file
@@ -73,9 +95,9 @@ static void playNotificationSound(const QString &sound, bool alarmish) {
         playSoundFile(sound);
         return;
     }
-    QString def = soundDirPath() + (alarmish ? "/alarm.wav" : "/notify.wav");
-    if (alarmish && !QFile::exists(def))
-        def = soundDirPath() + "/notify.wav";   // fall back to notify
+    QString def = alarmish ? findDefaultSound("alarm") : QString();
+    if (def.isEmpty())
+        def = findDefaultSound("notify");   // general default / fallback
     playSoundFile(def);
 }
 
@@ -1142,6 +1164,39 @@ int main(int argc,char**argv) {
 
     // ensure the default sound folder exists
     QDir().mkpath(soundDirPath());
+
+    // ── Boot sound: played once per boot, after the first unlock ──
+    // osm-lockd touches /tmp/osm_boot_unlocked on successful unlock.
+    // /tmp is cleared on reboot, so the "played" marker naturally
+    // resets each boot but survives re-locks, wakes, and restarts
+    // of osm-status within the same boot.
+    {
+        const QString unlockedMarker = "/tmp/osm_boot_unlocked";
+        const QString playedMarker   = "/tmp/osm_boot_sound_played";
+
+        QTimer *bootPoll = new QTimer(&app);
+        bootPoll->setInterval(500);
+        QObject::connect(bootPoll, &QTimer::timeout,
+            [bootPoll, unlockedMarker, playedMarker]() {
+                if (QFile::exists(playedMarker)) {
+                    bootPoll->stop();       // already done this boot
+                    return;
+                }
+                if (!QFile::exists(unlockedMarker))
+                    return;                 // still locked
+
+                // mark first, then play – guarantees once per boot
+                QFile m(playedMarker);
+                if (m.open(QIODevice::WriteOnly)) m.close();
+
+                playSoundFile(findDefaultSound("boot"));
+                bootPoll->stop();
+            });
+        bootPoll->start();
+
+        // no lockscreen in use? stop polling quietly after 10 minutes
+        QTimer::singleShot(10 * 60 * 1000, bootPoll, &QTimer::stop);
+    }
 
     // become the desktop notification daemon (app push notifications)
     NotificationServer server(&root);

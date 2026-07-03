@@ -65,7 +65,7 @@ def autostart():
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['osm-notify'])
-#    subprocess.Popen(['osm-status'])
+    subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
 #    subprocess.Popen(['onboard'])
     subprocess.Popen(['osm-powerd'])
@@ -283,8 +283,8 @@ screens = [
             # widget.Prompt(),
             # widget.WindowName(),
             widget.Spacer(length=bar.STRETCH),
-            # widget.Clock(format="%H:%M", mouse_callbacks = {'Button1': lazy.spawn("osm-calendar")}),
-            widget.Clock(format="%H:%M"),
+            widget.Clock(format="%H:%M", mouse_callbacks = {'Button1': lazy.spawn("osm-clock")}),
+            # widget.Clock(format="%H:%M"),
             widget.Spacer(length=bar.STRETCH),
             widget.Battery(format='{percent:2.0%}'),
             widget.BatteryIcon(scale=1.5),
