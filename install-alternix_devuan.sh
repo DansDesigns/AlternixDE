@@ -575,6 +575,10 @@ echo "• Building sound.so..."
 g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo mv sound.so /usr/local/bin/
 
+echo "• Building kernel.so..."
+g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
+sudo mv kernel.so /usr/local/bin/
+
 echo "• Building storage.so..."
 g++ -fPIC -shared storage.cpp -o storage.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv storage.so /usr/local/bin/
