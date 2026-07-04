@@ -110,7 +110,7 @@ chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
 
 echo "• Updating sounds..."
-cp "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/sounds/
+cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/sounds/
 
 echo "• Update & Install Complete."
 echo ""
