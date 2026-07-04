@@ -2,6 +2,10 @@
 // Shows kernel/build info, boot cmdline, loaded modules and the
 // hardware → driver map. Read-only apart from Refresh.
 //
+// Scroll behaviour matches apps.cpp: the outer page uses a manual
+// drag scroll that ignores drags starting on the inner list cards,
+// so inner lists and the page never scroll together.
+//
 // Build (same pattern as the other .so modules):
 //   g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so \
 //       $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
@@ -14,6 +18,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScroller>
+#include <QScrollBar>
 #include <QFrame>
 #include <QStackedWidget>
 #include <QProcess>
@@ -23,6 +28,13 @@
 #include <QFont>
 #include <QSizePolicy>
 #include <QTimer>
+#include <QMouseEvent>
+#include <QList>
+
+// -----------------------------------------------------
+// Global list of inner scroll areas (for hit testing)
+// -----------------------------------------------------
+static QList<QScrollArea*> g_innerScrollAreas;
 
 // -----------------------------------------------------
 // Shell helper
@@ -78,6 +90,63 @@ static QLabel* makeInfoLabel(const QString &txt, int px, bool bold = false,
     lbl->setWordWrap(true);
     return lbl;
 }
+
+// -----------------------------------------------------
+// Outer scroll area with manual drag scrolling
+// (ignores drags that start on inner cards) — same as apps.cpp
+// -----------------------------------------------------
+class OuterScrollArea : public QScrollArea {
+public:
+    OuterScrollArea(QWidget *parent = nullptr)
+        : QScrollArea(parent), dragging(false) {}
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            lastPos = event->pos();
+            dragging = !isOnInnerScroll(event->pos());
+        }
+        QScrollArea::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (dragging && (event->buttons() & Qt::LeftButton)) {
+            int dy = event->pos().y() - lastPos.y();
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - dy);
+            lastPos = event->pos();
+            event->accept();
+            return;
+        }
+        QScrollArea::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton)
+            dragging = false;
+        QScrollArea::mouseReleaseEvent(event);
+    }
+
+private:
+    bool dragging;
+    QPoint lastPos;
+
+    bool isOnInnerScroll(const QPoint &p)
+    {
+        QWidget *vp = viewport();
+        for (QScrollArea *sa : g_innerScrollAreas) {
+            if (!sa || !sa->viewport()) continue;
+
+            QPoint topLeft = sa->viewport()->mapTo(vp, QPoint(0,0));
+            QRect rect(topLeft, sa->viewport()->size());
+            if (rect.contains(p))
+                return true;
+        }
+        return false;
+    }
+};
 
 // -----------------------------------------------------
 // Info gatherers
@@ -166,7 +235,8 @@ static QFrame* makeMiniCard(const QString &line1, const QString &line2,
 }
 
 // -----------------------------------------------------
-// Scrollable list card (like the Installed Apps inner lists)
+// Scrollable list card (same inner scroll pattern as apps.cpp,
+// registered in g_innerScrollAreas for outer hit testing)
 // -----------------------------------------------------
 static QFrame* makeListCard(const QString &title,
                             QVBoxLayout **outList,
@@ -194,6 +264,11 @@ static QFrame* makeListCard(const QString &title,
     sa->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     sa->setFrameShape(QFrame::NoFrame);
     sa->setFixedHeight(340);
+
+    if (title.startsWith("Loaded"))        sa->setObjectName("inner_scroll_modules");
+    else if (title.startsWith("Hardware")) sa->setObjectName("inner_scroll_drivers");
+    else                                   sa->setObjectName("inner_scroll_generic");
+
     QScroller::grabGesture(sa->viewport(), QScroller::LeftMouseButtonGesture);
     sa->viewport()->setAttribute(Qt::WA_AcceptTouchEvents, true);
 
@@ -207,6 +282,8 @@ static QFrame* makeListCard(const QString &title,
 
     sa->setWidget(wrap);
     v->addWidget(sa);
+
+    g_innerScrollAreas.append(sa);
 
     *outList = list;
     *outCount = count;
@@ -241,6 +318,8 @@ static void fillList(QVBoxLayout *list, QLabel *count,
 // -----------------------------------------------------
 extern "C" QWidget* make_page(QStackedWidget *stack)
 {
+    g_innerScrollAreas.clear();
+
     QWidget *root = new QWidget(stack);
     root->setStyleSheet("background:#282828; color:white; font-family:Sans;");
 
@@ -253,13 +332,12 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     title->setStyleSheet("font-size:42px; font-weight:bold;");
     rootLay->addWidget(title);
 
-    // Scroll area (same behaviour as System)
-    QScrollArea *scroll = new QScrollArea(root);
+    // Outer scroll area (manual drag, ignores inner cards — as in apps.cpp)
+    OuterScrollArea *scroll = new OuterScrollArea(root);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
     QWidget *wrap = new QWidget(scroll);
     QVBoxLayout *wrapLay = new QVBoxLayout(wrap);
