@@ -364,10 +364,14 @@ g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widg
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
 echo "• Building osm-status..."
-mkdir -p "$HOME/.config/Alternix/sounds"
-# Drop notify.* and alarm.* (wav/ogg/flac/mp3) in ~/.config/Alternix/sounds/
 g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
 chmod +x osm-status && sudo mv osm-status /usr/local/bin/
+
+echo "• Installing sounds..."
+# Drop notify.* and alarm.* (wav/ogg/flac/mp3) in ~/.config/Alternix/sounds/
+#mkdir -p "$HOME/.config/Alternix/sounds"
+cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
+
 
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
