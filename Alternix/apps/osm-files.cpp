@@ -40,6 +40,9 @@
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <functional>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <unistd.h>
 
 class FileBrowser : public QWidget {
@@ -54,6 +57,8 @@ public:
           backBtn(nullptr),
           homeBtn(nullptr),
           networkBtn(nullptr),
+          usbBtn(nullptr),
+          usbPollTimer(nullptr),
           pathBtn(nullptr),
           pathMenu(nullptr),
           pathMenuLayout(nullptr),
@@ -207,6 +212,25 @@ public:
         pathRow->addWidget(networkBtn, 0);
 
         connect(networkBtn, &QPushButton::clicked, this, &FileBrowser::showNetworkDialog);
+
+        // USB button
+        usbBtn = new QPushButton("🖴");
+        usbBtn->setFixedSize(50, 50);
+        usbBtn->setStyleSheet(
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#444; }"
+        );
+        pathRow->addWidget(usbBtn, 0);
+
+        connect(usbBtn, &QPushButton::clicked, this, &FileBrowser::showUsbDialog);
+
+        // Hotplug poll: check every 3s for newly attached USB devices
+        usbPollTimer = new QTimer(this);
+        usbPollTimer->setInterval(3000);
+        connect(usbPollTimer, &QTimer::timeout, this, &FileBrowser::pollUsbDevices);
+        knownUsbDevices = enumerateUsbDevicePaths();   // baseline, no flash on startup
+        usbPollTimer->start();
 
         // Path dropdown button
         pathBtn = new QPushButton(currentPath);
@@ -583,6 +607,9 @@ private:
     QPushButton *backBtn;
     QPushButton *homeBtn;
     QPushButton *networkBtn;
+    QPushButton *usbBtn;
+    QTimer *usbPollTimer;
+    QSet<QString> knownUsbDevices;
     QStringList savedServers;
     QPushButton *pathBtn;
     QWidget *pathMenu;
@@ -1751,6 +1778,310 @@ private:
     void saveSavedServers() {
         settings->setValue("network/servers", savedServers);
         settings->sync();
+    }
+
+    // ================= USB DEVICES =================
+
+    struct UsbPartition {
+        QString devPath;     // /dev/sdb1
+        QString label;       // volume label or empty
+        QString size;        // "57.3G"
+        QString fstype;      // vfat, exfat, ext4, ntfs...
+        QString mountPoint;  // empty if not mounted
+    };
+
+    // Runs lsblk once, returns all partitions on removable/USB drives
+    QVector<UsbPartition> enumerateUsbPartitions() {
+        QVector<UsbPartition> out;
+
+        QProcess proc;
+        proc.start("lsblk", QStringList()
+                   << "-J" << "-o"
+                   << "PATH,SIZE,LABEL,MOUNTPOINT,RM,HOTPLUG,TYPE,FSTYPE,TRAN");
+        if (!proc.waitForFinished(4000)) { proc.kill(); return out; }
+
+        QJsonDocument doc = QJsonDocument::fromJson(proc.readAllStandardOutput());
+        QJsonArray devices = doc.object().value("blockdevices").toArray();
+
+        for (const QJsonValue &dv : devices) {
+            QJsonObject disk = dv.toObject();
+
+            // older lsblk versions emit "0"/"1" strings instead of booleans
+            bool removable = disk.value("rm").toBool()
+                          || disk.value("hotplug").toBool()
+                          || disk.value("rm").toString() == "1"
+                          || disk.value("hotplug").toString() == "1";
+            QString tran = disk.value("tran").toString();
+            if (!removable && tran != "usb") continue;
+            if (disk.value("type").toString() != "disk") continue;
+
+            auto addPart = [&](const QJsonObject &p) {
+                UsbPartition up;
+                up.devPath    = p.value("path").toString();
+                up.label      = p.value("label").toString();
+                up.size       = p.value("size").toString();
+                up.fstype     = p.value("fstype").toString();
+                up.mountPoint = p.value("mountpoint").toString();
+                if (up.fstype.isEmpty()) return;   // skip raw/extended/no-fs
+                out.append(up);
+            };
+
+            QJsonArray children = disk.value("children").toArray();
+            if (children.isEmpty()) {
+                // filesystem directly on the disk (some flash drives)
+                addPart(disk);
+            } else {
+                for (const QJsonValue &pv : children)
+                    addPart(pv.toObject());
+            }
+        }
+        return out;
+    }
+
+    // Just device paths, for cheap hotplug comparison
+    QSet<QString> enumerateUsbDevicePaths() {
+        QSet<QString> s;
+        for (const UsbPartition &p : enumerateUsbPartitions())
+            s.insert(p.devPath);
+        return s;
+    }
+
+    void pollUsbDevices() {
+        QSet<QString> now = enumerateUsbDevicePaths();
+        bool added = false;
+        for (const QString &d : now)
+            if (!knownUsbDevices.contains(d)) { added = true; break; }
+        knownUsbDevices = now;
+
+        if (added) {
+            // highlight the USB button and mention it in the status bar
+            usbBtn->setStyleSheet(
+                "QPushButton { background:#2a82da; color:white; border:none; border-radius:10px; font-size:18px; }"
+                "QPushButton:hover { background:#3a92ea; }"
+                "QPushButton:pressed { background:#1a72ca; }"
+            );
+            if (statusLabel) statusLabel->setText("USB device attached");
+        }
+    }
+
+    void resetUsbButtonStyle() {
+        usbBtn->setStyleSheet(
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#444; }"
+        );
+    }
+
+    void showUsbDialog() {
+        resetUsbButtonStyle();
+
+        QVector<UsbPartition> parts = enumerateUsbPartitions();
+
+        QDialog dlg(this);
+        dlg.setWindowTitle("USB Drives");
+        dlg.setStyleSheet("background:#282828; color:white;");
+        dlg.setMinimumWidth(460);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(10);
+
+        if (parts.isEmpty()) {
+            QLabel *none = new QLabel("No USB drives detected.");
+            none->setStyleSheet("font-size:15px; padding:20px;");
+            lay->addWidget(none);
+        }
+
+        for (const UsbPartition &p : parts) {
+            QString name = p.label.isEmpty()
+                           ? QFileInfo(p.devPath).fileName()   // sdb1
+                           : p.label;
+            QString state = p.mountPoint.isEmpty() ? "not mounted" : p.mountPoint;
+            QString text = QString("🖴  %1   (%2, %3)\n      %4")
+                               .arg(name, p.size, p.fstype, state);
+
+            QHBoxLayout *row = new QHBoxLayout;
+            row->setSpacing(8);
+
+            QPushButton *b = new QPushButton(text);
+            b->setMinimumHeight(64);
+            b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            b->setStyleSheet(
+                "QPushButton { background:#444; color:white; border:none; border-radius:10px;"
+                " padding:10px; font-size:14px; text-align:left; }"
+                "QPushButton:hover { background:#555; }"
+                "QPushButton:pressed { background:#333; }"
+            );
+            row->addWidget(b, 1);
+
+            // Eject button (only useful when mounted, but always shown;
+            // greyed out when there is nothing to unmount)
+            QPushButton *eject = new QPushButton("⏏");
+            eject->setFixedSize(64, 64);
+            eject->setEnabled(!p.mountPoint.isEmpty());
+            eject->setStyleSheet(
+                "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:22px; }"
+                "QPushButton:hover:enabled { background:#dd3333; }"
+                "QPushButton:pressed:enabled { background:#aa0000; }"
+                "QPushButton:disabled { background:#222; color:#555; }"
+            );
+            row->addWidget(eject, 0);
+
+            lay->addLayout(row);
+
+            UsbPartition part = p;   // copy for capture
+            connect(b, &QPushButton::clicked, &dlg, [this, part, &dlg]() {
+                dlg.accept();
+                openUsbPartition(part);
+            });
+
+            connect(eject, &QPushButton::clicked, &dlg, [this, part, &dlg]() {
+                dlg.accept();
+                ejectUsbPartition(part);
+            });
+        }
+
+        // Rescan + close row
+        QHBoxLayout *btnRow = new QHBoxLayout;
+        QPushButton *rescan = new QPushButton("Rescan");
+        QPushButton *close  = new QPushButton("Close");
+        for (QPushButton *b : { rescan, close }) {
+            b->setFixedHeight(44);
+            b->setStyleSheet(
+                "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:14px; }"
+                "QPushButton:hover { background:#666; }"
+                "QPushButton:pressed { background:#444; }"
+            );
+        }
+        btnRow->addWidget(rescan);
+        btnRow->addWidget(close);
+        lay->addLayout(btnRow);
+
+        connect(close, &QPushButton::clicked, &dlg, &QDialog::reject);
+        connect(rescan, &QPushButton::clicked, &dlg, [this, &dlg]() {
+            dlg.reject();
+            // re-open with a fresh scan
+            QTimer::singleShot(0, this, &FileBrowser::showUsbDialog);
+        });
+
+        dlg.exec();
+    }
+
+    void openUsbPartition(const UsbPartition &p) {
+        // Already mounted? Just browse it.
+        if (!p.mountPoint.isEmpty() && QDir(p.mountPoint).exists()) {
+            addUsbShortcut(p);
+            listDirectory(p.mountPoint);
+            return;
+        }
+
+        if (statusLabel) statusLabel->setText("Mounting " + p.devPath + " ...");
+        QCoreApplication::processEvents();
+
+        // Try udisksctl first (udisks2 + elogind on Devuan)
+        QProcess proc;
+        proc.setProcessChannelMode(QProcess::MergedChannels);
+        proc.start("udisksctl", QStringList() << "mount" << "-b" << p.devPath);
+        bool ran = proc.waitForStarted(2000) && proc.waitForFinished(15000);
+        QString output = QString::fromUtf8(proc.readAll());
+
+        QString mountPath;
+        if (ran && proc.exitCode() == 0) {
+            // Output: "Mounted /dev/sdb1 at /media/dan/SANDISK64"
+            int at = output.lastIndexOf(" at ");
+            if (at >= 0) {
+                mountPath = output.mid(at + 4).trimmed();
+                if (mountPath.endsWith('.')) mountPath.chop(1);
+            }
+        }
+
+        // Fallback: pmount (mounts to /media/<basename>)
+        if (mountPath.isEmpty()) {
+            QProcess pm;
+            pm.setProcessChannelMode(QProcess::MergedChannels);
+            pm.start("pmount", QStringList() << p.devPath);
+            if (pm.waitForStarted(2000) && pm.waitForFinished(15000) && pm.exitCode() == 0) {
+                mountPath = "/media/" + QFileInfo(p.devPath).fileName();
+            } else {
+                output += "\n" + QString::fromUtf8(pm.readAll());
+            }
+        }
+
+        if (mountPath.isEmpty() || !QDir(mountPath).exists()) {
+            QMessageBox::warning(this, "USB",
+                "Failed to mount " + p.devPath + "\n\n" + output.trimmed() +
+                "\n\nInstall udisks2 (with elogind) or pmount, and ensure your "
+                "user is in the 'plugdev' group.");
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        addUsbShortcut(p, mountPath);
+        listDirectory(mountPath);
+    }
+
+    void ejectUsbPartition(const UsbPartition &p) {
+        if (p.mountPoint.isEmpty()) return;
+
+        // If we are currently browsing inside the drive, leave it first
+        if (currentPath.startsWith(p.mountPoint))
+            listDirectory(QDir::homePath());
+
+        if (statusLabel) statusLabel->setText("Ejecting " + p.devPath + " ...");
+        QCoreApplication::processEvents();
+
+        // Try udisksctl unmount, fall back to pumount
+        QProcess proc;
+        proc.setProcessChannelMode(QProcess::MergedChannels);
+        proc.start("udisksctl", QStringList() << "unmount" << "-b" << p.devPath);
+        bool ok = proc.waitForStarted(2000) && proc.waitForFinished(15000)
+                  && proc.exitCode() == 0;
+        QString output = QString::fromUtf8(proc.readAll());
+
+        if (!ok) {
+            QProcess pm;
+            pm.setProcessChannelMode(QProcess::MergedChannels);
+            pm.start("pumount", QStringList() << p.devPath);
+            ok = pm.waitForStarted(2000) && pm.waitForFinished(15000)
+                 && pm.exitCode() == 0;
+            output += "\n" + QString::fromUtf8(pm.readAll());
+        }
+
+        if (!ok) {
+            QMessageBox::warning(this, "USB",
+                "Failed to unmount " + p.devPath + "\n\n" + output.trimmed() +
+                "\n\nMake sure no files on the drive are open.");
+            if (statusLabel) statusLabel->setText(QString::number(currentItemCount) + " items");
+            return;
+        }
+
+        // Power off the whole device so it is safe to pull (best effort)
+        QString disk = p.devPath;
+        while (!disk.isEmpty() && disk.back().isDigit()) disk.chop(1);
+        if (disk.endsWith('p') && disk.contains("mmcblk")) disk.chop(1);   // mmcblk0p1 -> mmcblk0
+        QProcess po;
+        po.start("udisksctl", QStringList() << "power-off" << "-b" << disk);
+        po.waitForFinished(8000);
+
+        // Remove the stale shortcut if we added one
+        if (shortcutsList.contains(p.mountPoint)) {
+            shortcutsList.removeAll(p.mountPoint);
+            saveShortcuts();
+            rebuildShortcutsPanel();
+        }
+
+        if (statusLabel)
+            statusLabel->setText("Safe to remove " + (p.label.isEmpty() ? p.devPath : p.label));
+    }
+
+    // Add the mounted drive to the shortcuts panel (deduped)
+    void addUsbShortcut(const UsbPartition &p, const QString &mountPathOverride = QString()) {
+        QString mp = mountPathOverride.isEmpty() ? p.mountPoint : mountPathOverride;
+        if (mp.isEmpty()) return;
+        if (!shortcutsList.contains(mp)) {
+            shortcutsList.append(mp);
+            saveShortcuts();
+            rebuildShortcutsPanel();
+        }
     }
 
     void showNetworkDialog() {
