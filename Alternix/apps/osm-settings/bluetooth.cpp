@@ -220,13 +220,32 @@ public:
         QVBoxLayout *rootLayout = new QVBoxLayout(this);
         rootLayout->setContentsMargins(40, 40, 40, 40);
         rootLayout->setSpacing(20);
-        rootLayout->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+        // No layout-level alignment: it made Qt ignore stretch factors.
+        // The scroll area below takes stretch 1, pinning the title at the
+        // top and the buttons/back at the bottom.
 
         // Title
         QLabel *titleLabel = new QLabel("Bluetooth", this);
         titleLabel->setStyleSheet("font-size:42px; font-weight:bold;");
         titleLabel->setAlignment(Qt::AlignCenter);
         rootLayout->addWidget(titleLabel);
+
+        // -------------------------------------------------
+        // Scrollable middle: cards scroll, title stays pinned
+        // -------------------------------------------------
+        QScrollArea *midScroll = new QScrollArea(this);
+        midScroll->setWidgetResizable(true);
+        midScroll->setFrameShape(QFrame::NoFrame);
+        midScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        midScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        midScroll->setStyleSheet("QScrollArea { background:#282828; border:none; }");
+        QScroller::grabGesture(midScroll->viewport(), QScroller::LeftMouseButtonGesture);
+
+        QWidget *midContainer = new QWidget(midScroll);
+        midContainer->setStyleSheet("background:#282828;");
+        QVBoxLayout *midLayout = new QVBoxLayout(midContainer);
+        midLayout->setContentsMargins(0, 0, 0, 0);
+        midLayout->setSpacing(20);
 
         // -------------------------------------------------
         // Card 1: Device list
@@ -267,7 +286,7 @@ public:
         );
 
         listLayout->addWidget(scrollArea);
-        rootLayout->addWidget(listFrame);
+        midLayout->addWidget(listFrame);
 
         // -------------------------------------------------
         // Card 2: Empty adapter/info card (same height as WiFi)
@@ -286,7 +305,11 @@ public:
         infoLayout->setSpacing(8);
         // Intentionally empty for now, just for symmetry with WiFi
 
-        rootLayout->addWidget(infoFrame);
+        midLayout->addWidget(infoFrame);
+        midLayout->addStretch();
+
+        midScroll->setWidget(midContainer);
+        rootLayout->addWidget(midScroll, 1);
 
         // -------------------------------------------------
         // Bottom buttons: On/Off + Scan + Visible

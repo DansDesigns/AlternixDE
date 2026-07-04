@@ -5,6 +5,8 @@
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QFrame>
+#include <QScrollArea>
+#include <QScroller>
 #include <QProcess>
 #include <QMessageBox>
 #include <QFont>
@@ -317,6 +319,21 @@ public:
         rootLayout->addWidget(titleLabel);
 
         // -------------------------------------------------
+        // Scrollable middle: cards scroll, title stays pinned
+        // -------------------------------------------------
+        QScrollArea *midScroll = new QScrollArea(this);
+        midScroll->setWidgetResizable(true);
+        midScroll->setFrameShape(QFrame::NoFrame);
+        midScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        midScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        QScroller::grabGesture(midScroll->viewport(), QScroller::LeftMouseButtonGesture);
+
+        QWidget *midContainer = new QWidget(midScroll);
+        QVBoxLayout *midLayout = new QVBoxLayout(midContainer);
+        midLayout->setContentsMargins(0, 0, 0, 0);
+        midLayout->setSpacing(20);
+
+        // -------------------------------------------------
         // Card 1: GPS coordinates + Compass heading
         // -------------------------------------------------
         QFrame *gpsFrame = new QFrame(this);
@@ -338,7 +355,7 @@ public:
         gpsLabel->setStyleSheet("QLabel { font-size:28px; }");
         gpsLayout->addWidget(gpsLabel);
 
-        rootLayout->addWidget(gpsFrame);
+        midLayout->addWidget(gpsFrame);
 
         // -------------------------------------------------
         // Card 2: Visible satellites
@@ -362,7 +379,7 @@ public:
         satLabel->setStyleSheet("QLabel { font-size:28px; }");
         satLayout->addWidget(satLabel);
 
-        rootLayout->addWidget(satFrame);
+        midLayout->addWidget(satFrame);
 
         // -------------------------------------------------
         // Card 3: Mini map of local area (text placeholder)
@@ -386,10 +403,14 @@ public:
         mapLabel->setStyleSheet("QLabel { font-size:28px; }");
         mapLayout->addWidget(mapLabel);
 
-        rootLayout->addWidget(mapFrame);
+        midLayout->addWidget(mapFrame);
 
-        // Add stretch so buttons/back sit at bottom
-        rootLayout->addStretch(1);
+        midLayout->addStretch();
+
+        midScroll->setWidget(midContainer);
+        // Stretch 1 pins the title at the top and the buttons/back at the
+        // bottom; the cards scroll in between if the screen is short.
+        rootLayout->addWidget(midScroll, 1);
 
         // -------------------------------------------------
         // Bottom buttons: On/Off + Refresh

@@ -12,6 +12,8 @@
 #include <QStringList>
 #include <QFont>
 #include <QListWidget>
+#include <QScrollArea>
+#include <QScroller>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QCoreApplication>
@@ -156,7 +158,10 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     QVBoxLayout *root = new QVBoxLayout(page);
     root->setContentsMargins(40, 40, 40, 40);
     root->setSpacing(20);
-    root->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+    // No layout-level alignment: AlignTop|AlignHCenter made Qt ignore stretch
+    // factors and shrink children to their size hints. The scroll area below
+    // takes stretch 1 instead, pinning the title at the top and the button
+    // rows at the bottom.
 
     // -----------------------------------------------------
     // TITLE
@@ -165,6 +170,21 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     title->setStyleSheet("font-size:42px; color:white; font-weight:bold;");
     title->setAlignment(Qt::AlignCenter);
     root->addWidget(title);
+
+    // -----------------------------------------------------
+    // SCROLLABLE MIDDLE (cards scroll, title stays pinned)
+    // -----------------------------------------------------
+    QScrollArea *midScroll = new QScrollArea(page);
+    midScroll->setWidgetResizable(true);
+    midScroll->setFrameShape(QFrame::NoFrame);
+    midScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    midScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QScroller::grabGesture(midScroll->viewport(), QScroller::LeftMouseButtonGesture);
+
+    QWidget *midContainer = new QWidget(midScroll);
+    QVBoxLayout *midLayout = new QVBoxLayout(midContainer);
+    midLayout->setContentsMargins(0, 0, 0, 0);
+    midLayout->setSpacing(20);
 
     // -----------------------------------------------------
     // SSID LIST FRAME (Card 1)
@@ -204,7 +224,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     );
     ssidLayout->addWidget(ssidList);
 
-    root->addWidget(ssidFrame);
+    midLayout->addWidget(ssidFrame);
 
     // -----------------------------------------------------
     // IP / DNS / MASK / GATEWAY FRAME (Card 2)
@@ -237,7 +257,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         infoLayout->addWidget(lbl);
     }
 
-    root->addWidget(infoFrame);
+    midLayout->addWidget(infoFrame);
+    midLayout->addStretch();
+
+    midScroll->setWidget(midContainer);
+    root->addWidget(midScroll, 1);
 
     // -----------------------------------------------------
     // ON/OFF + REFRESH ROW

@@ -167,7 +167,9 @@ public:
         QVBoxLayout *root = new QVBoxLayout(this);
         root->setContentsMargins(40, 40, 40, 40);
         root->setSpacing(20);
-        root->setAlignment(Qt::AlignTop);
+        // No layout-level alignment: the scroll area below takes stretch 1,
+        // which keeps the title pinned at the top and the buttons/back pinned
+        // at the bottom, with the card content scrolling in between.
 
         // -------------------------------------------------
         // Title
@@ -214,7 +216,27 @@ public:
         timeLabel->setStyleSheet("font-size:26px; color:white;");
         infoLayout->addWidget(timeLabel);
 
-        root->addWidget(infoCard);
+        // -------------------------------------------------
+        // Scrollable middle: card content scrolls, title stays pinned
+        // -------------------------------------------------
+        QScrollArea *scroll = new QScrollArea(this);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
+
+        QWidget *scrollContainer = new QWidget(scroll);
+        scrollContainer->setStyleSheet("background:#282828;");
+        QVBoxLayout *scrollLayout = new QVBoxLayout(scrollContainer);
+        scrollLayout->setContentsMargins(0, 0, 0, 0);
+        scrollLayout->setSpacing(20);
+
+        scrollLayout->addWidget(infoCard);
+        scrollLayout->addStretch();
+
+        scroll->setWidget(scrollContainer);
+        root->addWidget(scroll, 1);
 
         // -------------------------------------------------
         // Buttons
@@ -231,10 +253,8 @@ public:
         root->addLayout(btns);
 
         // -------------------------------------------------
-        // BACK BUTTON PINNED TO BOTTOM
+        // BACK BUTTON PINNED TO BOTTOM (scroll area owns the stretch)
         // -------------------------------------------------
-        root->addStretch();
-
         QPushButton *backButton = new QPushButton("❮", this);
         backButton->setFixedSize(140, 60);
         backButton->setStyleSheet(

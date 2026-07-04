@@ -118,7 +118,11 @@ public:
         QVBoxLayout *outer = new QVBoxLayout(this);
         outer->setContentsMargins(40, 40, 40, 40);
         outer->setSpacing(20);
-        outer->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
+        // NOTE: no layout-level alignment here. Setting Qt::AlignTop on the
+        // layout makes Qt ignore stretch factors, so the scroll area grew to
+        // its full content height and the cards ran off the bottom of the
+        // screen. With no alignment, addWidget(scroll, 1) confines the scroll
+        // area between the pinned title and the pinned back button.
 
         QLabel *titleLabel = new QLabel("Sound", this);
         titleLabel->setStyleSheet("font-size:42px; color:white; font-weight:bold;");
@@ -136,6 +140,7 @@ public:
         QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
         QWidget *scrollContainer = new QWidget(scroll);
+        scrollContainer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
         QVBoxLayout *scrollLayout = new QVBoxLayout(scrollContainer);
         scrollLayout->setContentsMargins(0, 0, 0, 0);
         scrollLayout->setSpacing(30);  // padding between cards
