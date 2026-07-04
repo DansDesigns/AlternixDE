@@ -1790,14 +1790,34 @@ private:
         QString mountPoint;  // empty if not mounted
     };
 
-    // Runs lsblk once, returns all partitions on removable/USB drives
+    // True if the disk (e.g. "sdb") is USB-attached or removable.
+    // Uses /sys/block, which works regardless of lsblk version.
+    static bool isUsbOrRemovableDisk(const QString &diskName) {
+        QString sysPath = "/sys/block/" + diskName;
+
+        // removable flag (flash sticks, card readers)
+        QFile rm(sysPath + "/removable");
+        if (rm.open(QIODevice::ReadOnly)) {
+            if (rm.readAll().trimmed() == "1") return true;
+        }
+
+        // USB-attached but rm=0 (SSDs in enclosures, many external HDDs):
+        // the resolved device path contains "/usb"
+        QFileInfo link(sysPath);
+        QString real = link.canonicalFilePath();
+        return real.contains("/usb");
+    }
+
+    // Enumerates partitions on removable/USB drives.
+    // Uses only lsblk columns that exist on old util-linux versions,
+    // and /sys/block for the USB check.
     QVector<UsbPartition> enumerateUsbPartitions() {
         QVector<UsbPartition> out;
 
         QProcess proc;
         proc.start("lsblk", QStringList()
                    << "-J" << "-o"
-                   << "PATH,SIZE,LABEL,MOUNTPOINT,RM,HOTPLUG,TYPE,FSTYPE,TRAN");
+                   << "NAME,SIZE,LABEL,MOUNTPOINT,TYPE,FSTYPE");
         if (!proc.waitForFinished(4000)) { proc.kill(); return out; }
 
         QJsonDocument doc = QJsonDocument::fromJson(proc.readAllStandardOutput());
@@ -1805,19 +1825,15 @@ private:
 
         for (const QJsonValue &dv : devices) {
             QJsonObject disk = dv.toObject();
-
-            // older lsblk versions emit "0"/"1" strings instead of booleans
-            bool removable = disk.value("rm").toBool()
-                          || disk.value("hotplug").toBool()
-                          || disk.value("rm").toString() == "1"
-                          || disk.value("hotplug").toString() == "1";
-            QString tran = disk.value("tran").toString();
-            if (!removable && tran != "usb") continue;
             if (disk.value("type").toString() != "disk") continue;
+
+            QString diskName = disk.value("name").toString();
+            if (diskName.isEmpty()) continue;
+            if (!isUsbOrRemovableDisk(diskName)) continue;
 
             auto addPart = [&](const QJsonObject &p) {
                 UsbPartition up;
-                up.devPath    = p.value("path").toString();
+                up.devPath    = "/dev/" + p.value("name").toString();
                 up.label      = p.value("label").toString();
                 up.size       = p.value("size").toString();
                 up.fstype     = p.value("fstype").toString();
