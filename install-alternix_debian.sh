@@ -154,7 +154,7 @@ sudo nala install -y \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
-    ntfs-3g exfatprogs exfat-fuse
+    ntfs-3g exfatprogs exfat-fuse udisk2 pmount
     
 
 # ────────────────────────────────────────────────
