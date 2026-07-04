@@ -1,0 +1,14 @@
+boot_1:
+https://pixabay.com/sound-effects/musical-startup-sound-variation-fast-315898/
+
+boot_2:
+https://pixabay.com/sound-effects/musical-startup-sound-variation-6-316850/
+
+boot_3:
+https://pixabay.com/sound-effects/film-special-effects-soft-startup-sound-269291/
+
+boot_4:
+https://pixabay.com/sound-effects/film-special-effects-gadget-activation-250072/
+
+boot_gentle:
+https://pixabay.com/sound-effects/musical-lovelyboot1-103697/

@@ -22,6 +22,7 @@
 #include <QTextStream>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QMap>
 #include <QSet>
 #include <QStandardPaths>
@@ -1189,7 +1190,25 @@ int main(int argc,char**argv) {
                 QFile m(playedMarker);
                 if (m.open(QIODevice::WriteOnly)) m.close();
 
-                playSoundFile(findDefaultSound("boot"));
+                // Sound settings page can pick a specific boot sound;
+                // stored as a filename inside the sounds folder (or an
+                // absolute path). Fall back to boot.* if unset/missing.
+                QString chosen;
+                {
+                    QSettings cfg(QDir::homePath()
+                                  + "/.config/Alternix/osm-settings.conf",
+                                  QSettings::IniFormat);
+                    chosen = cfg.value("Sound/BootSound").toString().trimmed();
+                }
+                QString bootFile;
+                if (!chosen.isEmpty()) {
+                    QString p = chosen.startsWith('/')
+                        ? chosen : soundDirPath() + "/" + chosen;
+                    if (QFile::exists(p)) bootFile = p;
+                }
+                if (bootFile.isEmpty())
+                    bootFile = findDefaultSound("boot");
+                playSoundFile(bootFile);
                 bootPoll->stop();
             });
         bootPoll->start();
