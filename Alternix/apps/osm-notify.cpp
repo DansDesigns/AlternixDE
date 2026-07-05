@@ -258,6 +258,71 @@ static void toggleBt_ctl() {
 static bool gpsOn() { return false; }
 static QString gpsInfo() { return gpsOn() ? "🟢" : "🔴"; }
 
+// ────────────────────────────── Auto-Rotate
+// Shared config file (same one used by the Display settings page) so
+// both stay in sync with a single "display_auto_rotate" key.
+static QString rotateCfgPath() {
+    return QDir::homePath() + "/.config/Alternix/osm-settings.conf";
+}
+
+static QString rotateScriptDir() {
+    return QDir::homePath() + "/.config/Alternix/scripts";
+}
+
+static QString rotatePidPath() {
+    return QDir::homePath() + "/.config/Alternix/rotate-monitor.pid";
+}
+
+static QMap<QString, QString> rotateLoadCfg() {
+    QMap<QString, QString> map;
+    QFile f(rotateCfgPath());
+    if (!f.open(QIODevice::ReadOnly)) return map;
+    QTextStream s(&f);
+    while (!s.atEnd()) {
+        QString line = s.readLine().trimmed();
+        if (line.startsWith("#") || !line.contains("=")) continue;
+        QStringList parts = line.split("=");
+        if (parts.size() == 2)
+            map[parts[0].trimmed()] = parts[1].trimmed();
+    }
+    return map;
+}
+
+static void rotateSaveCfg(const QMap<QString, QString> &map) {
+    QDir().mkpath(QDir::homePath() + "/.config/Alternix");
+    QFile f(rotateCfgPath());
+    if (!f.open(QFile::WriteOnly | QFile::Truncate)) return;
+    QTextStream s(&f);
+    for (auto it = map.begin(); it != map.end(); ++it)
+        s << it.key() << "=" << it.value() << "\n";
+}
+
+static bool autoRotateEnabled() {
+    return rotateLoadCfg().value("display_auto_rotate", "false") == "true";
+}
+
+// The monitor script writes a pidfile while it's actively running and
+// applying orientation changes; its presence is our "is it really on"
+// signal rather than trusting the config flag alone.
+static bool rotateMonitorRunning() {
+    return QFile::exists(rotatePidPath());
+}
+
+static QString rotateInfo() {
+    return rotateMonitorRunning() ? "🟢 ON" : "🔒 Locked";
+}
+
+static void toggleAutoRotate() {
+    bool enabling = !autoRotateEnabled();
+
+    QMap<QString, QString> cfg = rotateLoadCfg();
+    cfg["display_auto_rotate"] = enabling ? "true" : "false";
+    rotateSaveCfg(cfg);
+
+    QString script = rotateScriptDir() + "/alternix-rotate-toggle.sh";
+    QProcess::startDetached("bash", { script, enabling ? "on" : "off" });
+}
+
 // ──────────────────────────────  Battery helpers
 static QString detectBatteryPath() {
     QDir dir("/sys/class/power_supply");
@@ -734,6 +799,13 @@ public:
             addToggle("gps.png", "GPS",
                       []() { return gpsInfo(); },
                       []() {});
+
+            // Auto-Rotate (uses the rotation sensor via iio-sensor-proxy;
+            // driver setup and sensor scanning happen from the Display
+            // settings page — this is just the on/off switch)
+            addToggle("rotate.png", "Auto-Rotate",
+                      []() { return rotateInfo(); },
+                      []() { toggleAutoRotate(); });
 
             // ───────── Battery (icon based on status + saver)
             {
