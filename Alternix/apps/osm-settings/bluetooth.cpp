@@ -199,6 +199,41 @@ static QList<BluetoothDevice> getBluetoothDevices()
     return devices;
 }
 
+// Queries the live connected state for one device directly, rather than
+// trusting bluetoothctl's raw command-echo text — that's what lets us report
+// pairing/connect attempts accurately instead of guessing from log noise.
+static bool isDeviceConnectedBT(const QString &mac)
+{
+    QString info = runCommandBT("bluetoothctl", {"info", mac});
+    for (const QString &line : info.split('\n')) {
+        QString t = line.trimmed();
+        if (t.startsWith("Connected:", Qt::CaseInsensitive))
+            return t.contains("yes", Qt::CaseInsensitive);
+    }
+    return false;
+}
+
+// Turns bluetoothctl's raw (and often cryptic) output into a short, plain
+// English explanation for the popup shown to the user.
+static QString plainEnglishBluetoothError(const QString &raw)
+{
+    if (raw.contains("AuthenticationFailed", Qt::CaseInsensitive))
+        return "The pairing code wasn't accepted.";
+    if (raw.contains("AuthenticationCanceled", Qt::CaseInsensitive) ||
+        raw.contains("AuthenticationRejected", Qt::CaseInsensitive))
+        return "Pairing was cancelled or rejected by the device.";
+    if (raw.contains("AuthenticationTimeout", Qt::CaseInsensitive))
+        return "The device didn't respond in time.";
+    if (raw.contains("Device or resource busy", Qt::CaseInsensitive) ||
+        raw.contains("AlreadyConnected", Qt::CaseInsensitive))
+        return "The device is busy or already connected to something else.";
+    if (raw.contains("Connection timeout", Qt::CaseInsensitive) ||
+        raw.contains("Host is down", Qt::CaseInsensitive) ||
+        raw.contains("br-connection-page-timeout", Qt::CaseInsensitive))
+        return "Couldn't reach the device.";
+    return "Couldn't connect.";
+}
+
 // ---------------------------------------------------------
 // BluetoothPage widget
 // ---------------------------------------------------------
@@ -370,6 +405,10 @@ public:
         connect(scanSpinTimer, &QTimer::timeout, this, [this]() {
             spinFrame = (spinFrame + 1) % SPIN_COUNT_BT;
             scanButton->setText(QString::fromUtf8(SPIN_FRAMES_BT[spinFrame]));
+            if (scanStatusLabel) {
+                scanStatusLabel->setText(
+                    QString::fromUtf8(SPIN_FRAMES_BT[spinFrame]) + "  Scanning for devices…");
+            }
         });
 
         // Connections
@@ -448,6 +487,7 @@ private:
     QTimer *scanRefreshTimer = nullptr;
     QTimer *scanSpinTimer = nullptr;
     int spinFrame = 0;
+    QLabel *scanStatusLabel = nullptr; // inline "Scanning…" row shown in the device list
 
     void clearDeviceList()
     {
@@ -559,6 +599,18 @@ private:
             });
 
             deviceLayout->insertWidget(deviceLayout->count() - 1, rowFrame);
+        }
+
+        // Inline "Scanning…" indicator in the list itself (no popup) — kept
+        // in sync with the Scan button's spinner via scanSpinTimer's tick.
+        scanStatusLabel = nullptr;
+        if (scanInProgress) {
+            scanStatusLabel = new QLabel(
+                QString::fromUtf8(SPIN_FRAMES_BT[spinFrame]) + "  Scanning for devices…",
+                deviceContainer);
+            scanStatusLabel->setAlignment(Qt::AlignCenter);
+            scanStatusLabel->setStyleSheet("font-size:22px; color:#aaaaaa; background:transparent;");
+            deviceLayout->insertWidget(deviceLayout->count() - 1, scanStatusLabel);
         }
 
         if (devices.isEmpty()) {
@@ -695,12 +747,10 @@ private:
         if (dev.paired) {
             // Simple connect for already paired device
             script = QString(
-                "echo -e '"
-                "connect %1\n"
-                "quit\n' | bluetoothctl"
+                "{ echo 'connect %1'; sleep 0.5; echo 'quit'; } | bluetoothctl"
             ).arg(dev.mac);
         } else {
-            // Not paired: (optional) PIN dialog, then simple pair + connect
+            // Not paired: (optional) PIN dialog, then pair + connect.
             bool ok = false;
             QString pin = QInputDialog::getText(
                 this,
@@ -714,14 +764,32 @@ private:
             if (!ok)
                 return;
 
-            Q_UNUSED(pin); // script is intentionally simple: just pair/connect by MAC
+            // BUG FIX: the entered PIN was previously discarded (Q_UNUSED(pin))
+            // and never sent to bluetoothctl, so any device that actually
+            // required a PIN could never pair. It's now queued as a reply
+            // straight after 'pair'. A bare 'yes' is queued after that too,
+            // since most modern devices use "Just Works"/numeric-comparison
+            // pairing (a yes/no prompt) rather than a PIN — whichever prompt
+            // bluetoothctl is actually showing gets answered. An explicit
+            // agent registration plus a short settle delay avoids the "pair"
+            // command firing before bluetoothctl has finished registering
+            // itself as the pairing agent, which was another source of
+            // intermittent connect failures.
+            QString pinTrimmed = pin.trimmed();
+            QString pinLine = pinTrimmed.isEmpty()
+                ? QString()
+                : QString("echo '%1'; sleep 0.3; ").arg(pinTrimmed);
 
             script = QString(
-                "echo -e '"
-                "pair %1\n"
-                "connect %1\n"
-                "quit\n' | bluetoothctl"
-            ).arg(dev.mac);
+                "{ "
+                "echo 'agent KeyboardOnly'; echo 'default-agent'; sleep 1; "
+                "echo 'pair %1'; sleep 0.5; "
+                "%2"
+                "echo 'yes'; sleep 0.3; "
+                "echo 'connect %1'; sleep 0.5; "
+                "echo 'quit'; "
+                "} | bluetoothctl"
+            ).arg(dev.mac, pinLine);
         }
 
         // Lock controls while connecting — the animated wait pumps events,
@@ -734,7 +802,10 @@ private:
             QString::fromUtf8(SPIN_FRAMES_BT[0]) + "  Connecting to " + dev.name + "…");
         QCoreApplication::processEvents();
 
-        QString out = runCommandBTAnimated("bash", {"-c", script}, 30000, [&]() {
+        // BUG FIX: 30s wasn't always enough once agent setup + settle delays
+        // are added above, and some devices need a few extra seconds to
+        // finish the handshake.
+        QString out = runCommandBTAnimated("bash", {"-c", script}, 45000, [&]() {
             frame = (frame + 1) % SPIN_COUNT_BT;
             deviceButton->setText(
                 QString::fromUtf8(SPIN_FRAMES_BT[frame]) + "  Connecting to " + dev.name + "…");
@@ -744,22 +815,23 @@ private:
         connectInProgress = false;
         setControlsEnabled(true);
 
-        // Simple error detection – if bluetoothctl reports "Failed" or "Error", show it
-        if (out.contains("Failed", Qt::CaseInsensitive) ||
-            out.contains("Error", Qt::CaseInsensitive)) {
-            QMessageBox::warning(
-                this,
-                title,
-                QString("Failed to connect to %1.\n\nDetails:\n%2")
-                    .arg(dev.name, out.trimmed())
-            );
+        // BUG FIX: success/failure used to be guessed by checking whether the
+        // raw text happened to contain the word "Error" or "Failed" — that
+        // misreported success (e.g. agent-registration chatter containing
+        // "Error") and misreported failure just as easily. We now ask BlueZ
+        // directly whether the device is connected, and show one short,
+        // plain-English line either way instead of the raw bluetoothctl log.
+        bool connected = isDeviceConnectedBT(dev.mac);
+
+        if (connected) {
+            QMessageBox::information(this, title,
+                QString("Connected to %1.").arg(dev.name));
         } else {
-            QMessageBox::information(
-                this,
-                title,
-                QString("Pairing / connecting to %1...\n\nbluetoothctl output:\n%2")
-                    .arg(dev.name, out.trimmed())
-            );
+            QMessageBox::warning(this, title,
+                QString("Couldn't connect to %1. %2\n\n"
+                        "Make sure it's switched on, nearby, and in "
+                        "pairing mode, then try again.")
+                    .arg(dev.name, plainEnglishBluetoothError(out)));
         }
 
         // Give BlueZ a moment to settle state before re-reading "info"
