@@ -121,6 +121,7 @@ cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
 
 echo "• Updating scripts..."
 cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
+cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
@@ -128,6 +129,7 @@ chmod +x alternix-rotate-toggle.sh
 
 echo "• Updating Wave Music Player.."
 cd ~
+sudo rm -r music_player
 git clone https://github.com/DansDesigns/music_player
 cd music_player
 chmod +x install_music_player.sh
@@ -136,6 +138,7 @@ chmod +x install_music_player.sh
 
 echo "• Updating Ponder.."
 cd ~
+sudo rm -r Ponder
 git clone https://github.com/DansDesigns/Ponder
 cd Ponder
 chmod +x install.sh
