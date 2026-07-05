@@ -80,6 +80,10 @@ echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv wifi.so /usr/local/bin/
 
+echo "• Building bluetooth.so..."
+g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo mv bluetooth.so /usr/local/bin/
+
 echo "• Updating kernel.so..."
 g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo mv kernel.so /usr/local/bin/
