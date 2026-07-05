@@ -952,6 +952,7 @@ After=graphical.target
 [Service]
 Type=simple
 User=lockscreen
+PrivateTmp=no
 ExecStart=/usr/local/bin/osm-lockd
 Restart=always
 RestartSec=0.05

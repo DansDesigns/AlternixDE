@@ -78,6 +78,48 @@ static void playSoundFile(const QString &file) {
     QProcess::startDetached("sh", QStringList() << "-c" << cmd);
 }
 
+// Same playback chain as playSoundFile(), but run synchronously so the
+// caller can see whether it actually succeeded (used by the boot-sound
+// retry logic below, where PulseAudio may not be up yet).
+static bool playSoundFileSync(const QString &file, QString *errOut = nullptr) {
+    if (file.isEmpty() || !QFile::exists(file)) {
+        if (errOut) *errOut = "file missing: " + file;
+        return false;
+    }
+
+    QString q = "'" + QString(file).replace("'", "'\\''") + "'";
+    QString ext = QFileInfo(file).suffix().toLower();
+    QString cmd = (ext == "mp3")
+        ? QString("mpg123 -q %1 2>&1 || cvlc --play-and-exit --intf dummy %1 2>&1").arg(q)
+        : QString("paplay %1 2>&1 || aplay -q %1 2>&1 || "
+                  "cvlc --play-and-exit --intf dummy %1 2>&1").arg(q);
+
+    QProcess p;
+    p.start("sh", QStringList() << "-c" << cmd);
+    bool finished = p.waitForFinished(8000);
+    bool ok = finished && p.exitStatus() == QProcess::NormalExit
+                       && p.exitCode() == 0;
+    if (errOut) {
+        *errOut = finished
+            ? QString("exit %1: %2").arg(p.exitCode())
+                                     .arg(QString::fromUtf8(p.readAllStandardOutput()).trimmed())
+            : "timed out (8s)";
+    }
+    return ok;
+}
+
+// Small append-only log so boot-sound issues can be diagnosed without
+// a debugger attached — cat ~/.cache/osm-status/boot-sound.log
+static void logBoot(const QString &line) {
+    QDir d(QDir::homePath() + "/.cache/osm-status");
+    if (!d.exists()) d.mkpath(".");
+    QFile f(d.absoluteFilePath("boot-sound.log"));
+    if (!f.open(QIODevice::Append | QIODevice::Text))
+        return;
+    QTextStream out(&f);
+    out << QDateTime::currentDateTime().toString(Qt::ISODate) << "  " << line << "\n";
+}
+
 // find notify.* / alarm.* in the sounds folder, any supported format
 static QString findDefaultSound(const QString &baseName) {
     static const QStringList exts = {"wav", "ogg", "flac", "mp3"};
@@ -1171,14 +1213,41 @@ int main(int argc,char**argv) {
     // /tmp is cleared on reboot, so the "played" marker naturally
     // resets each boot but survives re-locks, wakes, and restarts
     // of osm-status within the same boot.
+    //
+    // IMPORTANT: osm-lockscreen is launched at boot (systemd
+    // graphical.target / SysVinit runlevel), BEFORE the X session and
+    // therefore before PulseAudio has necessarily finished starting.
+    // The very first unlock of the day can happen while audio isn't
+    // ready yet, so a single playback attempt can silently fail. We
+    // retry with backoff instead of giving up after one try, and log
+    // every attempt to ~/.cache/osm-status/boot-sound.log so this is
+    // diagnosable without a debugger attached.
     {
         const QString unlockedMarker = "/tmp/osm_boot_unlocked";
         const QString playedMarker   = "/tmp/osm_boot_sound_played";
 
+        // resolves the configured/default boot sound each attempt, in
+        // case the sounds folder changes between retries
+        auto resolveBootFile = []() -> QString {
+            QString chosen;
+            {
+                QSettings cfg(QDir::homePath()
+                              + "/.config/Alternix/osm-settings.conf",
+                              QSettings::IniFormat);
+                chosen = cfg.value("Sound/BootSound").toString().trimmed();
+            }
+            if (!chosen.isEmpty()) {
+                QString p = chosen.startsWith('/')
+                    ? chosen : soundDirPath() + "/" + chosen;
+                if (QFile::exists(p)) return p;
+            }
+            return findDefaultSound("boot");
+        };
+
         QTimer *bootPoll = new QTimer(&app);
         bootPoll->setInterval(500);
         QObject::connect(bootPoll, &QTimer::timeout,
-            [bootPoll, unlockedMarker, playedMarker]() {
+            [bootPoll, unlockedMarker, playedMarker, resolveBootFile]() {
                 if (QFile::exists(playedMarker)) {
                     bootPoll->stop();       // already done this boot
                     return;
@@ -1186,30 +1255,63 @@ int main(int argc,char**argv) {
                 if (!QFile::exists(unlockedMarker))
                     return;                 // still locked
 
-                // mark first, then play – guarantees once per boot
-                QFile m(playedMarker);
-                if (m.open(QIODevice::WriteOnly)) m.close();
-
-                // Sound settings page can pick a specific boot sound;
-                // stored as a filename inside the sounds folder (or an
-                // absolute path). Fall back to boot.* if unset/missing.
-                QString chosen;
-                {
-                    QSettings cfg(QDir::homePath()
-                                  + "/.config/Alternix/osm-settings.conf",
-                                  QSettings::IniFormat);
-                    chosen = cfg.value("Sound/BootSound").toString().trimmed();
-                }
-                QString bootFile;
-                if (!chosen.isEmpty()) {
-                    QString p = chosen.startsWith('/')
-                        ? chosen : soundDirPath() + "/" + chosen;
-                    if (QFile::exists(p)) bootFile = p;
-                }
-                if (bootFile.isEmpty())
-                    bootFile = findDefaultSound("boot");
-                playSoundFile(bootFile);
                 bootPoll->stop();
+                logBoot("unlock detected, starting boot-sound attempts");
+
+                // retry with backoff: audio may not be up yet this
+                // early in the session (see comment above)
+                auto attempt = std::make_shared<int>(0);
+                const int maxAttempts = 8;              // ~30s total
+                static const int delaysMs[8] = {0, 1000, 2000, 3000,
+                                                4000, 4000, 6000, 8000};
+
+                // Recursive lambdas can't capture themselves by value
+                // directly ([=] captures an empty std::function since
+                // the variable isn't finished initializing yet) — go
+                // through a shared_ptr so every copy refers to the
+                // same, fully-assigned function object.
+                auto tryOncePtr = std::make_shared<std::function<void()>>();
+                *tryOncePtr = [=]() {
+                    QString file = resolveBootFile();
+                    if (file.isEmpty()) {
+                        logBoot("no boot sound file found (checked "
+                                "Sound/BootSound and boot.* in "
+                                + soundDirPath() + ") — giving up, "
+                                "marking played to avoid retry loop "
+                                "every boot");
+                        QFile m(playedMarker);
+                        if (m.open(QIODevice::WriteOnly)) m.close();
+                        return;
+                    }
+
+                    QString err;
+                    bool ok = playSoundFileSync(file, &err);
+                    logBoot(QString("attempt %1/%2: %3 -> %4")
+                            .arg(*attempt + 1).arg(maxAttempts)
+                            .arg(file, ok ? "OK" : ("FAILED (" + err + ")")));
+
+                    if (ok) {
+                        QFile m(playedMarker);
+                        if (m.open(QIODevice::WriteOnly)) m.close();
+                        return;
+                    }
+
+                    (*attempt)++;
+                    if (*attempt >= maxAttempts) {
+                        logBoot("giving up after max attempts; will "
+                                "retry next boot");
+                        // deliberately do NOT write playedMarker, so a
+                        // manual re-check is possible by relaunching
+                        // osm-status within the same boot if needed
+                        return;
+                    }
+
+                    logBoot(QString("scheduling retry in %1ms")
+                            .arg(delaysMs[*attempt]));
+                    QTimer::singleShot(delaysMs[*attempt], qApp,
+                                       [tryOncePtr]() { (*tryOncePtr)(); });
+                };
+                (*tryOncePtr)();
             });
         bootPoll->start();
 
