@@ -297,7 +297,7 @@ static QMap<QString, QString> runRotateScan()
 
     QProcess p;
     p.start("bash", { script });
-    p.waitForFinished(8000);   // driver load + proxy start can take a moment
+    p.waitForFinished(45000);  // multiple driver passes + possible apt installs
     QString out = QString::fromUtf8(p.readAllStandardOutput());
 
     for (const QString &lineRaw : out.split('\n')) {
@@ -401,6 +401,7 @@ private:
     QLabel *m_sensorDriverLabel = nullptr;
     QLabel *m_sensorProxyLabel  = nullptr;
     QLabel *m_sensorOrientLabel = nullptr;
+    QLabel *m_sensorHintLabel   = nullptr;
     QPushButton *m_scanBtn      = nullptr;
 
     // ------------- config helpers (local) -------------
@@ -641,10 +642,20 @@ private:
             writeSmallFile(rotateInvertPath(), m_invertPill->isOn() ? "yes" : "no");
         });
 
+        // Only shown when the scan didn't find/start something — carries
+        // the REASON + HINT the detector script worked out (dmesg-based
+        // diagnosis, log file paths, etc) instead of leaving a bare "no".
+        m_sensorHintLabel = new QLabel("");
+        m_sensorHintLabel->setWordWrap(true);
+        m_sensorHintLabel->setStyleSheet("color:#ffb454; font-size:20px;");
+        m_sensorHintLabel->setVisible(false);
+        v->addWidget(m_sensorHintLabel);
+
         connect(m_scanBtn, &QPushButton::clicked, this, [this]() {
             m_scanBtn->setEnabled(false);
-            m_scanBtn->setText("Scanning...");
-            // runRotateScan() blocks briefly (driver load + proxy start);
+            m_scanBtn->setText("Scanning (up to a minute)...");
+            // runRotateScan() blocks — it's trying several driver stacks,
+            // possibly an apt install, and re-scanning between each — but
             // that's fine here since it's an explicit user-triggered action.
             QMap<QString, QString> r = runRotateScan();
             applyScanResult(r);
@@ -793,6 +804,21 @@ private:
         if (m_sensorOrientLabel) {
             QString o = r.value("ORIENTATION", "unknown");
             m_sensorOrientLabel->setText(o.isEmpty() ? "unknown" : o);
+        }
+
+        if (m_sensorHintLabel) {
+            QString reason = r.value("REASON");
+            QString hint   = r.value("HINT");
+
+            if (reason.isEmpty() && hint.isEmpty()) {
+                m_sensorHintLabel->setVisible(false);
+            } else {
+                QString text = reason;
+                if (!hint.isEmpty())
+                    text += (text.isEmpty() ? QString() : QString("\n")) + hint;
+                m_sensorHintLabel->setText(text);
+                m_sensorHintLabel->setVisible(true);
+            }
         }
     }
 };
