@@ -92,6 +92,10 @@ echo "• Updating sound.so..."
 g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo mv sound.so /usr/local/bin/
 
+echo "• Building display.so..."
+g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv display.so /usr/local/bin/
+
 
 cd "$ALT_ROOT/Alternix/apps"
 
