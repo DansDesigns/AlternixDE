@@ -505,7 +505,12 @@ echo "• Building osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-lockscreen && sudo mv osm-lockscreen /usr/local/bin/
 
-
+echo "• Installing Wave Music Player.."
+cd ~
+git clone https://github.com/DansDesigns/music_player
+cd music_player
+chmod +x install_music_player.sh
+./install_music_player.sh
 
 # ────────────────────────────────────────────────
 # 6. Build OSM Settings + modules
