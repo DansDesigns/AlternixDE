@@ -42,6 +42,7 @@ static void setDefaultSinkVolumePercent(int percent) {
 static QString sliderStyle() {
     return
         // Groove (thin, rounded)
+        "QSlider { background:transparent; }"
         "QSlider::groove:horizontal {"
         "   background:#666666;"
         "   height:14px;"
@@ -121,6 +122,7 @@ static QString comboStyle()
         "   border:1px solid #222222;"
         "   border-radius:16px;"
         "   font-size:24px;"
+        "   font-family:'DejaVu Sans';"
         "   padding:10px 20px;"
         "}"
         "QComboBox::drop-down { border:none; width:50px; }"
@@ -131,12 +133,17 @@ static QString comboStyle()
         "   border-top:14px solid #bbbbbb;"
         "   margin-right:16px;"
         "}"
+        "QComboBox QFrame {"            /* popup container frame */
+        "   border:none;"
+        "   background:#4a4a4a;"
+        "}"
         "QComboBox QAbstractItemView {"
-        "   background:#3a3a3a;"
+        "   background:#4a4a4a;"          /* lighter than the cards */
         "   color:white;"
         "   font-size:24px;"
-        "   border:1px solid #222222;"
-        "   selection-background-color:#555555;"
+        "   font-family:'DejaVu Sans';"
+        "   border:none;"                 /* no white frame */
+        "   selection-background-color:#5f5f5f;"
         "   outline:none;"
         "   padding:6px;"
         "}";
