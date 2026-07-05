@@ -32,7 +32,7 @@ sudo update-grub
 sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount -y
 
 echo "[Config] Installing updated configs..."
-cp -r "$ALT_ROOT/Alternix/configs/"* "$HOME/.config/"
+cp -r "$ALT_ROOT/Alternix/configs/*" "$HOME/.config/"
 
 echo ""
 #===========================================================
@@ -115,8 +115,13 @@ chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 echo "• Updating sounds..."
 cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
 
+echo "• Updating scripts..."
+cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
+chmod +x alternix-rotate-monitor.sh
+chmod +x alternix-rotate-setup.sh
+chmod +x alternix-rotate-toggle.sh
 
-echo "• Installing Wave Music Player.."
+echo "• Updating Wave Music Player.."
 cd ~
 git clone https://github.com/DansDesigns/music_player
 cd music_player
