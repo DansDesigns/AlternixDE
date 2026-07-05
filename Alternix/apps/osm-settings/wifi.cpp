@@ -533,6 +533,57 @@ if [ -n "$IFACE" ]; then
     done
 fi
 
+# 2b. Stale interface-name pins in NetworkManager connection profiles.
+# Cloning the same Devuan/Alternix image across different hardware (e.g.
+# built/connected on the Lenovo Miix520, then imaged onto the BBEN C100 or
+# RPi 3B+) carries forward saved connection profiles with the ORIGINAL
+# machine's wifi interface name baked into [connection] interface-name=...
+# NM then refuses to apply that profile to today's actual device (which has
+# a different kernel-assigned name), which looks exactly like "wifi isn't
+# detected" even though the card, driver and firmware are all fine.
+NMCONN_DIR=/etc/NetworkManager/system-connections
+REALIFACES=$(ls /sys/class/net 2>/dev/null | grep -vx 'lo')
+if [ -d "$NMCONN_DIR" ]; then
+    for cf in "$NMCONN_DIR"/*; do
+        [ -f "$cf" ] || continue
+        PINNED=$(grep -oP '^interface-name=\K.*' "$cf" 2>/dev/null)
+        [ -n "$PINNED" ] || continue
+        if ! echo "$REALIFACES" | grep -qx "$PINNED"; then
+            if cp "$cf" "$cf.bak-$TS" && sed -i '/^interface-name=/d' "$cf"; then
+                echo "FIXED: removed stale interface-name=$PINNED from $(basename "$cf")"
+                echo "       (no such device on this machine — profile can now"
+                echo "       match by type/SSID instead. backup: $cf.bak-$TS)"
+                CHANGED=1
+            else
+                echo "FAILED: could not edit $cf (need root?)"
+                FAILED=1
+            fi
+        fi
+    done
+fi
+
+# 2c. Stale udev persistent-net rules pinning an old MAC to a fixed name —
+# same cloned-image symptom, one layer lower. Flagged only (not auto-edited,
+# since malformed rewrites here can break naming further); the actual fix
+# is usually just deleting the file and rebooting to let udev regenerate it.
+UDEV_RULES=/etc/udev/rules.d/70-persistent-net.rules
+if [ -f "$UDEV_RULES" ]; then
+    REALMACS=$(for i in $REALIFACES; do cat "/sys/class/net/$i/address" 2>/dev/null; done)
+    STALE=0
+    while IFS= read -r line; do
+        case "$line" in \#*|"") continue ;; esac
+        MAC=$(echo "$line" | grep -oiP 'address\}=="\K[0-9a-f:]+')
+        [ -n "$MAC" ] || continue
+        echo "$REALMACS" | grep -qix "$MAC" || STALE=1
+    done < "$UDEV_RULES"
+    if [ "$STALE" -eq 1 ]; then
+        echo "NOTE: $UDEV_RULES pins a MAC address not present on this"
+        echo "      machine — leftover from a cloned image. Consider:"
+        echo "        sudo rm $UDEV_RULES && sudo reboot"
+        echo "      to let udev regenerate it fresh for this hardware."
+    fi
+fi
+
 # 3. Device 'unavailable' — the state after unmanaged is fixed but the
 # radio/interface still can't be used. Handle the common causes:
 #    - rfkill soft block (leftover from ifupdown days or Fn-key toggle)
