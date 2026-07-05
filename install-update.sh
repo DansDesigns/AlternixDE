@@ -121,12 +121,21 @@ chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 
+
 echo "• Updating Wave Music Player.."
 cd ~
 git clone https://github.com/DansDesigns/music_player
 cd music_player
 chmod +x install_music_player.sh
 ./install_music_player.sh
+
+
+echo "• Updating Ponder.."
+cd ~
+git clone https://github.com/DansDesigns/Ponder
+cd Pinder
+chmod +x install.sh
+./install.sh
 
 
 echo "• Update & Install Complete."
