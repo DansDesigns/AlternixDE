@@ -32,7 +32,7 @@ sudo update-grub
 sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount -y
 
 echo "[Config] Installing updated configs..."
-cp -r "$ALT_ROOT/Alternix/configs/*" "$HOME/.config/"
+cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
 echo ""
 #===========================================================
@@ -133,7 +133,7 @@ chmod +x install_music_player.sh
 echo "• Updating Ponder.."
 cd ~
 git clone https://github.com/DansDesigns/Ponder
-cd Pinder
+cd Ponder
 chmod +x install.sh
 ./install.sh
 
