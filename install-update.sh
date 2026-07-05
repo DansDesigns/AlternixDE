@@ -112,6 +112,15 @@ chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 echo "• Updating sounds..."
 cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
 
+
+echo "• Installing Wave Music Player.."
+cd ~
+git clone https://github.com/DansDesigns/music_player
+cd music_player
+chmod +x install_music_player.sh
+./install_music_player.sh
+
+
 echo "• Update & Install Complete."
 echo ""
 #===========================================================
