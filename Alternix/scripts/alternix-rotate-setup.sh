@@ -18,8 +18,10 @@
 #
 # Rather than guess which one applies, this tries all of them (loading an
 # irrelevant/unavailable module is a harmless no-op) and, if nothing is
-# found, captures dmesg + iio-sensor-proxy's own verbose log so the
-# Display settings page can show *why* it failed instead of just "no".
+# found — or the sensor's there but iio-sensor-proxy still won't stay up —
+# captures *why*, including whether the failure looks like a permissions
+# problem, which is common: owning the net.hadess.SensorProxy D-Bus
+# system-bus name is usually gated to root by policy.
 #
 # Output: KEY=VALUE lines, parsed by the Display settings page. Safe to
 # re-run any time — nothing here is destructive.
@@ -30,6 +32,7 @@ LOGDIR="$HOME/.config/Alternix/logs"
 mkdir -p "$LOGDIR"
 PROXY_LOG="$LOGDIR/iio-sensor-proxy.log"
 DMESG_LOG="$LOGDIR/rotate-dmesg.log"
+ACTIVATE_ERR_LOG="$LOGDIR/rotate-dbus-activate.log"
 
 SENSOR_FOUND="no"
 SENSOR_PATH=""
@@ -40,11 +43,12 @@ PROXY_RUNNING="no"
 ORIENTATION="unknown"
 REASON=""
 HINT=""
+RAN_AS_ROOT="no"
+[ "$(id -u)" = "0" ] && RAN_AS_ROOT="yes"
 
 # ---------------------------------------------------------------------
 # Scans /sys/bus/iio/devices for anything that looks like an
 # accelerometer, by sysfs attribute or by name. Sets the SENSOR_* vars.
-# Returns 0 if found, 1 if not.
 # ---------------------------------------------------------------------
 scan_iio() {
     SENSOR_FOUND="no"
@@ -76,7 +80,10 @@ scan_iio() {
 scan_iio
 
 # ---------------------------------------------------------------------
-# Pass 2 — load every plausible driver stack and rescan.
+# Pass 2 — load every plausible driver stack and rescan. (modprobe on
+# something already loaded, built-in, or unavailable for this kernel is
+# a harmless no-op — safe to always run this even when Pass 1 succeeded,
+# since it costs nothing and covers hardware that needs a nudge.)
 # ---------------------------------------------------------------------
 if [ "$SENSOR_FOUND" = "no" ]; then
     MODULES="
@@ -98,8 +105,7 @@ fi
 
 # ---------------------------------------------------------------------
 # Pass 3 — some ISH stacks fail silently for want of firmware blobs
-# rather than a missing module. Try installing common firmware packages
-# and reloading the ISH modules once more before giving up.
+# rather than a missing module.
 # ---------------------------------------------------------------------
 if [ "$SENSOR_FOUND" = "no" ]; then
     if command -v apt-get >/dev/null 2>&1; then
@@ -111,12 +117,25 @@ if [ "$SENSOR_FOUND" = "no" ]; then
     scan_iio
 fi
 
-# Capture recent sensor/accel/ISH-related kernel log lines regardless of
-# outcome — useful even on success, essential on failure.
-dmesg 2>/dev/null | grep -iE 'ish|sensor|accel|iio' | tail -60 > "$DMESG_LOG" 2>/dev/null || true
+# ---------------------------------------------------------------------
+# Kernel log capture, with fallbacks for when the ring buffer itself is
+# restricted (kernel.dmesg_restrict=1 is common and blocks non-root
+# reads regardless of root status of THIS script if it's not actually
+# root — dmesg failing with "Operation not permitted" is a strong sign
+# we're not running with enough privilege here).
+# ---------------------------------------------------------------------
+dmesg_out=""
+if dmesg_out=$(dmesg 2>/dev/null) && [ -n "$dmesg_out" ]; then
+    :
+elif [ -r /var/log/kern.log ]; then
+    dmesg_out=$(tail -n 400 /var/log/kern.log 2>/dev/null)
+elif [ -r /var/log/syslog ]; then
+    dmesg_out=$(tail -n 400 /var/log/syslog 2>/dev/null)
+fi
+echo "$dmesg_out" | grep -iE 'ish|sensor|accel|iio' | tail -60 > "$DMESG_LOG" 2>/dev/null || true
 
 # ---------------------------------------------------------------------
-# Build a diagnosis if we still came up empty.
+# Diagnosis if the sensor still wasn't found.
 # ---------------------------------------------------------------------
 if [ "$SENSOR_FOUND" = "no" ]; then
     if grep -qiE 'ish.*(fail|error)|ishtp.*(fail|error)' "$DMESG_LOG" 2>/dev/null; then
@@ -126,8 +145,8 @@ if [ "$SENSOR_FOUND" = "no" ]; then
         REASON="A firmware file the sensor driver needs may be missing"
         HINT="linux-firmware / firmware-misc-nonfree were installed automatically — reboot and scan again."
     elif [ ! -s "$DMESG_LOG" ]; then
-        REASON="No sensor-related kernel messages at all"
-        HINT="This device may not have a rotation sensor fitted, or the sensor hub is disabled in BIOS/UEFI settings."
+        REASON="No sensor-related kernel messages found"
+        HINT="If this is unexpected, the kernel ring buffer may be restricted (dmesg needs root) — re-run this scan as root/sudo to be sure. Otherwise this device may not have a rotation sensor fitted, or it's disabled in BIOS/UEFI settings."
     else
         REASON="No accelerometer detected after trying known driver stacks"
         HINT="See $DMESG_LOG for the sensor-related kernel log lines captured during this scan."
@@ -135,9 +154,16 @@ if [ "$SENSOR_FOUND" = "no" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# iio-sensor-proxy: install, then start with verbose logging so a
-# same-second exit (it quits immediately if it finds nothing usable)
-# leaves behind a real reason instead of a silent "not running".
+# iio-sensor-proxy.
+#
+# Rather than forking the binary ourselves (which fails silently if this
+# process doesn't have permission to own net.hadess.SensorProxy on the
+# system bus), first just talk to the bus name — dbus-daemon itself can
+# auto-activate a registered D-Bus system service on demand, independent
+# of systemd, as long as the package installed a .service file under
+# /usr/share/dbus-1/system-services/. That activation runs with whatever
+# privilege the .service file's Exec= + dbus policy grants (usually
+# root), so it works even when THIS script isn't root.
 # ---------------------------------------------------------------------
 if command -v iio-sensor-proxy >/dev/null 2>&1; then
     PROXY_INSTALLED="yes"
@@ -146,20 +172,43 @@ elif command -v apt-get >/dev/null 2>&1; then
     command -v iio-sensor-proxy >/dev/null 2>&1 && PROXY_INSTALLED="yes"
 fi
 
-if [ "$PROXY_INSTALLED" = "yes" ]; then
-    if ! pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
-        iio-sensor-proxy -v > "$PROXY_LOG" 2>&1 &
-        disown
-        sleep 2
-    fi
+if [ "$PROXY_INSTALLED" = "yes" ] && ! pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
+    # Ping the well-known name — this is enough to trigger D-Bus
+    # activation if a system-services file exists for it.
+    dbus-send --system --print-reply --dest=net.hadess.SensorProxy \
+        /net/hadess/SensorProxy org.freedesktop.DBus.Peer.Ping \
+        > "$ACTIVATE_ERR_LOG" 2>&1
 
-    if pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
-        PROXY_RUNNING="yes"
-    elif [ "$SENSOR_FOUND" = "yes" ]; then
-        # We found a device but the proxy still wouldn't stay up —
-        # its own log is the authoritative reason here.
-        REASON="iio-sensor-proxy exited immediately despite a detected sensor"
-        HINT="See $PROXY_LOG for its own reported reason."
+    for i in 1 2 3 4 5; do
+        pgrep -x iio-sensor-proxy >/dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+
+if [ "$PROXY_INSTALLED" = "yes" ] && ! pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
+    # D-Bus activation didn't bring it up (no .service file installed,
+    # or this account isn't allowed to trigger/own it). Fall back to
+    # running it directly with verbose logging, so if it's a permission
+    # problem the daemon's own error ends up in PROXY_LOG.
+    iio-sensor-proxy -v > "$PROXY_LOG" 2>&1 &
+    disown
+    sleep 2
+fi
+
+if pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
+    PROXY_RUNNING="yes"
+elif [ "$PROXY_INSTALLED" = "yes" ]; then
+    if [ "$SENSOR_FOUND" = "yes" ]; then
+        if grep -qiE 'not.*provided.*service|ServiceUnknown' "$ACTIVATE_ERR_LOG" 2>/dev/null; then
+            REASON="No D-Bus service-activation file for iio-sensor-proxy"
+            HINT="The package didn't install /usr/share/dbus-1/system-services/net.hadess.SensorProxy.service (some builds only ship a systemd unit, which Devuan/sysvinit won't use). See $PROXY_LOG for the direct-launch attempt's own error."
+        elif grep -qiE 'AccessDenied|not authorized|denied' "$ACTIVATE_ERR_LOG" "$PROXY_LOG" 2>/dev/null; then
+            REASON="D-Bus denied permission to start/own iio-sensor-proxy"
+            HINT="This account (RAN_AS_ROOT=$RAN_AS_ROOT) likely isn't covered by the D-Bus system policy for net.hadess.SensorProxy. Re-run as root, or add an <allow own=\"net.hadess.SensorProxy\"/> rule for this user in /etc/dbus-1/system.d/."
+        else
+            REASON="iio-sensor-proxy exited immediately despite a detected sensor"
+            HINT="See $PROXY_LOG and $ACTIVATE_ERR_LOG for the exact error."
+        fi
     elif [ -z "$REASON" ]; then
         REASON="No accelerometer to start iio-sensor-proxy against"
     fi
@@ -182,7 +231,9 @@ echo "DRIVER_LOADED=$DRIVER_LOADED"
 echo "PROXY_INSTALLED=$PROXY_INSTALLED"
 echo "PROXY_RUNNING=$PROXY_RUNNING"
 echo "ORIENTATION=$ORIENTATION"
+echo "RAN_AS_ROOT=$RAN_AS_ROOT"
 echo "REASON=$REASON"
 echo "HINT=$HINT"
 echo "LOG_PATH=$PROXY_LOG"
 echo "DMESG_LOG=$DMESG_LOG"
+echo "ACTIVATE_LOG=$ACTIVATE_ERR_LOG"

@@ -17,6 +17,9 @@
 #include <QGuiApplication>
 #include <QSizePolicy>
 #include <QTimer>
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <functional>
 
 // -----------------------------------------------------
 // Alternix compact button style (same as Security/Storage)
@@ -286,19 +289,49 @@ static bool rotateMonitorRunning()
     return QFile::exists(rotatePidPath());
 }
 
-// Runs alternix-rotate-setup.sh, which scans /sys/bus/iio for an
-// accelerometer, tries to load the driver modules it needs, and starts
-// iio-sensor-proxy if it isn't already running. Returns the KEY=VALUE
-// lines it printed.
-static QMap<QString, QString> runRotateScan()
+// Spinner frames — same Braille rotation used by the WiFi/Bluetooth
+// refresh buttons, reused here so Scan/Setup behaves identically.
+static const char* const ROTATE_SPIN_FRAMES[] = {
+    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
+};
+static const int ROTATE_SPIN_COUNT = 10;
+
+// Runs a command while calling tick() roughly every 80ms so the UI stays
+// responsive and can animate — same slicing approach as wifi.cpp's
+// runCmdAnimated, duplicated locally to keep this file self-contained.
+static QString runRotateCmdAnimated(const QString &cmd, int timeoutMs,
+                                     const std::function<void()> &tick) {
+    QProcess p;
+    p.start("bash", { "-c", cmd });
+
+    QElapsedTimer t;
+    t.start();
+    while (!p.waitForFinished(80)) {
+        if (t.elapsed() > timeoutMs) {
+            p.kill();
+            p.waitForFinished(500);
+            break;
+        }
+        if (tick) tick();
+        QCoreApplication::processEvents();
+    }
+    return QString::fromUtf8(p.readAllStandardOutput());
+}
+
+// Runs alternix-rotate-setup.sh (scan + driver load + iio-sensor-proxy
+// activation) without freezing the UI, driving tick() so a caller can
+// animate a spinner in sync — mirrors doScan()/runCmdAnimated in
+// wifi.cpp. Returns the KEY=VALUE lines it printed.
+static QMap<QString, QString> runRotateScan(const std::function<void(int)> &tick = {})
 {
     QMap<QString, QString> result;
     QString script = rotateScriptDir() + "/alternix-rotate-setup.sh";
 
-    QProcess p;
-    p.start("bash", { script });
-    p.waitForFinished(45000);  // multiple driver passes + possible apt installs
-    QString out = QString::fromUtf8(p.readAllStandardOutput());
+    int frame = 0;
+    QString out = runRotateCmdAnimated(script, 45000, [&]() {
+        frame = (frame + 1) % ROTATE_SPIN_COUNT;
+        if (tick) tick(frame);
+    });
 
     for (const QString &lineRaw : out.split('\n')) {
         QString line = lineRaw.trimmed();
@@ -652,15 +685,22 @@ private:
         v->addWidget(m_sensorHintLabel);
 
         connect(m_scanBtn, &QPushButton::clicked, this, [this]() {
+            // Reentrancy guard — same reasoning as wifi.cpp's doScan():
+            // processEvents() during the animated wait lets the user tap
+            // the button again mid-scan.
+            static bool scanning = false;
+            if (scanning) return;
+            scanning = true;
+
             m_scanBtn->setEnabled(false);
-            m_scanBtn->setText("Scanning (up to a minute)...");
-            // runRotateScan() blocks — it's trying several driver stacks,
-            // possibly an apt install, and re-scanning between each — but
-            // that's fine here since it's an explicit user-triggered action.
-            QMap<QString, QString> r = runRotateScan();
+            QMap<QString, QString> r = runRotateScan([this](int frame) {
+                m_scanBtn->setText(QString::fromUtf8(ROTATE_SPIN_FRAMES[frame]) + "  Scanning…");
+            });
             applyScanResult(r);
             m_scanBtn->setText("Scan / Setup");
             m_scanBtn->setEnabled(true);
+
+            scanning = false;
         });
 
         // Do an initial silent status read (no driver poking) so the
@@ -809,6 +849,19 @@ private:
         if (m_sensorHintLabel) {
             QString reason = r.value("REASON");
             QString hint   = r.value("HINT");
+            QString ranAsRoot = r.value("RAN_AS_ROOT");
+
+            // A permission-flavoured reason is worth surfacing even when
+            // the sensor itself was found fine — it's usually *why* the
+            // proxy won't stay running.
+            if (ranAsRoot == "no" && r.value("PROXY_RUNNING") != "yes") {
+                QString privNote = "Not running as root/admin — starting "
+                    "iio-sensor-proxy and owning its D-Bus system-bus name "
+                    "usually needs elevated privileges. Try running Alternix "
+                    "(or at least this scan) with sudo/pkexec.";
+                reason = reason.isEmpty() ? "Insufficient privileges" : reason;
+                hint = hint.isEmpty() ? privNote : hint + "\n" + privNote;
+            }
 
             if (reason.isEmpty() && hint.isEmpty()) {
                 m_sensorHintLabel->setVisible(false);
