@@ -2233,6 +2233,15 @@ private:
     }
 
     void connectToServer(const QString &url, const QString &user, const QString &pass) {
+        // smb needs a share name: smb://host alone mounts nothing browsable
+        if (url.startsWith("smb://", Qt::CaseInsensitive) &&
+            url.section("://", 1).section('/', 1, 1).isEmpty()) {
+            QMessageBox::warning(this, "Network",
+                "Please include a share name, e.g.\n\n"
+                "smb://" + url.section("://", 1).section('/', 0, 0)
+                         + "/videos");
+            return;
+        }
         if (gvfsBlockedByPrivilege()) {
             QMessageBox::warning(this, "Network",
                 "osm-files is running as root. gvfs network mounts belong to "
@@ -2319,9 +2328,19 @@ private:
         // strip user@ prefix and :port suffix
         if (host.contains('@')) host = host.section('@', 1);
         if (host.contains(':')) host = host.section(':', 0, 0);
-        QString share = rest.section('/', 1, 1);
+        host = host.toLower();                          // gvfs lowercases the server name
+        QString share = rest.section('/', 1, 1).toLower();
 
         QDir root(gvfsRoot());
+
+        // gvfs mount directory names are deterministic - try building the
+        // path directly, which works even if scanning the root misbehaves
+        if (url.startsWith("smb://", Qt::CaseInsensitive) && !share.isEmpty()) {
+            QString direct = root.absoluteFilePath(
+                QString("smb-share:server=%1,share=%2").arg(host, share));
+            if (QFileInfo(direct).isDir()) return direct;
+        }
+
         if (!root.exists()) return QString();
 
         QString hostMatch;
