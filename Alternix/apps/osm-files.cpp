@@ -11,6 +11,7 @@
 #include <QFileInfo>
 #include <QFileIconProvider>
 #include <QProcess>
+#include <QThread>
 #include <QScreen>
 #include <QGuiApplication>
 #include <QLineEdit>
@@ -1077,10 +1078,15 @@ private:
 
         clearList();
 
+        // gvfs FUSE entries can stat oddly; include QDir::System so they
+        // are not silently filtered out of the listing
+        QDir::Filters extra = path.startsWith(gvfsRoot())
+                                  ? QDir::System : QDir::Filters();
+
         if (showHidden)
-            dir.setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
+            dir.setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | extra);
         else
-            dir.setFilter(QDir::AllEntries | QDir::NoDotAndDotDot);
+            dir.setFilter(QDir::AllEntries | QDir::NoDotAndDotDot | extra);
 
         dir.setSorting(QDir::DirsFirst | QDir::IgnoreCase);
 
@@ -1768,7 +1774,25 @@ private:
     // ================= NETWORK ACCESS =================
 
     static QString gvfsRoot() {
-        return QString("/run/user/%1/gvfs").arg(getuid());
+        // If launched via sudo/osm-sudo, getuid() is 0 but the gvfs daemon
+        // (and its FUSE mount) belong to the desktop session user. FUSE
+        // denies access to other users - including root - so network mounts
+        // are invisible when elevated. Use the invoking user's uid if known.
+        uid_t uid = getuid();
+        if (uid == 0) {
+            QByteArray sudoUid = qgetenv("SUDO_UID");
+            QByteArray pkUid   = qgetenv("PKEXEC_UID");
+            bool ok = false;
+            uid_t real = sudoUid.toUInt(&ok);
+            if (!ok) { real = pkUid.toUInt(&ok); }
+            if (ok && real != 0) uid = real;
+        }
+        return QString("/run/user/%1/gvfs").arg(uid);
+    }
+
+    // True if we are running elevated: gvfs FUSE mounts will be unreadable
+    static bool gvfsBlockedByPrivilege() {
+        return getuid() == 0;
     }
 
     void loadSavedServers() {
@@ -2209,6 +2233,13 @@ private:
     }
 
     void connectToServer(const QString &url, const QString &user, const QString &pass) {
+        if (gvfsBlockedByPrivilege()) {
+            QMessageBox::warning(this, "Network",
+                "osm-files is running as root. gvfs network mounts belong to "
+                "the desktop user's session and FUSE hides them from root, so "
+                "the share will mount but appear empty.\n\n"
+                "Launch osm-files as the normal user to browse network shares.");
+        }
         if (statusLabel) statusLabel->setText("Connecting to " + url + " ...");
         QCoreApplication::processEvents();
 
@@ -2257,7 +2288,15 @@ private:
             saveSavedServers();
         }
 
-        QString mountPath = findGvfsMount(url);
+        // The FUSE view of the mount can appear a moment after 'gio mount'
+        // returns, so poll briefly instead of checking once
+        QString mountPath;
+        for (int attempt = 0; attempt < 20; ++attempt) {   // up to ~2s
+            mountPath = findGvfsMount(url);
+            if (!mountPath.isEmpty()) break;
+            QThread::msleep(100);
+            QCoreApplication::processEvents();
+        }
         if (mountPath.isEmpty()) {
             // fall back to the gvfs root so the user can pick the mount manually
             mountPath = gvfsRoot();
@@ -2287,7 +2326,7 @@ private:
 
         QString hostMatch;
         for (const QString &entry :
-             root.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+             root.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::System)) {
             // entries look like: smb-share:server=host,share=name  /  sftp:host=host,user=...
             if (!entry.contains(host, Qt::CaseInsensitive)) continue;
             if (!share.isEmpty() &&
