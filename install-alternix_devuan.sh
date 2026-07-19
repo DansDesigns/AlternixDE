@@ -344,6 +344,9 @@ EOF
 # 5. Build Alternix Apps
 # ────────────────────────────────────────────────
 echo " "
+echo "• Creating .local/share/applications folder..."
+echo " "
+mkdir -p "$HOME/.local/share/applications"
 echo "[7/10] Building Alternix apps..."
 cd "$ALT_ROOT/Alternix" || { echo "ERROR: $ALT_ROOT not found"; exit 1; }
 
@@ -398,7 +401,6 @@ if [ -f "icons/osm-paper.png" ]; then
     sudo cp icons/osm-paper.png /usr/share/icons/hicolor/64x64/apps/osm-paper.png
 fi
 
-mkdir -p "$HOME/.local/share/applications"
 cat <<EOF > "$HOME/.local/share/applications/osm-paper.desktop"
 [Desktop Entry]
 Type=Application
@@ -917,19 +919,19 @@ rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
-# 10. Install grub theme
+# 10. Install grub theme - disabled due to new UEFI theme engine: Visor
 # ────────────────────────────────────────────────
-echo " "
-cd "$HOME"
-git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
-cd forest-dawn-grub-theme
-chmod +x install.sh
-sudo ./install.sh
+#echo " "
+#cd "$HOME"
+#git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
+#cd forest-dawn-grub-theme
+#chmod +x install.sh
+#sudo ./install.sh
 
 # Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
-sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
+#sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 
-sudo update-grub
+#sudo update-grub
 
 
 # ────────────────────────────────────────────────
@@ -951,9 +953,9 @@ echo " "
 echo "- Installing rounded-corners..."
 cd "$HOME"
 git clone https://github.com/DansDesigns/rounded_corners
-cd rounded_corners
+cd "$HOME/rounded_corners"
 chmod +x install_corners.sh
-sudo ./install_corners.sh
+./install_corners.sh
 
 
 # ────────────────────────────────────────────────
