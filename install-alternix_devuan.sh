@@ -237,7 +237,8 @@ fi
 echo "[System] Installing Brave Browser..."
 curl -fsS https://dl.brave.com/install.sh | sh -s -- --yes
 
-
+echo "[System] Updating bash aliases..."
+echo 'alias sudo="osm-sudo sudo -S"' >> "$HOME/.bashrc"
 
 # ────────────────────────────────────────────────
 # Copy ALL configs from ~/Alternix/configs → ~/.config
@@ -949,13 +950,13 @@ sudo auto-cpufreq --install
 # ────────────────────────────────────────────────
 # 12. rounded-corners
 # ────────────────────────────────────────────────
-echo " "
-echo "- Installing rounded-corners..."
-cd "$HOME"
-git clone https://github.com/DansDesigns/rounded_corners
-cd "$HOME/rounded_corners"
-chmod +x install_corners.sh
-./install_corners.sh
+#echo " "
+#echo "- Installing rounded-corners..."
+#cd "$HOME"
+#git clone https://github.com/DansDesigns/rounded_corners
+#cd "$HOME/rounded_corners"
+#chmod +x install_corners.sh
+#./install_corners.sh
 
 
 # ────────────────────────────────────────────────
