@@ -100,7 +100,7 @@ sudo mv display.so /usr/local/bin/
 cd "$ALT_ROOT/Alternix/apps"
 
 echo "• Updating osm-power..."
-g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+g++ -fPIC osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 echo "• Updating osm-files..."
