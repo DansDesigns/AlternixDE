@@ -4,7 +4,7 @@ A Linux Desktop Environment designed for touchscreen devices.
 Using Qtile & custom Qt5 app launcher, app switcher, quick settings, file editor/viewer & drawing app
 
 
-# !-CURRENTLY CONVERTING TO DEVUAN-!
+# !-DESIGNED FOR DEBIAN/DEVUAN BASED DISTROS ONLY-!
 
 
 Key commands:
@@ -34,9 +34,12 @@ CTRL + SPACE: open Ulauncher Application, file & search bar
 ```
 
 
-to install:
+# Install
 
-recomended to use a fresh install of Debain 13 with NO desktop,
+Recomended to use NexOS Linux ([here](https://github.com/DansDesigns/NexOS))
+or manually:
+
+start with a fresh install of Debain 13 with NO desktop,
 
 install git:
 ```
