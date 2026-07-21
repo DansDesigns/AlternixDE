@@ -130,7 +130,7 @@ sudo nala install -y \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput \
-    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
+    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 ranger \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
@@ -138,7 +138,8 @@ sudo nala install -y \
 
 echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
 echo "If snap packages are needed, use flatpak equivalents instead."
-
+echo ""
+echo ""
 # ────────────────────────────────────────────────
 # Mobile Telephony Components (optional)
 # ────────────────────────────────────────────────
