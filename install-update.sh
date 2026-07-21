@@ -99,6 +99,10 @@ sudo mv display.so /usr/local/bin/
 
 cd "$ALT_ROOT/Alternix/apps"
 
+echo "• Updating osm-power..."
+g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-power && sudo mv osm-power /usr/local/bin/
+
 echo "• Updating osm-files..."
 g++ -fPIC osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
@@ -115,7 +119,7 @@ echo "• Updating osm-clock..."
 g++ -fPIC osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
-echo "• Building osm-notify..."
+echo "• Updating osm-notify..."
 g++ -fPIC osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
