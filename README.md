@@ -34,9 +34,12 @@ CTRL + SPACE: open Ulauncher Application, file & search bar
 ```
 
 
-to install:
+# Install
 
-recomended to use a fresh install of Debain 13 with NO desktop,
+Recomended to use NexOS Linux (here)
+or manually:
+
+start with a fresh install of Debain 13 with NO desktop,
 
 install git:
 ```
