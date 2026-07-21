@@ -234,8 +234,8 @@ fi
 echo "[System] Installing Brave Browser..."
 curl -fsS https://dl.brave.com/install.sh | sh -s -- --yes
 
-echo "[System] Updating bash aliases..."
-echo 'alias sudo="osm-sudo sudo -S"' >> "$HOME/.bashrc"
+#echo "[System] Updating bash aliases..."
+#echo 'alias sudo="osm-sudo sudo -S"' >> "$HOME/.bashrc"
 
 # ────────────────────────────────────────────────
 # Copy ALL configs from ~/Alternix/configs → ~/.config
