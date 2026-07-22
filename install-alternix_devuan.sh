@@ -2,19 +2,19 @@
 set -e
 clear
 
-echo "=============================================="
-echo "       Alternix Desktop Installer"
-echo "          (Devuan Edition)"
-echo "=============================================="
-echo "--------> Teaching Penguins to fly! <--------"
+echo "===================================================================="
+echo "                     Alternix Desktop Installer"
+echo "                         (Devuan Edition)"
+echo "===================================================================="
+echo "           --------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
 echo " Setup can take a while, be sure to have a cuppa & some good music!"
 echo "--------------------------------------------------------------------"
 echo ""
-echo "NOTE: You will be asked for input several times."
+echo "         NOTE: You will be asked for input several times."
 echo ""
-echo "-------------------------------------------"
+echo "--------------------------------------------------------------------"
 echo ""
 echo ""
 
@@ -47,11 +47,21 @@ else
     echo "User '$TARGET_USER' created."
 fi
 
+
 # Add to sudo (optional)
 if ! groups "$TARGET_USER" | grep -q "\bsudo\b"; then
     echo "Adding '$TARGET_USER' to sudo group..."
     sudo usermod -aG sudo "$TARGET_USER"
 fi
+
+# Grant NOPASSWD now, up front — the rest of this script makes dozens of
+# sudo calls (package installs, config copies, app builds/moves). Without
+# this, the sudo credential cache expires mid-script (default 15 min) and
+# a later sudo call fails silently under `set -e`, aborting the install
+# partway through with no clear error.
+echo "Setting NOPASSWD for $TARGET_USER..."
+echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-nopasswd >/dev/null
+sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 
 echo ""
 echo "User setup complete. Username set to: $TARGET_USER"
@@ -749,7 +759,7 @@ sudo service nmbd restart || true
 
 
 # ────────────────────────────────────────────────
-# OSM-Lockscreen Security Layer
+# 8. OSM-Lockscreen Security Layer
 # ────────────────────────────────────────────────
 echo " "
 echo "[X] Setting up secure lockscreen supervisor..."
@@ -843,7 +853,7 @@ echo "[✓] Lockscreen security layer installed."
 
 
 # ────────────────────────────────────────────────
-# logind / elogind power key handling
+# 9. logind / elogind power key handling
 # Devuan ships elogind as a drop-in for systemd-logind.
 # Its config lives in /etc/elogind/logind.conf (same format).
 # ────────────────────────────────────────────────
@@ -868,7 +878,7 @@ echo "[✓] elogind configured."
 
 
 # ────────────────────────────────────────────────
-# 8. Autologin via agetty override
+# 10. Autologin via agetty override
 # Devuan uses /etc/inittab (SysVinit) rather than systemd drop-ins.
 # We replace the tty1 line to pass --autologin.
 # ────────────────────────────────────────────────
@@ -901,14 +911,10 @@ else
     echo "For OpenRC: edit /etc/conf.d/agetty.tty1 and set agetty_options."
 fi
 
-echo "Setting NOPASSWD for $TARGET_USER..."
-echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-nopasswd >/dev/null
-sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
-
 sudo usermod -aG video,input "$TARGET_USER"
 
 # ────────────────────────────────────────────────
-# 9. Cleanup Alternix folder
+# 11. Cleanup Alternix folder
 # ────────────────────────────────────────────────
 
 echo " "
@@ -917,24 +923,9 @@ cd ~
 rm -rf "$ALT_ROOT"
 
 
-# ────────────────────────────────────────────────
-# 10. Install grub theme - disabled due to new UEFI theme engine: Visor
-# ────────────────────────────────────────────────
-#echo " "
-#cd "$HOME"
-#git clone https://github.com/hashirsajid58200p/forest-dawn-grub-theme.git
-#cd forest-dawn-grub-theme
-#chmod +x install.sh
-#sudo ./install.sh
-
-# Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
-#sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
-
-#sudo update-grub
-
 
 # ────────────────────────────────────────────────
-# 11. fetch (areofyl/fetch — replaces fastfetch)
+# 12. fetch (areofyl/fetch — replaces fastfetch)
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing fetch (areofyl/fetch)..."
@@ -948,7 +939,7 @@ rm -rf fetch
 
 
 # ────────────────────────────────────────────────
-# 12. auto-cpufreq
+# 13. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing auto-cpufreq..."
@@ -959,20 +950,9 @@ sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
 
 
-# ────────────────────────────────────────────────
-# 13. rounded-corners
-# ────────────────────────────────────────────────
-#echo " "
-#echo "- Installing rounded-corners..."
-#cd "$HOME"
-#git clone https://github.com/DansDesigns/rounded_corners
-#cd "$HOME/rounded_corners"
-#chmod +x install_corners.sh
-#./install_corners.sh
-
 
 # ────────────────────────────────────────────────
-# GLX compatibility check → patch picom.conf
+# 14. GLX compatibility check → patch picom.conf
 # Detects whether the GPU supports GLX/OpenGL well
 # enough for picom's glx backend. If not, switches
 # picom.conf to xrender (safe on all hardware).
