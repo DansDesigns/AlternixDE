@@ -124,7 +124,7 @@ sudo nala install xlibre -y
 
 echo "[System] Installing Required Components.."
 sudo nala install -y \
-    fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
+    build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
@@ -934,7 +934,21 @@ rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
-# 11. auto-cpufreq
+# 11. fetch (areofyl/fetch — replaces fastfetch)
+# ────────────────────────────────────────────────
+echo " "
+echo "- Installing fetch (areofyl/fetch)..."
+cd "$HOME"
+git clone https://github.com/areofyl/fetch.git
+cd fetch
+make
+sudo make install
+cd "$HOME"
+rm -rf fetch
+
+
+# ────────────────────────────────────────────────
+# 12. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing auto-cpufreq..."
@@ -946,7 +960,7 @@ sudo auto-cpufreq --install
 
 
 # ────────────────────────────────────────────────
-# 12. rounded-corners
+# 13. rounded-corners
 # ────────────────────────────────────────────────
 #echo " "
 #echo "- Installing rounded-corners..."
