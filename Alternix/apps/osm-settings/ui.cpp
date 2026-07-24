@@ -11,6 +11,8 @@
 #include <QProcess>
 #include <QSettings>
 #include <QDir>
+#include <QComboBox>
+#include <QFile>
 #include <QApplication>
 #include <QFont>
 #include <QScreen>
@@ -98,6 +100,51 @@ static QString sliderStyle()
 }
 
 // -----------------------------------------------------
+// Combo box style (for the sound pickers)
+// -----------------------------------------------------
+static QString comboStyle()
+{
+    return
+        "QComboBox {"
+        "   background:#444444;"
+        "   color:white;"
+        "   border:1px solid #222222;"
+        "   border-radius:16px;"
+        "   font-size:24px;"
+        "   font-family:'DejaVu Sans';"
+        "   padding:10px 20px;"
+        "}"
+        "QComboBox::drop-down { border:none; width:50px; }"
+        "QComboBox::down-arrow {"
+        "   image:none;"
+        "   border-left:12px solid transparent;"
+        "   border-right:12px solid transparent;"
+        "   border-top:14px solid #bbbbbb;"
+        "   margin-right:16px;"
+        "}"
+        "QComboBox QFrame {"            /* popup container frame */
+        "   border:none;"
+        "   background:#4a4a4a;"
+        "}"
+        "QComboBox QAbstractItemView {"
+        "   background:#4a4a4a;"          /* lighter than the cards */
+        "   color:white;"
+        "   font-size:24px;"
+        "   font-family:'DejaVu Sans';"
+        "   border:none;"                 /* no white frame */
+        "   selection-background-color:#5f5f5f;"
+        "   outline:none;"
+        "   padding:6px;"
+        "}";
+}
+
+// Same folder osm-status and sound.cpp read sound files from.
+static QString soundsDir()
+{
+    return QDir::homePath() + "/.config/Alternix/sounds";
+}
+
+// -----------------------------------------------------
 // UIPage
 // -----------------------------------------------------
 class UIPage : public QWidget
@@ -147,6 +194,12 @@ public:
 
         // ── Wallpaper shortcut ──────────────────────────
         outerLay->addWidget(makeWallpaperCard());
+
+        // ── Login sound (was "Boot Sound", moved from Sound page) ──
+        outerLay->addWidget(makeLoginSoundCard());
+
+        // ── Notification sound ──────────────────────────
+        outerLay->addWidget(makeNotificationSoundCard());
 
         wrapLay->addWidget(outer);
         wrapLay->addStretch();
@@ -317,6 +370,130 @@ private:
         });
 
         return card;
+    }
+
+    // ── Generic sound picker card (used for Login + Notification) ──
+    // settingsKey: e.g. "Sound/BootSound" or "Sound/NotificationSound"
+    // defaultPrefix: filename prefix osm-status falls back to when no
+    //                explicit selection is made, e.g. "boot" or "notify"
+    QWidget *makeSoundPickerCard(const QString &title,
+                                  const QString &settingsKey,
+                                  const QString &defaultPrefix,
+                                  const QString &note)
+    {
+        QFrame *card = new QFrame;
+        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+
+        QVBoxLayout *lay = new QVBoxLayout(card);
+        lay->setContentsMargins(30, 24, 30, 24);
+        lay->setSpacing(16);
+
+        QLabel *lbl = new QLabel(title, card);
+        lbl->setStyleSheet("font-size:30px; font-weight:bold;");
+        lbl->setAlignment(Qt::AlignCenter);
+        lay->addWidget(lbl);
+
+        QHBoxLayout *row = new QHBoxLayout();
+        row->setSpacing(16);
+
+        QComboBox *combo = new QComboBox(card);
+        combo->setStyleSheet(comboStyle());
+        combo->setFixedHeight(60);
+        combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        // populate from the sounds folder
+        QDir d(soundsDir());
+        if (!d.exists()) d.mkpath(".");
+        QStringList files = d.entryList(
+            {"*.wav", "*.ogg", "*.flac", "*.mp3"},
+            QDir::Files, QDir::Name);
+
+        combo->addItem(QString("Default (%1.*)").arg(defaultPrefix), QString());
+        for (const QString &f : files)
+            combo->addItem(f, f);
+
+        // restore saved selection
+        QString saved = m_settings->value(settingsKey).toString();
+        if (!saved.isEmpty()) {
+            int idx = combo->findData(saved);
+            if (idx >= 0) combo->setCurrentIndex(idx);
+        }
+
+        // ▶ preview button (same playback chain as osm-status)
+        QPushButton *play = new QPushButton("▶", card);
+        play->setFixedSize(60, 60);
+        play->setStyleSheet(
+            "QPushButton { background:#3a3a3a; color:#7CFC00;"
+            " border:1px solid #222222; border-radius:16px;"
+            " font-size:26px; font-weight:bold; }"
+            "QPushButton:hover { background:#4a4a4a; }"
+            "QPushButton:pressed { background:#2a2a2a; }");
+
+        row->addWidget(combo, 1);
+        row->addWidget(play);
+        lay->addLayout(row);
+
+        QLabel *noteLbl = new QLabel(note, card);
+        noteLbl->setStyleSheet("font-size:18px; color:#aaaaaa;");
+        noteLbl->setWordWrap(true);
+        lay->addWidget(noteLbl);
+
+        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this, combo, settingsKey](int) {
+                m_settings->setValue(settingsKey, combo->currentData().toString());
+                m_settings->sync();
+            });
+
+        connect(play, &QPushButton::clicked, this, [combo, defaultPrefix]() {
+            QString f = combo->currentData().toString();
+            QString path;
+            if (f.isEmpty()) {
+                // default: first <prefix>.* in the folder
+                QDir d(soundsDir());
+                QStringList m = d.entryList(
+                    {defaultPrefix + ".wav", defaultPrefix + ".ogg",
+                     defaultPrefix + ".flac", defaultPrefix + ".mp3"},
+                    QDir::Files, QDir::Name);
+                if (!m.isEmpty()) path = d.absoluteFilePath(m.first());
+            } else {
+                path = soundsDir() + "/" + f;
+            }
+            if (path.isEmpty() || !QFile::exists(path)) return;
+
+            QString q = "'" + path.replace("'", "'\\''") + "'";
+            QString cmd = path.endsWith(".mp3", Qt::CaseInsensitive)
+                ? QString("mpg123 -q %1 2>/dev/null || "
+                          "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q)
+                : QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
+                          "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q);
+            QProcess::startDetached("sh", QStringList() << "-c" << cmd);
+        });
+
+        return card;
+    }
+
+    // ── Login sound (was "Boot Sound" on the Sound page) ────────
+    // Settings key stays Sound/BootSound — osm-status's resolveBootFile()
+    // already reads that key when it plays the once-per-boot sound
+    // after unlock, so keeping the key name avoids touching that path.
+    QWidget *makeLoginSoundCard()
+    {
+        return makeSoundPickerCard(
+            "Login Sound", "Sound/BootSound", "boot",
+            "Played once per login, right after unlock. Files are read "
+            "from ~/.config/Alternix/sounds/");
+    }
+
+    // ── Notification sound ───────────────────────────────────────
+    // Settings key Sound/NotificationSound is read by osm-status's
+    // playNotificationSound() as the default when a notification doesn't
+    // specify its own "sound:" line.
+    QWidget *makeNotificationSoundCard()
+    {
+        return makeSoundPickerCard(
+            "Notification Sound", "Sound/NotificationSound", "notify",
+            "Used for notifications that don't set their own sound. "
+            "Files are read from ~/.config/Alternix/sounds/");
     }
 
     // ── Wallpaper shortcut card ─────────────────────────

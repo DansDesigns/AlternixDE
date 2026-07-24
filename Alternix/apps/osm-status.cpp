@@ -120,6 +120,21 @@ static void logBoot(const QString &line) {
     out << QDateTime::currentDateTime().toString(Qt::ISODate) << "  " << line << "\n";
 }
 
+// onboard and ulauncher both grab focus / paint over the screen for a
+// moment on first launch, which visibly blocks the lock screen if they're
+// started straight from qtile's autostart (before the login sound has even
+// fired). Launching them from here instead — right where the boot sound
+// starts its attempt, once osm-lockd has actually confirmed the unlock —
+// means they never appear before the sound, only alongside or after it.
+// startDetached so a slow-to-init onboard/ulauncher can't stall the
+// boot-sound retry loop below.
+static void launchLoginApps() {
+    if (!QProcess::startDetached("onboard"))
+        logBoot("launchLoginApps: failed to start onboard");
+    if (!QProcess::startDetached("ulauncher"))
+        logBoot("launchLoginApps: failed to start ulauncher");
+}
+
 // find notify.* / alarm.* in the sounds folder, any supported format
 static QString findDefaultSound(const QString &baseName) {
     static const QStringList exts = {"wav", "ogg", "flac", "mp3"};
@@ -138,6 +153,23 @@ static void playNotificationSound(const QString &sound, bool alarmish) {
         playSoundFile(sound);
         return;
     }
+
+    // General (non-alarm) notifications with no sound of their own use
+    // whatever's picked on the UI page's Notification Sound card, same
+    // pattern as Sound/BootSound for the login sound.
+    if (!alarmish) {
+        QSettings cfg(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                      QSettings::IniFormat);
+        QString chosen = cfg.value("Sound/NotificationSound").toString().trimmed();
+        if (!chosen.isEmpty()) {
+            QString p = chosen.startsWith('/') ? chosen : soundDirPath() + "/" + chosen;
+            if (QFile::exists(p)) {
+                playSoundFile(p);
+                return;
+            }
+        }
+    }
+
     QString def = alarmish ? findDefaultSound("alarm") : QString();
     if (def.isEmpty())
         def = findDefaultSound("notify");   // general default / fallback
@@ -1257,6 +1289,11 @@ int main(int argc,char**argv) {
 
                 bootPoll->stop();
                 logBoot("unlock detected, starting boot-sound attempts");
+
+                // Fire onboard + ulauncher right here — same moment the
+                // sound attempt sequence begins below, so they're never
+                // ahead of the login sound, only alongside/after it.
+                launchLoginApps();
 
                 // retry with backoff: audio may not be up yet this
                 // early in the session (see comment above)

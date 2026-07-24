@@ -62,6 +62,7 @@ class LockScreen : public QWidget {
 
     QLabel *titleLabel = nullptr;
     QPushButton *securityToggle = nullptr;
+    QPushButton *cancelButton = nullptr;
     QWidget *pinWidget = nullptr;
 
     bool firstRun = false;
@@ -96,7 +97,19 @@ public:
             }
         });
 
+        cancelButton = new QPushButton("Cancel", this);
+        cancelButton->setFlat(true);
+        cancelButton->setGeometry(width() - 130, 5, 120, 30);
+        cancelButton->setStyleSheet(
+            "QPushButton { background:transparent; color:#ff8080; font-size:16px; } "
+            "QPushButton:hover { color:#ffaaaa; }");
+        connect(cancelButton, &QPushButton::clicked, this, &LockScreen::cancelEntry);
+
         loadConfig();
+
+        // Cancel only makes sense once a lock method already exists —
+        // during first-run setup you have to finish creating one.
+        cancelButton->setVisible(!firstRun);
 
         // toggle visibility logic
         if (firstRun) {
@@ -122,6 +135,8 @@ public:
 protected:
     void resizeEvent(QResizeEvent *) override {
         securityToggle->setGeometry(10, 5, 220, 30);
+        if (cancelButton)
+            cancelButton->setGeometry(width() - 130, 5, 120, 30);
 
     // estimate grid area (lower half of screen)
         int gridTop = height() * 0.5;  // start of grid roughly mid-screen
@@ -530,6 +545,16 @@ private:
                 update();
             }
         }
+    }
+
+    // Cancel button on the pattern/PIN *entry* pages (not shown during
+    // first-run setup — see constructor). Exits with a nonzero code so
+    // osm-lockscreen's `proc.exitCode() == 0` check treats this exactly
+    // like a failed attempt: it slides the lock screen back down instead
+    // of unlocking.
+    void cancelEntry() {
+        if (firstRun) return;
+        qApp->exit(1);
     }
 };
 

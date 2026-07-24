@@ -6,7 +6,6 @@
 #include <QStackedWidget>
 #include <QFrame>
 #include <QSlider>
-#include <QComboBox>
 #include <QScrollArea>
 #include <QScroller>
 #include <QProcess>
@@ -103,149 +102,6 @@ static QFrame* makeSliderCard(const QString &title, QSlider **outSlider) {
 }
 
 // ---------------------------------------------------------
-// Boot sound picker
-// Lists audio files from ~/.config/Alternix/sounds/ in a dropdown.
-// Selection is stored as Sound/BootSound (filename); osm-status
-// reads it when playing the once-per-boot sound after unlock.
-// ---------------------------------------------------------
-static QString soundsDir()
-{
-    return QDir::homePath() + "/.config/Alternix/sounds";
-}
-
-static QString comboStyle()
-{
-    return
-        "QComboBox {"
-        "   background:#444444;"
-        "   color:white;"
-        "   border:1px solid #222222;"
-        "   border-radius:16px;"
-        "   font-size:24px;"
-        "   font-family:'DejaVu Sans';"
-        "   padding:10px 20px;"
-        "}"
-        "QComboBox::drop-down { border:none; width:50px; }"
-        "QComboBox::down-arrow {"
-        "   image:none;"
-        "   border-left:12px solid transparent;"
-        "   border-right:12px solid transparent;"
-        "   border-top:14px solid #bbbbbb;"
-        "   margin-right:16px;"
-        "}"
-        "QComboBox QFrame {"            /* popup container frame */
-        "   border:none;"
-        "   background:#4a4a4a;"
-        "}"
-        "QComboBox QAbstractItemView {"
-        "   background:#4a4a4a;"          /* lighter than the cards */
-        "   color:white;"
-        "   font-size:24px;"
-        "   font-family:'DejaVu Sans';"
-        "   border:none;"                 /* no white frame */
-        "   selection-background-color:#5f5f5f;"
-        "   outline:none;"
-        "   padding:6px;"
-        "}";
-}
-
-static QFrame* makeBootSoundCard(QSettings *settings)
-{
-    QFrame *card = new QFrame();
-    card->setStyleSheet("QFrame { background:#3a3a3a; border-radius:30px; }");
-
-    QVBoxLayout *lay = new QVBoxLayout(card);
-    lay->setContentsMargins(20, 20, 20, 20);
-    lay->setSpacing(15);
-
-    QLabel *lbl = new QLabel("Boot Sound", card);
-    lbl->setStyleSheet("font-size:30px; color:white; font-weight:bold;");
-    lbl->setAlignment(Qt::AlignCenter);
-    lay->addWidget(lbl);
-
-    QHBoxLayout *row = new QHBoxLayout();
-    row->setSpacing(16);
-
-    QComboBox *combo = new QComboBox(card);
-    combo->setStyleSheet(comboStyle());
-    combo->setFixedHeight(60);
-    combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    // populate from the sounds folder
-    QDir d(soundsDir());
-    if (!d.exists()) d.mkpath(".");
-    QStringList files = d.entryList(
-        {"*.wav", "*.ogg", "*.flac", "*.mp3"},
-        QDir::Files, QDir::Name);
-
-    combo->addItem("Default (boot.*)", QString());
-    for (const QString &f : files)
-        combo->addItem(f, f);
-
-    // restore saved selection
-    QString saved = settings->value("Sound/BootSound").toString();
-    if (!saved.isEmpty()) {
-        int idx = combo->findData(saved);
-        if (idx >= 0) combo->setCurrentIndex(idx);
-    }
-
-    // ▶ preview button (same playback chain as osm-status)
-    QPushButton *play = new QPushButton("▶", card);
-    play->setFixedSize(60, 60);
-    play->setStyleSheet(
-        "QPushButton { background:#444444; color:#7CFC00;"
-        " border:1px solid #222222; border-radius:16px;"
-        " font-size:26px; font-weight:bold; }"
-        "QPushButton:hover { background:#555555; }"
-        "QPushButton:pressed { background:#333333; }");
-
-    row->addWidget(combo, 1);
-    row->addWidget(play);
-    lay->addLayout(row);
-
-    QLabel *note = new QLabel(
-        "Played once per boot after unlocking. Files are read from "
-        "~/.config/Alternix/sounds/", card);
-    note->setStyleSheet("font-size:18px; color:#888888;");
-    note->setWordWrap(true);
-    lay->addWidget(note);
-
-    QObject::connect(combo,
-        QOverload<int>::of(&QComboBox::currentIndexChanged),
-        [combo, settings](int) {
-            settings->setValue("Sound/BootSound",
-                               combo->currentData().toString());
-            settings->sync();
-        });
-
-    QObject::connect(play, &QPushButton::clicked, [combo]() {
-        QString f = combo->currentData().toString();
-        QString path;
-        if (f.isEmpty()) {
-            // default: first boot.* in the folder
-            QDir d(soundsDir());
-            QStringList m = d.entryList(
-                {"boot.wav", "boot.ogg", "boot.flac", "boot.mp3"},
-                QDir::Files, QDir::Name);
-            if (!m.isEmpty()) path = d.absoluteFilePath(m.first());
-        } else {
-            path = soundsDir() + "/" + f;
-        }
-        if (path.isEmpty() || !QFile::exists(path)) return;
-
-        QString q = "'" + path.replace("'", "'\\''") + "'";
-        QString cmd = path.endsWith(".mp3", Qt::CaseInsensitive)
-            ? QString("mpg123 -q %1 2>/dev/null || "
-                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q)
-            : QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
-                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(q);
-        QProcess::startDetached("sh", QStringList() << "-c" << cmd);
-    });
-
-    return card;
-}
-
-// ---------------------------------------------------------
 // SoundPage
 // ---------------------------------------------------------
 class SoundPage : public QWidget
@@ -299,7 +155,6 @@ public:
         scrollLayout->addWidget(makeSliderCard("In-Call",             &callSlider));
         scrollLayout->addWidget(makeSliderCard("Alarms",              &alarmSlider));
         scrollLayout->addWidget(makeSliderCard("Vibration Strength",  &vibSlider));
-        scrollLayout->addWidget(makeBootSoundCard(settings));
 
         scrollLayout->addStretch();
         scroll->setWidget(scrollContainer);
