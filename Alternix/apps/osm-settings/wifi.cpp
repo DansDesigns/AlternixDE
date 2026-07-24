@@ -19,6 +19,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QProcessEnvironment>
 #include <functional>
 
 // =========================================================
@@ -81,6 +82,93 @@ static QString runCmdAnimated(const QString &cmd, int timeoutMs,
 
     if (errOut) *errOut = QString::fromUtf8(p.readAllStandardError()).trimmed();
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+}
+
+// ---------------------------------------------------------------------
+// Privileged commands (nmcli connect / radio on-off / rescan need
+// org.freedesktop.NetworkManager.network-control, which this minimal
+// build has no polkit agent to satisfy interactively).
+//
+// Strategy: try `sudo -n` first — silent and instant if NOPASSWD is
+// configured for the user (Alternix sets this up by default). If that
+// specifically fails because a password is needed, retry with `sudo -A`
+// so sudo calls the SUDO_ASKPASS helper — osm-sudo, the GUI pattern
+// unlock — instead of trying (and failing) to prompt on a controlling
+// terminal that doesn't exist for a GUI app.
+// ---------------------------------------------------------------------
+
+static QProcessEnvironment sudoEnv() {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // osm-sudo is installed to /usr/local/bin and normally exported via
+    // /etc/profile.d/osm-sudo.sh — this is just a safety net in case a
+    // process ends up with a stripped environment.
+    if (env.value("SUDO_ASKPASS").isEmpty())
+        env.insert("SUDO_ASKPASS", "/usr/local/bin/osm-sudo");
+    return env;
+}
+
+static QString runCmdAsRoot(const QString &cmd, int timeoutMs = 5000,
+                             QString *errOut = nullptr) {
+    QProcessEnvironment env = sudoEnv();
+
+    QProcess p;
+    p.setProcessEnvironment(env);
+    p.start("sudo", {"-n", "bash", "-c", cmd});
+    p.waitForFinished(timeoutMs);
+    QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
+
+    if (err.contains("password is required") || err.contains("a password is required")) {
+        QProcess p2;
+        p2.setProcessEnvironment(env);
+        p2.start("sudo", {"-A", "bash", "-c", cmd});
+        p2.waitForFinished(qMax(timeoutMs, 60000));  // give osm-sudo time to unlock
+        out = QString::fromUtf8(p2.readAllStandardOutput()).trimmed();
+        err = QString::fromUtf8(p2.readAllStandardError()).trimmed();
+    }
+
+    if (errOut) *errOut = err;
+    return out;
+}
+
+// Animated variant of runCmdAsRoot, mirroring runCmdAnimated so callers
+// (scan / connect) can keep their spinner alive while osm-sudo is up and
+// while the privileged command itself runs.
+static QString runCmdAsRootAnimated(const QString &cmd, int timeoutMs,
+                                    const std::function<void()> &tick,
+                                    QString *errOut = nullptr) {
+    QProcessEnvironment env = sudoEnv();
+
+    // Fast path: NOPASSWD sudo, no GUI, no animation needed.
+    QProcess p;
+    p.setProcessEnvironment(env);
+    p.start("sudo", {"-n", "bash", "-c", cmd});
+    p.waitForFinished(3000);
+    QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
+
+    if (err.contains("password is required") || err.contains("a password is required")) {
+        QProcess p2;
+        p2.setProcessEnvironment(env);
+        p2.start("sudo", {"-A", "bash", "-c", cmd});
+
+        QElapsedTimer t;
+        t.start();
+        while (!p2.waitForFinished(80)) {
+            if (t.elapsed() > timeoutMs) {
+                p2.kill();
+                p2.waitForFinished(500);
+                break;
+            }
+            if (tick) tick();
+            QCoreApplication::processEvents();
+        }
+        out = QString::fromUtf8(p2.readAllStandardOutput()).trimmed();
+        err = QString::fromUtf8(p2.readAllStandardError()).trimmed();
+    }
+
+    if (errOut) *errOut = err;
+    return out;
 }
 
 static QString cidrToMask(const QString &cidrStr) {
@@ -308,7 +396,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         // so the spinner keeps moving the whole time.
         int frame = 0;
         QString err;
-        QString out = runCmdAnimated(
+        QString out = runCmdAsRootAnimated(
             "nmcli -t -f IN-USE,SSID device wifi list --rescan yes", 15000,
             [&]() {
                 frame = (frame + 1) % SPIN_COUNT;
@@ -466,9 +554,9 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     QObject::connect(toggleWifi, &QPushButton::clicked, [updateWifiState]() mutable {
         QString state = runCmd("nmcli radio wifi");
         if (state == "enabled")
-            runCmd("nmcli radio wifi off");
+            runCmdAsRoot("nmcli radio wifi off");
         else
-            runCmd("nmcli radio wifi on");
+            runCmdAsRoot("nmcli radio wifi on");
 
         updateWifiState();
     });
@@ -743,23 +831,18 @@ fi
             f.close();
         }
 
-        // Run as root via sudo -n (non-interactive). Alternix sets NOPASSWD
-        // for the user, so this succeeds silently; if it can't, sudo exits
-        // immediately with an error we can show instead of hanging on a
-        // password prompt inside a GUI app with no terminal.
-        QProcess proc;
-        proc.start("sudo", {"-n", "bash", scriptPath, iface});
-        proc.waitForFinished(30000);
-        QString out = QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-        QString err = QString::fromUtf8(proc.readAllStandardError()).trimmed();
+        // Run as root. Alternix sets NOPASSWD for the user, so this succeeds
+        // silently via `sudo -n`; if that isn't configured, runCmdAsRoot
+        // falls back to `sudo -A`, which calls osm-sudo for a GUI
+        // pattern-unlock instead of hanging on a terminal prompt that a
+        // GUI app doesn't have.
+        QString err;
+        QString out = runCmdAsRoot(
+            "bash " + scriptPath + " '" + iface + "'", 30000, &err);
 
         QString report = out.isEmpty() ? "No output from fix script." : out;
         if (!err.isEmpty())
             report += "\n\n[stderr]\n" + err;
-        if (err.contains("password is required") || err.contains("a password is required"))
-            report += "\n\nTip: passwordless sudo isn't configured for this "
-                      "user, so the fix can't edit /etc. Run the app as root "
-                      "or add a NOPASSWD sudoers rule.";
 
         QMessageBox::information(nullptr, "Wi-Fi Fix", report);
 
@@ -815,7 +898,7 @@ fi
         // FIX: 45s timeout — the old 5s runCmd cut off real associations,
         // which commonly take 10-20s (scan + auth + DHCP).
         QString err;
-        QString out = runCmdAnimated(cmd, 45000, [&]() {
+        QString out = runCmdAsRootAnimated(cmd, 45000, [&]() {
             frame = (frame + 1) % SPIN_COUNT;
             item->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Connecting to " + ssid + "…");
         }, &err);
