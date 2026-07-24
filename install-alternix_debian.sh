@@ -148,7 +148,7 @@ sudo nala install -y \
     fastfetch qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
-    python3-venv picom qtile redshift onboard samba xdotool alacritty sqlite3 fuse \
+    python3-venv picom python3-cffi python3-xcffib redshift onboard samba xdotool alacritty sqlite3 fuse \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     snapd power-profiles-daemon xprintidle libx11-dev libxtst-dev ntfs-3g aria2 \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
