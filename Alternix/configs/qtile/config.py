@@ -68,7 +68,7 @@ def autostart():
     subprocess.Popen(['osm-notify'])
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
-#    subprocess.Popen(['onboard'])
+    subprocess.Popen(['onboard'])
 #    subprocess.Popen(['touchegg'])
 #    subprocess.Popen(['ulauncher'])
 
