@@ -107,22 +107,3 @@ anything using org.freedesktop.Notifications), which appear in the
 osm-status pop-out panel with the notify sound.
 
 
-# The utilization of this Linux distribution is prohibited in jurisdictions mandating age verification.
-Any penalties or charges incurred due to non-compliance will be transferred to the user
-
-THIS INCLUDES BUT NOT LIMITED TO: THE FOLLOWING AREAS THAT ARE NOT ALLOWED TO USE THIS OS (THE LAWS ASSOCIATED):
-```
-New York (S8102A) after March 4th 2026.
-Brazil (15.211) after March 17th 2026.
-California (AB-1043) after January 1st 2027.
-Colorado (SB26-51) after January 1st 2028.
-Illinois (PENDING)
-Utah (PENDING)
-Texas (PENDING)
-Louisiana (PENDING)
-Michigan (PENDING)
-Oregon (PENDING)
-Entire USA (Federal: Parents Decide Act (PENDING))
-Singapore 
-
-```
