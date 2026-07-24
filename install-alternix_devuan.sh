@@ -9,7 +9,9 @@ echo "===================================================================="
 echo "           --------> Teaching Penguins to fly! <--------"
 echo " "
 echo "--------------------------------------------------------------------"
+echo ""
 echo " Setup can take a while, be sure to have a cuppa & some good music!"
+echo ""
 echo "--------------------------------------------------------------------"
 echo ""
 echo "         NOTE: You will be asked for input several times."
@@ -17,6 +19,7 @@ echo ""
 echo "--------------------------------------------------------------------"
 echo ""
 echo ""
+
 
 # Root of the Alternix repo
 ALT_ROOT="$HOME/Alternix"
