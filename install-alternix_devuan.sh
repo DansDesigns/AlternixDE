@@ -320,11 +320,12 @@ fi
 source "$HOME/.qtile_venv/bin/activate"
 
 echo "[3/10] Installing Python pip dependencies..."
-pip3 install qtile qtile-extras mypy
+pip3 install qtile qtile-extras mypy --break-system-packages
 
 # Symlink qtile binary to where udev rules expect it
 sudo mkdir -p /usr/lib/udev
 sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
+
 # Reloading udev rules only works against a running udevd — this script
 # may run inside a chroot (e.g. the NexOS installer) where there's no
 # udevd to talk to. udevadm exits non-zero in that case and would take
