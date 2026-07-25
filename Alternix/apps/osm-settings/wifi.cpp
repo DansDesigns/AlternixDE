@@ -141,11 +141,32 @@ static QString runCmdAsRootAnimated(const QString &cmd, int timeoutMs,
                                     QString *errOut = nullptr) {
     QProcessEnvironment env = sudoEnv();
 
-    // Fast path: NOPASSWD sudo, no GUI, no animation needed.
+    // FIX: this used to be a hardcoded p.waitForFinished(3000) here. sudo -n
+    // fails almost instantly when a password IS required, but when NOPASSWD
+    // is configured (the normal case) it just runs the real command —
+    // which for a wifi rescan can legitimately take up to timeoutMs (15s).
+    // Capping this at 3s meant a working NOPASSWD scan got killed and
+    // read back as empty output before it ever finished, which looked
+    // identical to "no networks" / "nmcli returned nothing" regardless of
+    // what was actually going on. Give it the full timeoutMs, same as the
+    // -A path below.
     QProcess p;
     p.setProcessEnvironment(env);
     p.start("sudo", {"-n", "bash", "-c", cmd});
-    p.waitForFinished(3000);
+
+    {
+        QElapsedTimer t;
+        t.start();
+        while (!p.waitForFinished(80)) {
+            if (t.elapsed() > timeoutMs) {
+                p.kill();
+                p.waitForFinished(500);
+                break;
+            }
+            if (tick) tick();
+            QCoreApplication::processEvents();
+        }
+    }
     QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
     QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
 

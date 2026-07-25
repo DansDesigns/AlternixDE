@@ -199,6 +199,19 @@ static QString getDPKGCount()
     return out.trimmed().isEmpty() ? "0" : out.trimmed();
 }
 
+// Alternix version — read from the same file install-update.sh writes to
+// (sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt),
+// so this always reflects whatever the last update actually installed.
+static QString getAlternixVersion()
+{
+    QFile f("/usr/share/alternix/version.txt");
+    if (!f.open(QIODevice::ReadOnly))
+        return "Unknown";
+
+    QString v = QString::fromUtf8(f.readAll()).trimmed();
+    return v.isEmpty() ? "Unknown" : v;
+}
+
 // -----------------------------------------------------
 // LABEL + LIVE REGISTRY
 // -----------------------------------------------------
@@ -335,6 +348,17 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     // Sections inside outer card
     outerLay->addWidget(
         makeSection(
+            "Alternix",
+            "",
+            {
+                { "Version", getAlternixVersion() }
+            },
+            { "alt_version" }
+        )
+    );
+
+    outerLay->addWidget(
+        makeSection(
             "Linux distro & version",
             getOSName(),
             {
@@ -405,6 +429,9 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     refresh->setInterval(2000);
 
     QObject::connect(refresh, &QTimer::timeout, [=]() {
+        if (liveValues.contains("alt_version"))
+            liveValues["alt_version"]->setText(getAlternixVersion());
+
         if (liveValues.contains("kernel"))
             liveValues["kernel"]->setText(getKernel());
 
