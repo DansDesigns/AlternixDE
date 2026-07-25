@@ -45,10 +45,12 @@ static QPushButton* smallBtn(const QString &txt) {
     return b;
 }
 
-static QString runCmd(const QString &cmd, int timeoutMs = 5000) {
+static QString runCmd(const QString &cmd, int timeoutMs = 5000,
+                       QString *errOut = nullptr) {
     QProcess p;
     p.start("bash", {"-c", cmd});
     p.waitForFinished(timeoutMs);  // FIX: bumped from 1500ms — rescan needs more time
+    if (errOut) *errOut = QString::fromUtf8(p.readAllStandardError()).trimmed();
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
 }
 
@@ -185,6 +187,24 @@ static QString cidrToMask(const QString &cidrStr) {
 static QString getWifiIface() {
     QString res = runCmd("nmcli -t -f DEVICE,TYPE device | grep ':wifi' | cut -d: -f1");
     return res.split("\n").value(0).trimmed();
+}
+
+// DIAGNOSTIC — DO NOT REMOVE.
+// nmcli prints its real error ("Error: Could not create NMClient
+// object...") to STDERR when it can't reach the NetworkManager daemon —
+// most commonly because dbus/NetworkManager were never enabled as boot
+// services (see install_desktop.sh). runCmd() previously only captured
+// stdout, so every nmcli query looked identical to "no networks found"
+// whether NM was unreachable, misbehaving, or genuinely idle. This
+// checks for that specific failure so the UI can say so directly.
+static bool isNetworkManagerUnreachable(QString *detail = nullptr) {
+    QString err;
+    runCmd("nmcli -t -f RUNNING general status", 3000, &err);
+    bool unreachable = err.contains("Could not create NMClient", Qt::CaseInsensitive) ||
+                       err.contains("NetworkManager is not running", Qt::CaseInsensitive) ||
+                       err.contains("Could not connect", Qt::CaseInsensitive);
+    if (detail) *detail = err;
+    return unreachable;
 }
 
 static QString getIP(const QString &iface) {
@@ -410,8 +430,17 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         if (out.isEmpty()) {
             // Surface the actual reason instead of a generic "no networks".
             QString diag;
+            QString nmErr;
             if (!err.isEmpty()) {
                 diag = err;
+            } else if (isNetworkManagerUnreachable(&nmErr)) {
+                diag = "NetworkManager isn't reachable"
+                       + (nmErr.isEmpty() ? QString() : (" (" + nmErr + ")"))
+                       + " — it may not be enabled/running. On this system: "
+                         "sudo rc-update add dbus default; "
+                         "sudo rc-update add NetworkManager default; "
+                         "sudo rc-service dbus start; "
+                         "sudo rc-service NetworkManager start";
             } else {
                 QString iface = getWifiIface();
                 QString state = getDeviceState(iface);
