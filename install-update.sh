@@ -96,6 +96,9 @@ echo "• Building display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv display.so /usr/local/bin/
 
+echo "• Building osm-power..."
+g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 cd "$ALT_ROOT/Alternix/apps"
 
