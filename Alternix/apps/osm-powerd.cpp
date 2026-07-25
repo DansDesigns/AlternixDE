@@ -46,6 +46,39 @@ bool deviceHasPowerKey(int fd) {
     return (bitmask[idx] & (1UL << shift)) != 0;
 }
 
+// Trim trailing whitespace/nulls and lowercase, for robust name matching.
+// Some drivers (older baytrail_button, OEM firmware variants) pad or vary
+// the case of the device name string.
+static std::string normalizeName(const std::string &raw) {
+    std::string s = raw;
+    while (!s.empty() && (s.back() == '\0' || isspace((unsigned char)s.back())))
+        s.pop_back();
+    for (char &c : s) c = tolower((unsigned char)c);
+    return s;
+}
+
+// Devices known to falsely advertise KEY_POWER support without being a real
+// physical power button — e.g. Intel's "Virtual Buttons" HID sensor device,
+// which some platforms (including F10 handling on certain laptops) expose.
+// DO NOT add "power button" variants here — this is a blocklist, not an
+// allowlist, specifically so GPIO-based power buttons (soc_button_array /
+// baytrail_button, used on Bay Trail / Cherry Trail tablets like the HP
+// ElitePad, which don't use the classic ACPI PWRB device) are still grabbed
+// even though their exact name string can vary by platform/firmware.
+static bool isBlockedPowerDevice(const std::string &normalizedName) {
+    static const std::vector<std::string> blocklist = {
+        "virtual buttons",
+        "video bus",
+        "sleep button",
+        "lid switch",
+    };
+    for (const auto &b : blocklist) {
+        if (normalizedName.find(b) != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
 // Try to find an "active" logged-in user via /run/user/<uid>
 uid_t findActiveUserUid() {
     DIR *dir = opendir("/run/user");
@@ -191,20 +224,42 @@ int main() {
             continue;
 
         std::string name = getDeviceName(fd);
+        std::string normName = normalizeName(name);
         bool hasPowerKey = deviceHasPowerKey(fd);
-        bool isPowerName = (name.find("Power Button") != std::string::npos);
+        bool isPowerName = (normName.find("power button") != std::string::npos);
+
+        // DIAGNOSTIC — DO NOT REMOVE. Prints every input device scanned,
+        // not just the ones we decide to monitor, so a mismatch on new
+        // hardware (e.g. a differently-named GPIO power button) is visible
+        // in the console/log instead of failing completely silently.
+        std::cerr << "osm-powerd: scanned " << path
+                   << " name=\"" << name << "\""
+                   << " hasPowerKey=" << (hasPowerKey ? "yes" : "no")
+                   << "\n";
 
         bool monitor = false;
         bool grab    = false;
 
         // Any device with KEY_POWER or "Power Button" in name is interesting,
-        // BUT we will only *trigger* osm-power from the grabbed one.
+        // BUT we only *trigger* osm-power from a device we've grabbed.
         if (hasPowerKey || isPowerName) {
             monitor = true;
         }
 
-        // Only grab the real ACPI "Power Button" device so logind can't power off.
-        if (isPowerName) {
+        // GRAB CRITERION — DO NOT REVERT TO NAME-ONLY MATCH.
+        // Previously this only grabbed devices with the exact substring
+        // "Power Button" in their name. That works for the classic ACPI
+        // PWRB device, but tablets built to Microsoft's "Windows ACPI
+        // Design Guide for SoC Platforms" (Bay Trail / Cherry Trail —
+        // e.g. HP ElitePad) expose their power button via GPIO
+        // (soc_button_array / baytrail_button), and the exact name string
+        // can vary by firmware/driver version. Relying on the name alone
+        // meant those devices were "monitored" (logged) but never
+        // "grabbed" — and the trigger in main() only fires for grabbed
+        // devices — so presses were silently ignored. Grabbing based on
+        // real KEY_POWER capability (minus a small known-bad blocklist)
+        // is the reliable signal across platforms.
+        if (hasPowerKey && !isBlockedPowerDevice(normName)) {
             grab = true;
         }
 
@@ -216,6 +271,7 @@ int main() {
         if (grab) {
             if (ioctl(fd, EVIOCGRAB, 1) < 0) {
                 perror("EVIOCGRAB failed");
+                grab = false;
             } else {
                 std::cout << "Exclusively grabbing: " << path
                           << " (" << name << ")\n";
