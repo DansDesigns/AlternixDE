@@ -80,7 +80,7 @@ echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv wifi.so /usr/local/bin/
 
-echo "• Building bluetooth.so..."
+echo "• Updating bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv bluetooth.so /usr/local/bin/
 
@@ -92,13 +92,9 @@ echo "• Updating sound.so..."
 g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo mv sound.so /usr/local/bin/
 
-echo "• Building display.so..."
+echo "• Updating display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv display.so /usr/local/bin/
-
-echo "• Building osm-power..."
-g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 cd "$ALT_ROOT/Alternix/apps"
 
