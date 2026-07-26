@@ -79,6 +79,32 @@ static bool isBlockedPowerDevice(const std::string &normalizedName) {
     return false;
 }
 
+// A dedicated power/volume/rotation-lock button device (soc_button_array,
+// ACPI PWRB, etc.) never supports ordinary alphabet keys — it has one or a
+// handful of specific buttons and nothing else. A real keyboard obviously
+// does support them, even if it also happens to declare KEY_POWER in its
+// capability bitmask. Check a handful of common letters/space rather than
+// counting total bits, since button-device key counts vary but "does it
+// have letters" reliably doesn't.
+static bool isLikelyFullKeyboard(int fd) {
+    unsigned long bitmask[KEY_MAX / (8 * sizeof(long)) + 1];
+    memset(bitmask, 0, sizeof(bitmask));
+    if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bitmask)), bitmask) < 0)
+        return false;
+
+    auto hasKey = [&](int code) {
+        int idx   = code / (8 * sizeof(long));
+        int shift = code % (8 * sizeof(long));
+        return (bitmask[idx] & (1UL << shift)) != 0;
+    };
+
+    int letterHits = 0;
+    for (int k : {KEY_A, KEY_E, KEY_S, KEY_T, KEY_SPACE}) {
+        if (hasKey(k)) letterHits++;
+    }
+    return letterHits >= 3;
+}
+
 // Try to find an "active" logged-in user via /run/user/<uid>
 uid_t findActiveUserUid() {
     DIR *dir = opendir("/run/user");
@@ -246,7 +272,8 @@ int main() {
             monitor = true;
         }
 
-        // GRAB CRITERION — DO NOT REVERT TO NAME-ONLY MATCH.
+        // GRAB CRITERION — DO NOT REVERT TO NAME-ONLY MATCH, AND DO NOT
+        // DROP THE isLikelyFullKeyboard() GUARD BELOW.
         // Previously this only grabbed devices with the exact substring
         // "Power Button" in their name. That works for the classic ACPI
         // PWRB device, but tablets built to Microsoft's "Windows ACPI
@@ -259,7 +286,18 @@ int main() {
         // devices — so presses were silently ignored. Grabbing based on
         // real KEY_POWER capability (minus a small known-bad blocklist)
         // is the reliable signal across platforms.
-        if (hasPowerKey && !isBlockedPowerDevice(normName)) {
+        //
+        // BUT: many real keyboards (e.g. the Miix 520's detachable
+        // keyboard) also declare KEY_POWER in their capability bitmask
+        // even though they never send it, as part of a broad firmware
+        // key-set declaration. Grabbing one of those via EVIOCGRAB
+        // exclusively locks the whole keyboard away from X11/qtile until
+        // it's physically unplugged and replugged (which creates a fresh,
+        // ungrabbed device node — matching exactly that symptom). So:
+        // never grab anything that looks like an actual keyboard,
+        // regardless of what else it claims to support.
+        if (hasPowerKey && !isBlockedPowerDevice(normName) &&
+            !isLikelyFullKeyboard(fd)) {
             grab = true;
         }
 
