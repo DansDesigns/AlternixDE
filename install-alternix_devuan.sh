@@ -149,6 +149,10 @@ sudo nala install -y \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount
 
+echo ""
+echo "[System] Installing Qtile, Qtile-Extras & mypy"
+pip3 install qtile qtile-extras mypy --break-system-packages
+
 echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
 echo "If snap packages are needed, use flatpak equivalents instead."
 echo ""
