@@ -102,6 +102,13 @@ echo "• Updating osm-power..."
 g++ -fPIC osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
+echo "• Compiling osm-powerd..."
+sudo g++ -O2 osm-powerd.cpp -o osm-powerd
+sudo chmod +x osm-powerd && sudo mv osm-powerd /usr/local/bin/
+sudo chown root:root /usr/local/bin/osm-powerd
+sudo chmod 4755 /usr/local/bin/osm-powerd
+
+
 echo "• Updating osm-files..."
 g++ -fPIC osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
