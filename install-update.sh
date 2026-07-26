@@ -96,6 +96,16 @@ echo "• Updating display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv display.so /usr/local/bin/
 
+
+echo "• Building system.so..."
+g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv system.so /usr/local/bin/
+
+echo "• Building ui.so..."
+g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv ui.so /usr/local/bin/
+
+
 cd "$ALT_ROOT/Alternix/apps"
 
 echo "• Updating osm-power..."

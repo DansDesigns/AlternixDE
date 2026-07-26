@@ -929,7 +929,15 @@ fi
         // previously broke the shell command entirely.
         QString ssidEsc = ssid;  ssidEsc.replace("'", "'\\''");
         QString passEsc = pass;  passEsc.replace("'", "'\\''");
-        QString cmd = QString("nmcli device wifi connect '%1' password '%2'")
+        // FIX: 'nmcli device wifi connect SSID password PASS' hits a known
+        // nmcli bug where the auto-generated profile omits key-mgmt, failing
+        // with "802-11-wireless-security.key-mgmt: property is missing."
+        // Building the connection explicitly (with key-mgmt set) avoids it.
+        QString cmd = QString(
+                        "nmcli connection delete '%1' >/dev/null 2>&1; "
+                        "nmcli connection add type wifi con-name '%1' ssid '%1' "
+                        "wifi-sec.key-mgmt wpa-psk wifi-sec.psk '%2' && "
+                        "nmcli connection up '%1'")
                         .arg(ssidEsc).arg(passEsc);
 
         // Lock the controls while connecting: the animated wait pumps
