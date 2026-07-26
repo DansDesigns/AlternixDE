@@ -135,11 +135,13 @@ static void launchLoginApps() {
         logBoot("launchLoginApps: failed to start ulauncher");
 }
 
-// find notify.* / alarm.* in the sounds folder, any supported format
-static QString findDefaultSound(const QString &baseName) {
+// find notify.* / alarm.* / boot.* in the given sounds subfolder, any
+// supported format. subDir matches ui.cpp's picker: "boot" or
+// "notifications".
+static QString findDefaultSound(const QString &baseName, const QString &subDir) {
     static const QStringList exts = {"wav", "ogg", "flac", "mp3"};
     for (const QString &e : exts) {
-        QString p = soundDirPath() + "/" + baseName + "." + e;
+        QString p = soundDirPath() + "/" + subDir + "/" + baseName + "." + e;
         if (QFile::exists(p)) return p;
     }
     return QString();
@@ -162,7 +164,8 @@ static void playNotificationSound(const QString &sound, bool alarmish) {
                       QSettings::IniFormat);
         QString chosen = cfg.value("Sound/NotificationSound").toString().trimmed();
         if (!chosen.isEmpty()) {
-            QString p = chosen.startsWith('/') ? chosen : soundDirPath() + "/" + chosen;
+            QString p = chosen.startsWith('/')
+                ? chosen : soundDirPath() + "/notifications/" + chosen;
             if (QFile::exists(p)) {
                 playSoundFile(p);
                 return;
@@ -170,9 +173,9 @@ static void playNotificationSound(const QString &sound, bool alarmish) {
         }
     }
 
-    QString def = alarmish ? findDefaultSound("alarm") : QString();
+    QString def = alarmish ? findDefaultSound("alarm", "notifications") : QString();
     if (def.isEmpty())
-        def = findDefaultSound("notify");   // general default / fallback
+        def = findDefaultSound("notify", "notifications");   // general default / fallback
     playSoundFile(def);
 }
 
@@ -1237,8 +1240,9 @@ int main(int argc,char**argv) {
     OverlayRoot root;          // overlay window
     ActivationEdgeBar bar(&root);   // always-on-top gesture edge
 
-    // ensure the default sound folder exists
-    QDir().mkpath(soundDirPath());
+    // ensure the default sound folders exist — boot/ and notifications/
+    QDir().mkpath(soundDirPath() + "/boot");
+    QDir().mkpath(soundDirPath() + "/notifications");
 
     // ── Boot sound: played once per boot, after the first unlock ──
     // osm-lockd touches /tmp/osm_boot_unlocked on successful unlock.
@@ -1270,10 +1274,10 @@ int main(int argc,char**argv) {
             }
             if (!chosen.isEmpty()) {
                 QString p = chosen.startsWith('/')
-                    ? chosen : soundDirPath() + "/" + chosen;
+                    ? chosen : soundDirPath() + "/boot/" + chosen;
                 if (QFile::exists(p)) return p;
             }
-            return findDefaultSound("boot");
+            return findDefaultSound("boot", "boot");
         };
 
         QTimer *bootPoll = new QTimer(&app);
@@ -1313,7 +1317,7 @@ int main(int argc,char**argv) {
                     if (file.isEmpty()) {
                         logBoot("no boot sound file found (checked "
                                 "Sound/BootSound and boot.* in "
-                                + soundDirPath() + ") — giving up, "
+                                + soundDirPath() + "/boot) — giving up, "
                                 "marking played to avoid retry loop "
                                 "every boot");
                         QFile m(playedMarker);

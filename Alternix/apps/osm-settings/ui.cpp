@@ -144,6 +144,13 @@ static QString soundsDir()
     return QDir::homePath() + "/.config/Alternix/sounds";
 }
 
+// Boot sounds live in sounds/boot/, notification (+ alarm) sounds in
+// sounds/notifications/ — osm-status.cpp resolves the same way.
+static QString soundsSubDir(const QString &sub)
+{
+    return soundsDir() + "/" + sub;
+}
+
 // -----------------------------------------------------
 // UIPage
 // -----------------------------------------------------
@@ -374,10 +381,13 @@ private:
 
     // ── Generic sound picker card (used for Login + Notification) ──
     // settingsKey: e.g. "Sound/BootSound" or "Sound/NotificationSound"
+    // subDir: "boot" or "notifications" — matches osm-status.cpp's
+    //         resolution of the same settingsKey
     // defaultPrefix: filename prefix osm-status falls back to when no
     //                explicit selection is made, e.g. "boot" or "notify"
     QWidget *makeSoundPickerCard(const QString &title,
                                   const QString &settingsKey,
+                                  const QString &subDir,
                                   const QString &defaultPrefix,
                                   const QString &note)
     {
@@ -401,8 +411,8 @@ private:
         combo->setFixedHeight(60);
         combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-        // populate from the sounds folder
-        QDir d(soundsDir());
+        // populate from this card's subfolder (boot/ or notifications/)
+        QDir d(soundsSubDir(subDir));
         if (!d.exists()) d.mkpath(".");
         QStringList files = d.entryList(
             {"*.wav", "*.ogg", "*.flac", "*.mp3"},
@@ -444,19 +454,19 @@ private:
                 m_settings->sync();
             });
 
-        connect(play, &QPushButton::clicked, this, [combo, defaultPrefix]() {
+        connect(play, &QPushButton::clicked, this, [combo, subDir, defaultPrefix]() {
             QString f = combo->currentData().toString();
             QString path;
             if (f.isEmpty()) {
-                // default: first <prefix>.* in the folder
-                QDir d(soundsDir());
+                // default: first <prefix>.* in this card's subfolder
+                QDir d(soundsSubDir(subDir));
                 QStringList m = d.entryList(
                     {defaultPrefix + ".wav", defaultPrefix + ".ogg",
                      defaultPrefix + ".flac", defaultPrefix + ".mp3"},
                     QDir::Files, QDir::Name);
                 if (!m.isEmpty()) path = d.absoluteFilePath(m.first());
             } else {
-                path = soundsDir() + "/" + f;
+                path = soundsSubDir(subDir) + "/" + f;
             }
             if (path.isEmpty() || !QFile::exists(path)) return;
 
@@ -479,9 +489,9 @@ private:
     QWidget *makeLoginSoundCard()
     {
         return makeSoundPickerCard(
-            "Login Sound", "Sound/BootSound", "boot",
+            "Login Sound", "Sound/BootSound", "boot", "boot",
             "Played once per login, right after unlock. Files are read "
-            "from ~/.config/Alternix/sounds/");
+            "from ~/.config/Alternix/sounds/boot/");
     }
 
     // ── Notification sound ───────────────────────────────────────
@@ -491,9 +501,9 @@ private:
     QWidget *makeNotificationSoundCard()
     {
         return makeSoundPickerCard(
-            "Notification Sound", "Sound/NotificationSound", "notify",
+            "Notification Sound", "Sound/NotificationSound", "notifications", "notify",
             "Used for notifications that don't set their own sound. "
-            "Files are read from ~/.config/Alternix/sounds/");
+            "Files are read from ~/.config/Alternix/sounds/notifications/");
     }
 
     // ── Wallpaper shortcut card ─────────────────────────
