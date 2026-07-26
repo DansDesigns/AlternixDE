@@ -159,6 +159,21 @@ chmod +x install.sh
 ./install.sh
 
 
+# ──────────────────────────────────────────────── 
+# install rounded-corners
+# ────────────────────────────────────────────────
+echo " "
+
+echo "• Updating rounded-corners..."
+cd ~
+sudo rm -r rounded-corners
+git clone https://github.com/DansDesigns/rounded_corners
+cd rounded_corners
+chmod +x install_corners.sh
+sudo ./install_corners.sh
+
+
+
 echo "• Update & Install Complete."
 echo ""
 #===========================================================
