@@ -212,6 +212,9 @@ elif [ "$PROXY_INSTALLED" = "yes" ]; then
     elif [ -z "$REASON" ]; then
         REASON="No accelerometer to start iio-sensor-proxy against"
     fi
+elif [ -z "$REASON" ]; then
+    REASON="iio-sensor-proxy is not installed and the automatic install failed"
+    HINT="Install it manually (e.g. 'sudo apt-get install iio-sensor-proxy') and re-run this scan."
 fi
 
 if [ "$PROXY_RUNNING" = "yes" ]; then

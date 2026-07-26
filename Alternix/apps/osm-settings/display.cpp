@@ -854,7 +854,7 @@ private:
             // A permission-flavoured reason is worth surfacing even when
             // the sensor itself was found fine — it's usually *why* the
             // proxy won't stay running.
-            if (ranAsRoot == "no" && r.value("PROXY_RUNNING") != "yes") {
+            if (ranAsRoot == "no" && r.value("PROXY_RUNNING") != "yes" && r.value("PROXY_INSTALLED") == "yes") {
                 QString privNote = "Not running as root/admin — starting "
                     "iio-sensor-proxy and owning its D-Bus system-bus name "
                     "usually needs elevated privileges. Try running Alternix "
