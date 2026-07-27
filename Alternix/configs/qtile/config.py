@@ -68,9 +68,8 @@ def autostart():
     subprocess.Popen(['osm-notify'])
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
-    subprocess.Popen(['onboard'])
-#    subprocess.Popen(['touchegg'])
-#    subprocess.Popen(['ulauncher'])
+    subprocess.Popen(['touchegg'])
+
 
     # Function to update the time
     def update_time():

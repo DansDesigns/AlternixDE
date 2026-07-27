@@ -2,17 +2,334 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QScreen>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QDateTime>
 #include <QPainter>
+#include <QPolygonF>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QProcess>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QVector>
 #include <QDebug>
+
+// ────────────────────────────────
+// /proc + /sys sampling helpers
+// ────────────────────────────────
+
+static QString readFirstLine(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return QString();
+    QString line = QString::fromLatin1(f.readLine()).trimmed();
+    f.close();
+    return line;
+}
+
+// Aggregate CPU jiffies from /proc/stat.  idle includes iowait.
+static bool readCpuTotals(quint64 &total, quint64 &idle)
+{
+    QString line = readFirstLine("/proc/stat");
+    if (!line.startsWith("cpu"))
+        return false;
+
+    QStringList parts = line.simplified().split(QLatin1Char(' '));
+    if (parts.size() < 5)
+        return false;
+
+    quint64 t = 0;
+    for (int i = 1; i < parts.size(); ++i)
+        t += parts.at(i).toULongLong();
+
+    quint64 idleAll = parts.at(4).toULongLong();          // idle
+    if (parts.size() > 5)
+        idleAll += parts.at(5).toULongLong();             // iowait
+
+    total = t;
+    idle  = idleAll;
+    return true;
+}
+
+// MemTotal / used (kB) from /proc/meminfo.
+static bool readMem(quint64 &totalKb, quint64 &usedKb)
+{
+    QFile f("/proc/meminfo");
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    quint64 memTotal = 0, memAvail = 0, memFree = 0, buffers = 0, cached = 0;
+    bool haveAvail = false;
+
+    while (!f.atEnd()) {
+        QString line = QString::fromLatin1(f.readLine()).simplified();
+        int c = line.indexOf(QLatin1Char(':'));
+        if (c < 0)
+            continue;
+        QString key  = line.left(c);
+        QString rest = line.mid(c + 1).trimmed();
+        int sp = rest.indexOf(QLatin1Char(' '));
+        if (sp > 0)
+            rest = rest.left(sp);
+        quint64 v = rest.toULongLong();
+
+        if (key == "MemTotal")           memTotal = v;
+        else if (key == "MemAvailable")  { memAvail = v; haveAvail = true; }
+        else if (key == "MemFree")       memFree = v;
+        else if (key == "Buffers")       buffers = v;
+        else if (key == "Cached")        cached = v;
+    }
+    f.close();
+
+    if (memTotal == 0)
+        return false;
+
+    quint64 avail = haveAvail ? memAvail : (memFree + buffers + cached);
+    if (avail > memTotal)
+        avail = memTotal;
+
+    totalKb = memTotal;
+    usedKb  = memTotal - avail;
+    return true;
+}
+
+// Summed rx/tx byte counters from /proc/net/dev, excluding loopback.
+static bool readNetBytes(quint64 &rx, quint64 &tx)
+{
+    QFile f("/proc/net/dev");
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    rx = 0;
+    tx = 0;
+    int lineNo = 0;
+
+    while (!f.atEnd()) {
+        QString line = QString::fromLatin1(f.readLine());
+        if (++lineNo <= 2)                 // two header lines
+            continue;
+        int c = line.indexOf(QLatin1Char(':'));
+        if (c < 0)
+            continue;
+        QString iface = line.left(c).trimmed();
+        if (iface == "lo")
+            continue;
+        QStringList fields = line.mid(c + 1).simplified().split(QLatin1Char(' '));
+        if (fields.size() < 9)
+            continue;
+        rx += fields.at(0).toULongLong();  // rx bytes
+        tx += fields.at(8).toULongLong();  // tx bytes
+    }
+    f.close();
+    return true;
+}
+
+// GPU load source.  amdgpu exposes a real busy percentage; i915 does not
+// (intel_gpu_top needs perf privileges), so we fall back to current GPU
+// clock as a percentage of maximum, which tracks load closely enough.
+struct GpuSource {
+    enum Mode { None, BusyPercent, FreqRatio };
+    Mode mode;
+    QString busyPath;
+    QString curFreqPath;
+    QString maxFreqPath;
+    GpuSource() : mode(None) {}
+};
+
+static GpuSource detectGpu()
+{
+    GpuSource g;
+
+    QDir drm("/sys/class/drm");
+    if (!drm.exists())
+        return g;
+
+    QStringList entries = drm.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (int i = 0; i < entries.size(); ++i) {
+        const QString name = entries.at(i);
+        if (!name.startsWith("card"))
+            continue;
+        bool allDigits = name.length() > 4;
+        for (int k = 4; k < name.length() && allDigits; ++k)
+            if (!name.at(k).isDigit())
+                allDigits = false;
+        if (!allDigits)
+            continue;
+
+        const QString base = "/sys/class/drm/" + name;
+
+        // amdgpu / some others
+        if (QFileInfo::exists(base + "/device/gpu_busy_percent")) {
+            g.mode     = GpuSource::BusyPercent;
+            g.busyPath = base + "/device/gpu_busy_percent";
+            return g;
+        }
+
+        // i915, older sysfs layout
+        if (QFileInfo::exists(base + "/gt_cur_freq_mhz") &&
+            QFileInfo::exists(base + "/gt_max_freq_mhz")) {
+            g.mode        = GpuSource::FreqRatio;
+            g.curFreqPath = base + "/gt_cur_freq_mhz";
+            g.maxFreqPath = base + "/gt_max_freq_mhz";
+            return g;
+        }
+
+        // i915, newer per-gt sysfs layout
+        if (QFileInfo::exists(base + "/gt/gt0/rps_cur_freq_mhz") &&
+            QFileInfo::exists(base + "/gt/gt0/rps_max_freq_mhz")) {
+            g.mode        = GpuSource::FreqRatio;
+            g.curFreqPath = base + "/gt/gt0/rps_cur_freq_mhz";
+            g.maxFreqPath = base + "/gt/gt0/rps_max_freq_mhz";
+            return g;
+        }
+    }
+
+    return g;
+}
+
+static QString formatRate(double bytesPerSec)
+{
+    if (bytesPerSec >= 1048576.0)
+        return QString("%1 MB/s").arg(bytesPerSec / 1048576.0, 0, 'f', 1);
+    if (bytesPerSec >= 1024.0)
+        return QString("%1 KB/s").arg(bytesPerSec / 1024.0, 0, 'f', 0);
+    return QString("%1 B/s").arg(bytesPerSec, 0, 'f', 0);
+}
+
+// ────────────────────────────────
+// Sparkline graph widget
+// ────────────────────────────────
+class GraphWidget : public QWidget {
+public:
+    // fixedMax > 0  : fixed vertical scale (e.g. 100 for a percentage)
+    // fixedMax == 0 : auto-scale, never below autoFloor
+    GraphWidget(const QString &title, const QColor &colour,
+                double fixedMax, double autoFloor, QWidget *parent = nullptr)
+        : QWidget(parent),
+          m_title(title),
+          m_readout("--"),
+          m_colour(colour),
+          m_fixedMax(fixedMax),
+          m_autoFloor(autoFloor),
+          m_maxSamples(90)
+    {
+        setMinimumHeight(70);
+    }
+
+    void addSample(double value, const QString &readout)
+    {
+        if (value < 0.0)
+            value = 0.0;
+        m_samples.append(value);
+        while (m_samples.size() > m_maxSamples)
+            m_samples.removeFirst();
+        m_readout = readout;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        Q_UNUSED(event);
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+
+        // Card background
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255, 18));
+        p.drawRoundedRect(r, 14, 14);
+
+        QFont f = font();
+        f.setPointSize(qBound(9, height() / 12, 18));
+        f.setBold(true);
+        p.setFont(f);
+        QFontMetrics fm(f);
+        int textH = fm.height();
+
+        QRectF plot = r.adjusted(10, textH + 8, -10, -10);
+        if (plot.width() < 4 || plot.height() < 4)
+            return;
+
+        // Grid lines
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(255, 255, 255, 25), 1));
+        for (int i = 1; i < 4; ++i) {
+            double y = plot.top() + plot.height() * (i / 4.0);
+            p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+        }
+
+        // Vertical scale
+        double maxVal = m_fixedMax;
+        if (maxVal <= 0.0) {
+            maxVal = m_autoFloor;
+            for (int i = 0; i < m_samples.size(); ++i)
+                if (m_samples.at(i) > maxVal)
+                    maxVal = m_samples.at(i);
+            maxVal *= 1.15;
+        }
+        if (maxVal <= 0.0)
+            maxVal = 1.0;
+
+        if (m_samples.size() >= 2) {
+            double stepX = plot.width() / double(m_maxSamples - 1);
+            int n        = m_samples.size();
+            int startIdx = m_maxSamples - n;   // right-align the trace
+
+            QPolygonF fill;
+            QPolygonF line;
+            fill << QPointF(plot.left() + startIdx * stepX, plot.bottom());
+            for (int i = 0; i < n; ++i) {
+                double frac = m_samples.at(i) / maxVal;
+                if (frac > 1.0) frac = 1.0;
+                if (frac < 0.0) frac = 0.0;
+                QPointF pt(plot.left() + (startIdx + i) * stepX,
+                           plot.bottom() - frac * plot.height());
+                fill << pt;
+                line << pt;
+            }
+            fill << QPointF(plot.left() + (m_maxSamples - 1) * stepX, plot.bottom());
+
+            QColor top = m_colour;    top.setAlpha(170);
+            QColor bot = m_colour;    bot.setAlpha(25);
+            QLinearGradient grad(0, plot.top(), 0, plot.bottom());
+            grad.setColorAt(0.0, top);
+            grad.setColorAt(1.0, bot);
+
+            p.setPen(Qt::NoPen);
+            p.setBrush(grad);
+            p.drawPolygon(fill);
+
+            p.setBrush(Qt::NoBrush);
+            p.setPen(QPen(m_colour, 2));
+            p.drawPolyline(line);
+        }
+
+        // Title / current value
+        QRectF textRect(r.left() + 12, r.top() + 5, r.width() - 24, textH);
+        p.setPen(QColor(255, 255, 255, 205));
+        p.drawText(textRect, Qt::AlignLeft | Qt::AlignVCenter, m_title);
+        p.setPen(m_colour.lighter(135));
+        p.drawText(textRect, Qt::AlignRight | Qt::AlignVCenter, m_readout);
+    }
+
+private:
+    QString m_title;
+    QString m_readout;
+    QColor m_colour;
+    double m_fixedMax;
+    double m_autoFloor;
+    int m_maxSamples;
+    QVector<double> m_samples;
+};
 
 class PowerMenuWindow : public QWidget {
 public:
@@ -21,7 +338,15 @@ public:
           panel(nullptr),
           helloLabel(nullptr),
           timeLabel(nullptr),
-          statsPanel(nullptr)
+          statsPanel(nullptr),
+          cpuGraph(nullptr),
+          ramGraph(nullptr),
+          netGraph(nullptr),
+          gpuGraph(nullptr),
+          lastCpuTotal(0),
+          lastCpuIdle(0),
+          lastRx(0),
+          lastTx(0)
     {
         // Fullscreen, no decorations, overlay-style
         setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
@@ -94,24 +419,43 @@ public:
         // Spacer between icons and stats block
         panelLayout->addStretch(1);
 
-        // Stats panel placeholder
+        // Stats panel: live system graphs
         statsPanel = new QWidget(this);
         statsPanel->setObjectName("statsPanel");
-        QVBoxLayout *statsLayout = new QVBoxLayout(statsPanel);
-        statsLayout->setContentsMargins(30, 30, 30, 30);
+        QGridLayout *statsLayout = new QGridLayout(statsPanel);
+        statsLayout->setContentsMargins(22, 22, 22, 22);
+        statsLayout->setHorizontalSpacing(16);
+        statsLayout->setVerticalSpacing(16);
 
-        QLabel *statsText = new QLabel(
-            "Htop or built in graphs\nshowing CPU, RAM,\nNetwork etc...",
-            this);
-        statsText->setAlignment(Qt::AlignCenter);
-        statsText->setStyleSheet("color: white;");
-        statsLayout->addWidget(statsText);
+        cpuGraph = new GraphWidget("CPU",     QColor(0x4f, 0xc3, 0xf7), 100.0,    0.0,     statsPanel);
+        ramGraph = new GraphWidget("RAM",     QColor(0x81, 0xc7, 0x84), 100.0,    0.0,     statsPanel);
+        netGraph = new GraphWidget("Network", QColor(0xff, 0xb7, 0x4d),   0.0, 65536.0,    statsPanel);
+
+        gpuSrc = detectGpu();
+        if (gpuSrc.mode != GpuSource::None) {
+            const QString gpuTitle =
+                (gpuSrc.mode == GpuSource::FreqRatio) ? "GPU (clock)" : "GPU";
+            gpuGraph = new GraphWidget(gpuTitle, QColor(0xba, 0x68, 0xc8), 100.0, 0.0, statsPanel);
+        }
+
+        statsLayout->addWidget(cpuGraph, 0, 0);
+        statsLayout->addWidget(ramGraph, 0, 1);
+        if (gpuGraph) {
+            statsLayout->addWidget(netGraph, 1, 0);
+            statsLayout->addWidget(gpuGraph, 1, 1);
+        } else {
+            statsLayout->addWidget(netGraph, 1, 0, 1, 2);
+        }
 
         panelLayout->addWidget(statsPanel);
 
-        // Timer to update clock every second
+        // Prime the counters so the first drawn sample is a real delta
+        updateStats();
+
+        // Timer to update clock and graphs every second
         QTimer *timer = new QTimer(this);
         connect(timer, &QTimer::timeout, this, &PowerMenuWindow::updateClock);
+        connect(timer, &QTimer::timeout, this, &PowerMenuWindow::updateStats);
         timer->start(1000);
         updateClock();
 
@@ -211,6 +555,18 @@ private:
     QLabel *timeLabel;
     QWidget *statsPanel;
 
+    GraphWidget *cpuGraph;
+    GraphWidget *ramGraph;
+    GraphWidget *netGraph;
+    GraphWidget *gpuGraph;
+
+    GpuSource gpuSrc;
+    quint64 lastCpuTotal;
+    quint64 lastCpuIdle;
+    quint64 lastRx;
+    quint64 lastTx;
+    QElapsedTimer netTimer;
+
     QWidget* createIconButton(const QString &labelText, const QString &iconPath) {
         QWidget *wrapper = new QWidget(this);
         QVBoxLayout *v = new QVBoxLayout(wrapper);
@@ -243,6 +599,74 @@ private:
 
     void updateClock() {
         timeLabel->setText(QTime::currentTime().toString("HH:mm"));
+    }
+
+    void updateStats() {
+        // ---- CPU ----
+        quint64 total = 0, idle = 0;
+        if (readCpuTotals(total, idle)) {
+            if (lastCpuTotal > 0 && total > lastCpuTotal) {
+                quint64 dTotal = total - lastCpuTotal;
+                quint64 dIdle  = (idle > lastCpuIdle) ? (idle - lastCpuIdle) : 0;
+                if (dIdle > dTotal) dIdle = dTotal;
+                double busy = 100.0 * double(dTotal - dIdle) / double(dTotal);
+                if (busy < 0.0)   busy = 0.0;
+                if (busy > 100.0) busy = 100.0;
+                if (cpuGraph)
+                    cpuGraph->addSample(busy, QString::number(busy, 'f', 0) + "%");
+            }
+            lastCpuTotal = total;
+            lastCpuIdle  = idle;
+        }
+
+        // ---- RAM ----
+        quint64 totalKb = 0, usedKb = 0;
+        if (readMem(totalKb, usedKb) && totalKb > 0 && ramGraph) {
+            double pct    = 100.0 * double(usedKb) / double(totalKb);
+            double usedGb = double(usedKb) / 1048576.0;
+            QString readout;
+            if (totalKb >= 1048576)
+                readout = QString("%1%  %2 GB").arg(pct, 0, 'f', 0).arg(usedGb, 0, 'f', 1);
+            else
+                readout = QString("%1%  %2 MB").arg(pct, 0, 'f', 0)
+                                               .arg(double(usedKb) / 1024.0, 0, 'f', 0);
+            ramGraph->addSample(pct, readout);
+        }
+
+        // ---- Network ----
+        quint64 rx = 0, tx = 0;
+        if (readNetBytes(rx, tx)) {
+            if (netTimer.isValid()) {
+                double secs = double(netTimer.restart()) / 1000.0;
+                if (secs > 0.05 && rx >= lastRx && tx >= lastTx && netGraph) {
+                    double bps = double((rx - lastRx) + (tx - lastTx)) / secs;
+                    netGraph->addSample(bps, formatRate(bps));
+                }
+            } else {
+                netTimer.start();
+            }
+            lastRx = rx;
+            lastTx = tx;
+        }
+
+        // ---- GPU ----
+        if (gpuGraph) {
+            double val = -1.0;
+            if (gpuSrc.mode == GpuSource::BusyPercent) {
+                QString s = readFirstLine(gpuSrc.busyPath);
+                if (!s.isEmpty())
+                    val = s.toDouble();
+            } else if (gpuSrc.mode == GpuSource::FreqRatio) {
+                double cur = readFirstLine(gpuSrc.curFreqPath).toDouble();
+                double max = readFirstLine(gpuSrc.maxFreqPath).toDouble();
+                if (max > 0.0)
+                    val = 100.0 * cur / max;
+            }
+            if (val >= 0.0) {
+                if (val > 100.0) val = 100.0;
+                gpuGraph->addSample(val, QString::number(val, 'f', 0) + "%");
+            }
+        }
     }
 
     void updateStyles() {

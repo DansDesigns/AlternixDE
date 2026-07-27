@@ -120,6 +120,7 @@ static void logBoot(const QString &line) {
     out << QDateTime::currentDateTime().toString(Qt::ISODate) << "  " << line << "\n";
 }
 
+//----------------------------------- Launchers ------------------------
 // onboard and ulauncher both grab focus / paint over the screen for a
 // moment on first launch, which visibly blocks the lock screen if they're
 // started straight from qtile's autostart (before the login sound has even
@@ -133,6 +134,8 @@ static void launchLoginApps() {
         logBoot("launchLoginApps: failed to start onboard");
     if (!QProcess::startDetached("ulauncher"))
         logBoot("launchLoginApps: failed to start ulauncher");
+    if (!QProcess::startDetached("python3", QStringList() << "/usr/bin/rounded_corners"))
+        logBoot("launchLoginApps: failed to start rounded_corners");
 }
 
 // find notify.* / alarm.* / boot.* in the given sounds subfolder, any
@@ -560,6 +563,7 @@ NotificationCard::NotificationCard(
     QPushButton *close = new QPushButton(" ❌", this);
     close->setFixedSize(48,48);
     close->setStyleSheet(
+        "QPushButton { color:#ff4a6a; }"
         "QPushButton:hover { color:#ff1616; background:#ad1236; border-radius:18px; }"
         "QPushButton:pressed { color:#ffffff; background:#550000; border-radius:18px; }"
     );
@@ -1369,4 +1373,4 @@ int main(int argc,char**argv) {
 
     return app.exec();
 }
-
+

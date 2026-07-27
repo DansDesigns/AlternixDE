@@ -474,7 +474,7 @@ private:
             QPushButton *del = new QPushButton(" ❌");
             del->setFixedSize(64, 64);
             del->setStyleSheet(
-                "QPushButton { border:none; font-size:26px;"
+                "QPushButton { color:#ff4a6a; border:none; font-size:26px;"
                 " background:transparent; }"
                 "QPushButton:hover { color:#ff1616; background:#ad1236;"
                 " border-radius:18px; }"
