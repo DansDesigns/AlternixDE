@@ -1,4 +1,4 @@
-boot_alternix:
+boot_default:
 https://pixabay.com/sound-effects/musical-startup-sound-variation-fast-315898/
 
 boot_xpish:
