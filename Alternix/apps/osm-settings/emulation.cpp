@@ -11,6 +11,9 @@
 #include <QFile>
 #include <QTextStream>
 #include <QMessageBox>
+#include <QElapsedTimer>
+#include <QCoreApplication>
+#include <QEventLoop>
 
 // -----------------------------------------------------
 // Alternix compact button style (same as Storage page)
@@ -42,13 +45,21 @@ static QPushButton* makeBtn(const QString &txt, const QString &color = "white")
 }
 
 // Simple helper to grab stdout (ignore errors/exit code)
-static QString runCmd(const QString &cmd)
+static QString runCmd(const QString &cmd, int timeoutMs = 5000)
 {
     QProcess p;
     p.start("/bin/sh", {"-c", cmd});
-    p.waitForFinished();
+    if (!p.waitForFinished(timeoutMs))
+        p.kill();
     return QString::fromLocal8Bit(p.readAllStandardOutput()).trimmed();
 }
+
+// The bracketed first letter stops pgrep matching the /bin/sh that is running
+// the pgrep itself — without it these checks always report "running".
+static const char *WAYDROID_CONTAINER_CHECK =
+    "pgrep -f '[w]aydroid container' >/dev/null 2>&1 && echo running || echo stopped";
+static const char *WAYDROID_SESSION_CHECK =
+    "pgrep -f '[w]aydroid session' >/dev/null 2>&1 && echo running || echo stopped";
 
 // -----------------------------------------------------
 // EmulationPage
@@ -65,7 +76,7 @@ private:
     QLabel *m_wineInfo = nullptr;
 
     // helpers
-    bool runCmdOk(const QString &cmd, QString &output);
+    bool runCmdOk(const QString &cmd, QString &output, int timeoutMs = 30000);
 
     QString buildWaydroidInfoHtml();
     QString buildWineInfoHtml();
@@ -76,7 +87,6 @@ private:
     void startWaydroid();
     void stopWaydroid();
 
-    void startWine();
     void stopWine();
 };
 
@@ -180,11 +190,9 @@ EmulationPage::EmulationPage(QStackedWidget *stack)
     QHBoxLayout *wineBtnRow = new QHBoxLayout();
     wineBtnRow->setSpacing(16);
 
-    QPushButton *wineStart = makeBtn("Start");
-    QPushButton *wineStop  = makeBtn("Stop", "#CC6666");
+    QPushButton *wineStop  = makeBtn("Force-close", "#CC6666");
     QPushButton *wineRefresh = makeBtn("Refresh");
 
-    wineBtnRow->addWidget(wineStart);
     wineBtnRow->addWidget(wineStop);
     wineBtnRow->addWidget(wineRefresh);
 
@@ -212,7 +220,6 @@ EmulationPage::EmulationPage(QStackedWidget *stack)
     connect(wayStop,    &QPushButton::clicked, this, [this]() { stopWaydroid();   refreshWaydroid(); });
     connect(wayRefresh, &QPushButton::clicked, this, [this]() { refreshWaydroid(); });
 
-    connect(wineStart,   &QPushButton::clicked, this, [this]() { startWine();  refreshWine(); });
     connect(wineStop,    &QPushButton::clicked, this, [this]() { stopWine();   refreshWine(); });
     connect(wineRefresh, &QPushButton::clicked, this, [this]() { refreshWine(); });
 
@@ -224,12 +231,31 @@ EmulationPage::EmulationPage(QStackedWidget *stack)
 // -----------------------------------------------------
 // Helpers
 // -----------------------------------------------------
-bool EmulationPage::runCmdOk(const QString &cmd, QString &output)
+bool EmulationPage::runCmdOk(const QString &cmd, QString &output, int timeoutMs)
 {
     QProcess p;
     p.start("/bin/sh", {"-c", cmd});
-    if (!p.waitForFinished())
+    if (!p.waitForStarted(5000)) {
+        output = "Could not start /bin/sh.";
         return false;
+    }
+
+    // Poll rather than block: waitForFinished() with no argument gives up after
+    // 30s, and ~QProcess then kills a child that was still working normally.
+    QElapsedTimer timer;
+    timer.start();
+    while (p.state() != QProcess::NotRunning) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        p.waitForFinished(50);
+        if (timeoutMs > 0 && timer.elapsed() > timeoutMs) {
+            p.kill();
+            p.waitForFinished(2000);
+            output = QString::fromLocal8Bit(p.readAllStandardOutput())
+                   + QString::fromLocal8Bit(p.readAllStandardError())
+                   + QString("\n\nTimed out after %1 seconds.").arg(timeoutMs / 1000);
+            return false;
+        }
+    }
 
     output = QString::fromLocal8Bit(p.readAllStandardOutput())
            + QString::fromLocal8Bit(p.readAllStandardError());
@@ -245,20 +271,44 @@ QString EmulationPage::buildWaydroidInfoHtml()
         return "Waydroid not installed or not in PATH.";
     }
 
-    QString version  = runCmd("waydroid -V 2>/dev/null");
-    QString running  = runCmd("pgrep -f 'waydroid' >/dev/null 2>&1 && echo running || echo stopped");
-    QString binderfs = runCmd("[ -e /dev/binderfs ] && echo present || echo missing");
+    QString version = runCmd("waydroid -V 2>/dev/null");
 
-    QString runColor = (running.trimmed() == "running") ? "#7CFC00" : "#FF5555";
+    // Container and session are separate processes and fail independently.
+    QString container = runCmd(WAYDROID_CONTAINER_CHECK);
+    QString session   = runCmd(WAYDROID_SESSION_CHECK);
+
+    // /dev/binderfs existing only means binderfs is mounted; Waydroid needs the
+    // control node, and some packages name the nodes anbox-* instead.
+    QString binder = runCmd(
+        "if [ -e /dev/binderfs/binder-control ]; then echo ok; "
+        "elif [ -e /dev/binderfs/anbox-binder ]; then echo 'nodes named anbox-*'; "
+        "elif [ -d /dev/binderfs ]; then echo 'mounted, no control node'; "
+        "else echo missing; fi");
+
+    QString wayland = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")
+                    ? QString("none (X11 session)")
+                    : qEnvironmentVariable("WAYLAND_DISPLAY");
+
+    QString contColor = (container.trimmed() == "running") ? "#7CFC00" : "#FF5555";
+    QString sessColor = (session.trimmed()   == "running") ? "#7CFC00" : "#FF5555";
+    QString bindColor = (binder.trimmed()    == "ok")      ? "#7CFC00" : "#FF5555";
+    QString wayColor  = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") ? "#FF5555" : "#7CFC00";
 
     QString html;
     html  = "Installed: <b>yes</b><br>";
     html += "Version: " + version.toHtmlEscaped() + "<br>";
-    html += QString("Status: <span style='color:%1;'>%2</span><br>")
-            .arg(runColor, running.toHtmlEscaped());
-    html += "Binderfs: " + binderfs.toHtmlEscaped() + "<br>";
-    html += "<span style='color:#FFAA00;'>Note: Waydroid systemd services are not "
-            "available on Devuan. Use: waydroid session start/stop</span>";
+    html += QString("Container: <span style='color:%1;'>%2</span><br>")
+            .arg(contColor, container.toHtmlEscaped());
+    html += QString("Session: <span style='color:%1;'>%2</span><br>")
+            .arg(sessColor, session.toHtmlEscaped());
+    html += QString("Binder: <span style='color:%1;'>%2</span><br>")
+            .arg(bindColor, binder.toHtmlEscaped());
+    html += QString("Wayland: <span style='color:%1;'>%2</span>")
+            .arg(wayColor, wayland.toHtmlEscaped());
+
+    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
+        html += "<br><span style='color:#FFAA00;'>Waydroid renders through Wayland "
+                "and cannot start on an X11 session.</span>";
 
     return html;
 }
@@ -309,25 +359,70 @@ void EmulationPage::refreshWine()
 // -----------------------------------------------------
 // Start/Stop actions
 // -----------------------------------------------------
-// Devuan: no systemd container service — use waydroid CLI directly
+// Devuan has no systemd unit for the container half. Waydroid is two long-lived
+// foreground processes: "waydroid container start" (root, owns the LXC
+// container — this is what the systemd unit used to run) and
+// "waydroid session start" (user). Neither returns, so both are launched
+// detached rather than waited on.
 void EmulationPage::startWaydroid()
 {
-    QString out;
-    bool ok = runCmdOk("waydroid session start", out);
-    if (!ok) {
+    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
         QMessageBox::warning(
             this,
-            "Waydroid start failed",
-            "Could not start Waydroid session.\n\n" + out
+            "Waydroid cannot start",
+            "No Wayland compositor is running (WAYLAND_DISPLAY is unset).\n\n"
+            "Waydroid renders through Wayland and cannot run on this X11 session."
         );
+        return;
     }
+
+    if (!QFile::exists("/dev/binderfs/binder-control")) {
+        QMessageBox::warning(
+            this,
+            "Waydroid cannot start",
+            "/dev/binderfs/binder-control is missing.\n\n"
+            "The binder kernel module is not loaded, or binderfs is not mounted."
+        );
+        return;
+    }
+
+    if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
+        // NOPASSWD fast path first, osm-sudo askpass fallback — same pattern as wifi.cpp.
+        QProcess::startDetached("/bin/sh", QStringList()
+            << "-c"
+            << "sudo -n waydroid container start >/dev/null 2>&1 || "
+               "{ SUDO_ASKPASS=$(command -v osm-sudo) sudo -A waydroid container start >/dev/null 2>&1; }");
+
+        // Wait for it without freezing the page.
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 20000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
+            if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() == "running")
+                break;
+        }
+
+        if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
+            QMessageBox::warning(
+                this,
+                "Waydroid start failed",
+                "The Waydroid container did not start.\n\n"
+                "Check that 'waydroid init' has been run and that the binder "
+                "module is loaded."
+            );
+            return;
+        }
+    }
+
+    QProcess::startDetached("/bin/sh", QStringList()
+        << "-c" << "waydroid session start >/dev/null 2>&1");
 }
 
 // Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::stopWaydroid()
 {
     QString out;
-    bool ok = runCmdOk("waydroid session stop", out);
+    bool ok = runCmdOk("waydroid session stop", out, 30000);
     if (!ok) {
         QMessageBox::warning(
             this,
@@ -337,29 +432,21 @@ void EmulationPage::stopWaydroid()
     }
 }
 
-// Wine option 3: wineserver -p / wineserver -k
-void EmulationPage::startWine()
-{
-    QString out;
-    bool ok = runCmdOk("wineserver -p", out);
-    if (!ok) {
-        QMessageBox::warning(
-            this,
-            "Wine start failed",
-            "Could not start wineserver.\n\n" + out
-        );
-    }
-}
-
+// Wine has no lifecycle to start — wineserver spawns on demand when a Windows
+// program runs and exits on its own. Only the force-close escape hatch remains.
 void EmulationPage::stopWine()
 {
+    if (runCmd("pidof wineserver >/dev/null 2>&1 && echo running || echo stopped")
+            .trimmed() != "running")
+        return;   // nothing running is not an error
+
     QString out;
-    bool ok = runCmdOk("wineserver -k", out);
+    bool ok = runCmdOk("wineserver -k", out, 15000);
     if (!ok) {
         QMessageBox::warning(
             this,
-            "Wine stop failed",
-            "Could not stop wineserver.\n\n" + out
+            "Force-close failed",
+            "Could not close the running Windows programs.\n\n" + out
         );
     }
 }
