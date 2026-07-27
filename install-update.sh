@@ -96,6 +96,9 @@ echo "• Updating display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv display.so /usr/local/bin/
 
+echo "• Building emulation.so..."
+g++ emulation.cpp -o emulation.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv emulation.so /usr/local/bin/
 
 echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
