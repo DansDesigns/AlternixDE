@@ -636,6 +636,8 @@ echo "• Installing App Icons..."
 
 cd "$ALT_ROOT/Alternix"
 
+sudo install -Dm644 icons/*.png /usr/share/icons/hicolor/64x64/apps/
+
 sudo cp icons/update.png /usr/share/icons/hicolor/64x64/apps/update.png
 sudo cp icons/upgrade.png /usr/share/icons/hicolor/64x64/apps/upgrade.png
 sudo cp icons/bauh.png /usr/share/icons/hicolor/64x64/apps/bauh.png

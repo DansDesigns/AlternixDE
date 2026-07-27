@@ -138,6 +138,9 @@ echo "• Updating osm-clock..."
 g++ -fPIC osm-clock.cpp -o osm-clock $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
+echo "• Updating Icons..."
+sudo install -Dm644 icons/*.png /usr/share/icons/hicolor/64x64/apps/
+
 echo "• Updating osm-notify..."
 g++ -fPIC osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
