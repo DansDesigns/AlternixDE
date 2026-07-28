@@ -684,11 +684,11 @@ echo "• Creating Ranger shortcut..."
 cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
 [Desktop Entry]
 Type=Application
-Name=Files
-Comment=Terminal File Manager for Alternix / OSM-Phone
-Exec=ranger %F
+Name=Ranger
+Comment=Terminal File Manager
+Exec=alacritty -e ranger
 Icon=ranger
-Terminal=true
+Terminal=false
 Categories=System;FileTools;FileManager;
 StartupNotify=false
 EOF

@@ -36,6 +36,9 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
 
 // ---------------------------------------------------------
 // Helpers (button + command runner)
@@ -373,6 +376,148 @@ static QString runAsRootShell(const QString &script,
 }
 
 // ---------------------------------------------------------
+// Built-in SNTP client (RFC 4330)
+//
+// Deliberately self-contained. ntpdate is not installed on a default Devuan
+// system and this has to work on a fresh machine with no extra packages and
+// no daemon running. Plain UDP also succeeds when the clock is so far out
+// that TLS certificate checks fail, which is exactly the state a tablet with
+// a flat or missing RTC boots into.
+// ---------------------------------------------------------
+
+static const qint64 NTP_UNIX_DELTA = 2208988800LL;   // 1900 -> 1970, in seconds
+
+static bool sntpQuery(const QString &host, quint16 port, int timeoutMs,
+                      qint64 *unixMsOut, QString *errOut)
+{
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+    struct addrinfo *res = nullptr;
+    QByteArray portStr = QByteArray::number(port);
+    int rc = ::getaddrinfo(host.toLatin1().constData(), portStr.constData(),
+                           &hints, &res);
+    if (rc != 0 || !res) {
+        if (errOut)
+            *errOut = QString("%1: %2").arg(host,
+                          QString::fromLocal8Bit(gai_strerror(rc)));
+        return false;
+    }
+
+    bool ok = false;
+    QString lastErr;
+
+    for (struct addrinfo *ai = res; ai && !ok; ai = ai->ai_next) {
+        int fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK,
+                          ai->ai_protocol);
+        if (fd < 0)
+            continue;
+
+        unsigned char pkt[48];
+        memset(pkt, 0, sizeof(pkt));
+        pkt[0] = 0x1B;          // LI 0, version 3, mode 3 (client)
+
+        QElapsedTimer rtt;
+        rtt.start();
+
+        if (::sendto(fd, pkt, sizeof(pkt), 0, ai->ai_addr, ai->ai_addrlen)
+                != static_cast<ssize_t>(sizeof(pkt))) {
+            lastErr = QString("%1: could not send (%2)")
+                          .arg(host, QString::fromLocal8Bit(strerror(errno)));
+            ::close(fd);
+            continue;
+        }
+
+        while (rtt.elapsed() < timeoutMs) {
+            fd_set rf;
+            FD_ZERO(&rf);
+            FD_SET(fd, &rf);
+
+            struct timeval tv;
+            tv.tv_sec  = 0;
+            tv.tv_usec = 50000;
+
+            int r = ::select(fd + 1, &rf, nullptr, nullptr, &tv);
+            if (r > 0) {
+                unsigned char resp[48];
+                ssize_t n = ::recv(fd, resp, sizeof(resp), 0);
+                if (n == 48) {
+                    qint64 elapsed = rtt.elapsed();
+
+                    int stratum = resp[1];
+                    if (stratum == 0 || stratum > 15) {
+                        lastErr = QString("%1: server is not synchronised").arg(host);
+                        break;
+                    }
+
+                    // Transmit timestamp: seconds at byte 40, fraction at 44.
+                    quint32 secs = (static_cast<quint32>(resp[40]) << 24)
+                                 | (static_cast<quint32>(resp[41]) << 16)
+                                 | (static_cast<quint32>(resp[42]) << 8)
+                                 |  static_cast<quint32>(resp[43]);
+                    quint32 frac = (static_cast<quint32>(resp[44]) << 24)
+                                 | (static_cast<quint32>(resp[45]) << 16)
+                                 | (static_cast<quint32>(resp[46]) << 8)
+                                 |  static_cast<quint32>(resp[47]);
+                    if (secs == 0) {
+                        lastErr = QString("%1: empty timestamp").arg(host);
+                        break;
+                    }
+
+                    qint64 ms = (static_cast<qint64>(secs) - NTP_UNIX_DELTA) * 1000LL
+                              + static_cast<qint64>(static_cast<double>(frac)
+                                                    * 1000.0 / 4294967296.0);
+
+                    // Half the round trip is the usual estimate of one-way delay.
+                    ms += elapsed / 2;
+
+                    if (unixMsOut) *unixMsOut = ms;
+                    ok = true;
+                }
+                break;
+            }
+
+            if (g_locTick) g_locTick();
+            QCoreApplication::processEvents();
+        }
+
+        ::close(fd);
+        if (!ok && lastErr.isEmpty())
+            lastErr = QString("%1: no reply on UDP port %2").arg(host).arg(port);
+    }
+
+    ::freeaddrinfo(res);
+    if (!ok && errOut)
+        *errOut = lastErr;
+    return ok;
+}
+
+// Try the public pools in turn. Returns the first server that answers.
+static bool sntpBestTime(qint64 *unixMsOut, QString *serverOut, QString *logOut)
+{
+    const QStringList servers = {
+        "pool.ntp.org",
+        "0.debian.pool.ntp.org",
+        "time.cloudflare.com",
+        "time.google.com"
+    };
+
+    for (const QString &s : servers) {
+        QString err;
+        if (sntpQuery(s, 123, 2500, unixMsOut, &err)) {
+            if (serverOut) *serverOut = s;
+            return true;
+        }
+        if (logOut)
+            *logOut += "\n" + (err.isEmpty() ? s + ": no reply" : err);
+    }
+    return false;
+}
+
+// ---------------------------------------------------------
 // Battery-backed clock (RTC)
 //
 // `hwclock --systohc` alone is not enough on these tablets: the plain call
@@ -383,11 +528,35 @@ static QString runAsRootShell(const QString &script,
 
 static const char *RTC_WRITE_SH = R"SH(
 RTCLOG=""
+
+# Read the clock chip back through sysfs and see whether it now agrees with
+# the system clock. This does not depend on hwclock's exit status, which can
+# be non-zero for a warning even when the write actually landed.
+RTC_SEEN=0
+rtc_readback_ok() {
+  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
+    [ -r "$r/date" ] && [ -r "$r/time" ] || continue
+    RTC_SEEN=1
+    RD=$(cat "$r/date" 2>/dev/null)
+    RT=$(cat "$r/time" 2>/dev/null)
+    [ -n "$RD" ] && [ -n "$RT" ] || continue
+    RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
+    NOW=$(date -u +%s)
+    D=$((RE - NOW))
+    [ "$D" -lt 0 ] && D=$((0 - D))
+    if [ "$D" -le 5 ]; then return 0; fi
+    RTCLOG="$RTCLOG
+$r reads $RD $RT UTC, which is ${D}s away from the system clock"
+  done
+  return 1
+}
+
 rtc_write() {
   HW=""
   for c in /sbin/hwclock /usr/sbin/hwclock /bin/hwclock /usr/bin/hwclock; do
     if [ -x "$c" ]; then HW="$c"; break; fi
   done
+
   if [ -z "$HW" ]; then
     RTCLOG="hwclock is not installed (it comes from the util-linux package)"
     return 1
@@ -407,12 +576,21 @@ $HW --systohc -f $d: $O"
   RTCLOG="$RTCLOG
 $HW --systohc --directisa: $O"
 
-  if [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ]; then
+  # hwclock may have complained while still setting the chip correctly.
+  if rtc_readback_ok; then
+    RTCLOG="$RTCLOG
+
+hwclock reported an error, but the clock chip reads back correctly, so the
+time has in fact been stored."
+    return 0
+  fi
+
+  if [ "$RTC_SEEN" = 0 ] && [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ] && [ ! -e /dev/rtc1 ]; then
     RTCLOG="$RTCLOG
 
 There is no /dev/rtc0 on this machine, so the kernel has not registered a
-battery-backed clock at all. The time will have to be set again, or synced
-again, after every power off."
+battery-backed clock at all. The time will have to be synced again after
+every power off."
   fi
   return 1
 }
@@ -1738,57 +1916,69 @@ private:
 
     void syncTimeFromInternet()
     {
-        // NTP first where it exists, then the HTTP Date header, which is the
-        // fallback already relied on during installation for machines whose
-        // RTC is too far out for TLS to work at all.
-        QString script = QString::fromLatin1(RTC_WRITE_SH) + R"SH(
+        qint64 unixMs = 0;
+        QString server;
+        QString sntpLog;
+        bool haveSntp = false;
+        bool reached = false;
+        QString out;
+
+        runWithSpinner(syncTimeButton, "Sync now", [&]() {
+            // Step 1: ask an NTP server directly. No package needed, and it
+            // works even when the clock is far enough out to break TLS.
+            haveSntp = sntpBestTime(&unixMs, &server, &sntpLog);
+
+            QString script;
+            if (haveSntp) {
+                QString epoch = QString("%1.%2")
+                                    .arg(unixMs / 1000)
+                                    .arg(unixMs % 1000, 3, 10, QChar('0'));
+                script = QString::fromLatin1(RTC_WRITE_SH) + QString(
+                    "\n"
+                    "if ! O=$(date -u -s \"@%1\" 2>&1); then\n"
+                    "  echo OSMSYNC_FAIL\n"
+                    "  echo \"date -u -s: $O\"\n"
+                    "  exit 1\n"
+                    "fi\n"
+                    "RTC=ok\n"
+                    "rtc_write || RTC=failed\n"
+                    "echo \"OSMSYNC_OK:$RTC:%2\"\n"
+                    "echo \"$RTCLOG\"\n"
+                    "exit 0\n"
+                ).arg(epoch, server);
+            } else {
+                // Step 2: fall back to the Date header of a web server. Less
+                // precise (whole seconds) but survives networks that block
+                // outgoing UDP port 123.
+                script = QString::fromLatin1(RTC_WRITE_SH) + R"SH(
 LOG=""
 SRC=""
 
-HAVE_NTPDATE=0; command -v ntpdate >/dev/null 2>&1 && HAVE_NTPDATE=1
-HAVE_SNTP=0;    command -v sntp    >/dev/null 2>&1 && HAVE_SNTP=1
-HAVE_CURL=0;    command -v curl    >/dev/null 2>&1 && HAVE_CURL=1
-HAVE_WGET=0;    command -v wget    >/dev/null 2>&1 && HAVE_WGET=1
+HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
+HAVE_WGET=0; command -v wget >/dev/null 2>&1 && HAVE_WGET=1
 
-[ "$HAVE_NTPDATE" = 0 ] && LOG="$LOG
-ntpdate: not installed"
-[ "$HAVE_SNTP" = 0 ] && LOG="$LOG
-sntp: not installed"
+if [ "$HAVE_CURL" = 0 ] && [ "$HAVE_WGET" = 0 ]; then
+  LOG="$LOG
+neither curl nor wget is installed, so there is no way to fetch the time"
+fi
 
-for srv in pool.ntp.org time.cloudflare.com; do
-  if [ "$HAVE_NTPDATE" = 1 ]; then
-    O=$(ntpdate -u -b "$srv" 2>&1)
-    if [ $? -eq 0 ]; then SRC="ntpdate $srv"; break; fi
-    LOG="$LOG
-ntpdate $srv: $O"
+for url in http://deb.devuan.org/ https://deb.devuan.org/ http://www.google.com/; do
+  D=""
+  if [ "$HAVE_CURL" = 1 ]; then
+    D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
   fi
-  if [ "$HAVE_SNTP" = 1 ]; then
-    O=$(sntp -S "$srv" 2>&1)
-    if [ $? -eq 0 ]; then SRC="sntp $srv"; break; fi
+  if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
+    D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
+  fi
+  if [ -n "$D" ]; then
+    if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
     LOG="$LOG
-sntp $srv: $O"
+could not apply the date from $url: $D"
+  else
+    LOG="$LOG
+no date sent by $url"
   fi
 done
-
-if [ -z "$SRC" ]; then
-  for url in https://deb.devuan.org/ http://deb.devuan.org/ http://www.google.com/; do
-    D=""
-    if [ "$HAVE_CURL" = 1 ]; then
-      D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-    fi
-    if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
-      D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-    fi
-    if [ -n "$D" ]; then
-      if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
-      LOG="$LOG
-could not apply date from $url: $D"
-    else
-      LOG="$LOG
-no date sent by $url"
-    fi
-  done
-fi
 
 if [ -z "$SRC" ]; then
   echo "OSMSYNC_FAIL"
@@ -1803,19 +1993,22 @@ echo "$LOG"
 echo "$RTCLOG"
 exit 0
 )SH";
+            }
 
-        bool reached = false;
-        QString out;
-        runWithSpinner(syncTimeButton, "Sync now", [&]() {
             out = runAsRootShell(script, "OSMSYNC_", 90000, &reached);
         });
+
+        // Every diagnostic goes in front of the user, not to /dev/null.
+        QString detail = out;
+        if (!sntpLog.trimmed().isEmpty())
+            detail += "\n\nTime servers tried:" + sntpLog;
 
         if (!reached) {
             setTimeStatus("The clock could not be synced: permission was refused.",
                           "#FF6B6B");
             showDetail("Sync date & time",
                        "The system would not allow the clock to be changed.",
-                       out);
+                       detail);
             return;
         }
 
@@ -1825,7 +2018,7 @@ exit 0
                           "#FF6B6B");
             showDetail("Sync date & time",
                        "No time source could be reached.",
-                       out);
+                       detail);
             return;
         }
 
@@ -1851,7 +2044,7 @@ exit 0
                        "is now correct. It could not be written to the clock chip "
                        "that keeps time while the machine is switched off, so it "
                        "may be wrong again after a reboot. The reason is below.",
-                       out, QMessageBox::Warning);
+                       detail, QMessageBox::Warning);
         } else if (!source.isEmpty()) {
             setTimeStatus(QString("Clock synced at %1 from %2.").arg(when, source),
                           "#7CFC00");
