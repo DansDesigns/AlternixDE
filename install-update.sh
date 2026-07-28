@@ -112,6 +112,10 @@ echo "• Updating bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv bluetooth.so /usr/local/bin/
 
+echo "• Building mobile.so..."
+g++ -fPIC -shared mobile.cpp -o mobile.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv mobile.so /usr/local/bin/
+
 echo "• Updating kernel.so..."
 g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo mv kernel.so /usr/local/bin/
