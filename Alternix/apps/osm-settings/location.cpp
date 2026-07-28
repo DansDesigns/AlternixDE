@@ -530,71 +530,160 @@ static bool sntpBestTime(qint64 *unixMsOut, QString *serverOut, QString *logOut)
 
 static const char *RTC_WRITE_SH = R"SH(
 RTCLOG=""
-
-# Read the clock chip back through sysfs and see whether it now agrees with
-# the system clock. This does not depend on hwclock's exit status, which can
-# be non-zero for a warning even when the write actually landed.
+FAKELOG=""
 RTC_SEEN=0
+HW=""
+
+# Read the chip back and see whether it now agrees with the system clock.
+# This does not trust hwclock's exit status, which can be non-zero for a
+# warning even when the write actually landed.
 rtc_readback_ok() {
+  # The chip may be kept in UTC or in local time; /etc/adjtime says which.
+  MODE=UTC
+  if [ -f /etc/adjtime ]; then
+    T=$(sed -n '3p' /etc/adjtime 2>/dev/null)
+    [ "$T" = "LOCAL" ] && MODE=LOCAL
+  fi
+
   for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
     [ -r "$r/date" ] && [ -r "$r/time" ] || continue
     RTC_SEEN=1
     RD=$(cat "$r/date" 2>/dev/null)
     RT=$(cat "$r/time" 2>/dev/null)
     [ -n "$RD" ] && [ -n "$RT" ] || continue
-    RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
-    NOW=$(date -u +%s)
+    if [ "$MODE" = LOCAL ]; then
+      RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
+    else
+      RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
+    fi
+    NOW=$(date +%s)
     D=$((RE - NOW))
     [ "$D" -lt 0 ] && D=$((0 - D))
-    if [ "$D" -le 5 ]; then return 0; fi
+    [ "$D" -le 5 ] && return 0
     RTCLOG="$RTCLOG
-$r reads $RD $RT UTC, which is ${D}s away from the system clock"
+$r holds $RD $RT ($MODE), which is ${D}s from the system clock"
   done
   return 1
 }
 
+# One hwclock attempt. Counts as success if hwclock says so OR if the chip
+# reads back correct afterwards regardless of what hwclock claimed.
+rtc_try() {
+  O=$("$HW" "$@" 2>&1)
+  if [ $? -eq 0 ]; then return 0; fi
+  RTCLOG="$RTCLOG
+$HW $*: $O"
+  if rtc_readback_ok; then
+    RTCLOG="$RTCLOG
+  ...but the chip reads back correct after this attempt, so it did work"
+    return 0
+  fi
+  return 1
+}
+
+rtc_diag() {
+  RTCLOG="$RTCLOG
+--- what this machine has ---"
+  L=$(ls -l /dev/rtc* 2>&1 | tr '\n' '; ')
+  RTCLOG="$RTCLOG
+device nodes: $L"
+  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
+    [ -d "$r" ] || continue
+    N=$(cat "$r/name" 2>/dev/null)
+    RTCLOG="$RTCLOG
+$r name: $N"
+  done
+  if [ -f /etc/adjtime ]; then
+    A=$(tr '\n' ' ' < /etc/adjtime)
+    RTCLOG="$RTCLOG
+/etc/adjtime: $A"
+  else
+    RTCLOG="$RTCLOG
+/etc/adjtime: missing (hwclock has never successfully run here)"
+  fi
+  M=$(lsmod 2>/dev/null | grep -i '^rtc' | awk '{print $1}' | tr '\n' ' ')
+  [ -z "$M" ] && M="none"
+  RTCLOG="$RTCLOG
+rtc kernel modules loaded: $M
+--- attempts ---"
+}
+
 rtc_write() {
-  HW=""
   for c in /sbin/hwclock /usr/sbin/hwclock /bin/hwclock /usr/bin/hwclock; do
     if [ -x "$c" ]; then HW="$c"; break; fi
   done
-
   if [ -z "$HW" ]; then
     RTCLOG="hwclock is not installed (it comes from the util-linux package)"
     return 1
   fi
 
-  if O=$("$HW" --systohc 2>&1); then return 0; fi
-  RTCLOG="$HW --systohc: $O"
+  rtc_diag
 
-  for d in /dev/rtc /dev/rtc0 /dev/rtc1; do
+  rtc_try --systohc && return 0
+  rtc_try --systohc --utc && return 0
+  # --noadjfile skips /etc/adjtime entirely, which is what fails when that
+  # file is missing or was written by a different tool.
+  rtc_try --systohc --noadjfile --utc && return 0
+
+  for d in /dev/rtc0 /dev/rtc /dev/rtc1; do
     [ -e "$d" ] || continue
-    if O=$("$HW" --systohc -f "$d" 2>&1); then return 0; fi
-    RTCLOG="$RTCLOG
-$HW --systohc -f $d: $O"
+    rtc_try --systohc -f "$d" && return 0
+    rtc_try --systohc --noadjfile --utc -f "$d" && return 0
   done
 
-  if O=$("$HW" --systohc --directisa 2>&1); then return 0; fi
-  RTCLOG="$RTCLOG
-$HW --systohc --directisa: $O"
+  rtc_try --systohc --directisa && return 0
 
-  # hwclock may have complained while still setting the chip correctly.
-  if rtc_readback_ok; then
+  # busybox is a completely separate implementation and sometimes succeeds
+  # where util-linux does not.
+  if command -v busybox >/dev/null 2>&1; then
+    O=$(busybox hwclock -w -u 2>&1)
+    if [ $? -eq 0 ]; then return 0; fi
     RTCLOG="$RTCLOG
-
-hwclock reported an error, but the clock chip reads back correctly, so the
-time has in fact been stored."
-    return 0
+busybox hwclock -w -u: $O"
+    rtc_readback_ok && return 0
   fi
+
+  V=$("$HW" --systohc --verbose 2>&1 | head -n 30)
+  RTCLOG="$RTCLOG
+
+--- hwclock --systohc --verbose (says which access method it tried) ---
+$V"
 
   if [ "$RTC_SEEN" = 0 ] && [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ] && [ ! -e /dev/rtc1 ]; then
     RTCLOG="$RTCLOG
 
-There is no /dev/rtc0 on this machine, so the kernel has not registered a
-battery-backed clock at all. The time will have to be synced again after
-every power off."
+There is no clock chip registered by the kernel on this machine at all."
   fi
   return 1
+}
+
+# When the chip cannot be written, keep the time across a reboot anyway by
+# storing it on disk. This is what fake-hwclock is for and it is the normal
+# answer for hardware with no usable RTC.
+fake_clock_save() {
+  if command -v fake-hwclock >/dev/null 2>&1; then
+    O=$(fake-hwclock save 2>&1)
+    if [ $? -eq 0 ]; then
+      FAKELOG="The time was written to disk with fake-hwclock instead, so it
+will be restored at the next boot."
+      return 0
+    fi
+    FAKELOG="fake-hwclock save failed: $O"
+    return 1
+  fi
+  FAKELOG="fake-hwclock is not installed. Installing that package would let
+the time survive a reboot even without a working clock chip."
+  return 1
+}
+
+# Write the clock chip, falling back to on-disk storage. Sets RTC to one of
+# ok / fake / failed.
+rtc_store() {
+  RTC=ok
+  if ! rtc_write; then
+    RTC=failed
+    fake_clock_save && RTC=fake
+  fi
 }
 )SH";
 
@@ -1454,30 +1543,6 @@ public:
         midLayout->addWidget(satFrame);
 
         // -------------------------------------------------
-        // Card 3: Mini map of local area (text placeholder)
-        // -------------------------------------------------
-        QFrame *mapFrame = new QFrame(this);
-        mapFrame->setStyleSheet(
-            "QFrame {"
-            " background:#3a3a3a;"
-            " border-radius:40px;"
-            "}"
-        );
-        mapFrame->setFixedHeight(260);
-
-        QVBoxLayout *mapLayout = new QVBoxLayout(mapFrame);
-        mapLayout->setContentsMargins(30, 30, 30, 30);
-        mapLayout->setSpacing(12);
-
-        mapLabel = new QLabel("Mini map\nof local area", mapFrame);
-        mapLabel->setAlignment(Qt::AlignCenter);
-        mapLabel->setWordWrap(true);
-        mapLabel->setStyleSheet("QLabel { font-size:28px; }");
-        mapLayout->addWidget(mapLabel);
-
-        midLayout->addWidget(mapFrame);
-
-        // -------------------------------------------------
         // Card 4: Date & time
         // -------------------------------------------------
         QFrame *timeFrame = new QFrame(this);
@@ -1784,7 +1849,6 @@ public:
         } else {
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
-            mapLabel->setText("Mini map of local area\n\nLocation is turned off");
             setSourceReadoutMessage("Location is turned off");
         }
     }
@@ -1794,7 +1858,6 @@ private:
 
     QLabel *gpsLabel = nullptr;
     QLabel *satLabel = nullptr;
-    QLabel *mapLabel = nullptr;
 
     QPushButton *powerButton = nullptr;
     QPushButton *refreshButton = nullptr;
@@ -2140,10 +2203,10 @@ private:
             "  echo \"date -u -s: $O\"\n"
             "  exit 1\n"
             "fi\n"
-            "RTC=ok\n"
-            "rtc_write || RTC=failed\n"
+            "rtc_store\n"
             "echo \"OSMSET_OK:$RTC\"\n"
             "echo \"$RTCLOG\"\n"
+            "echo \"$FAKELOG\"\n"
             "exit 0\n"
         ).arg(stamp);
 
@@ -2173,7 +2236,14 @@ private:
 
         updateClock();
 
-        if (out.contains("OSMSET_OK:failed")) {
+        if (out.contains("OSMSET_OK:fake")) {
+            // Chip unusable, but the time is stored on disk and comes back
+            // at boot, so the user's actual problem is solved.
+            setTimeStatus("Clock changed. This machine has no usable clock chip, "
+                          "so the time was saved to disk and will be restored "
+                          "at the next start up.",
+                          "#FFC24B");
+        } else if (out.contains("OSMSET_OK:failed")) {
             setTimeStatus("Clock changed, but the battery-backed clock could not be "
                           "updated. The time may be wrong again after a shutdown.",
                           "#FFC24B");
@@ -2215,10 +2285,10 @@ private:
                     "  echo \"date -u -s: $O\"\n"
                     "  exit 1\n"
                     "fi\n"
-                    "RTC=ok\n"
-                    "rtc_write || RTC=failed\n"
+                    "rtc_store\n"
                     "echo \"OSMSYNC_OK:$RTC:%2\"\n"
                     "echo \"$RTCLOG\"\n"
+                    "echo \"$FAKELOG\"\n"
                     "exit 0\n"
                 ).arg(epoch, server);
             } else {
@@ -2261,11 +2331,11 @@ if [ -z "$SRC" ]; then
   exit 1
 fi
 
-RTC=ok
-rtc_write || RTC=failed
+rtc_store
 echo "OSMSYNC_OK:$RTC:$SRC"
 echo "$LOG"
 echo "$RTCLOG"
+echo "$FAKELOG"
 exit 0
 )SH";
             }
@@ -2303,13 +2373,21 @@ exit 0
         QRegularExpression okRe("OSMSYNC_OK:([^:]*):(.*)");
         QRegularExpressionMatch okM = okRe.match(out);
         bool rtcFailed = false;
+        bool rtcFake = false;
         if (okM.hasMatch()) {
-            rtcFailed = (okM.captured(1).trimmed() == "failed");
+            QString state = okM.captured(1).trimmed();
+            rtcFailed = (state == "failed");
+            rtcFake   = (state == "fake");
             source = okM.captured(2).trimmed();
         }
 
         QString when = QDateTime::currentDateTime().toString("HH:mm:ss");
-        if (rtcFailed) {
+        if (rtcFake) {
+            setTimeStatus(QString("Clock synced at %1. This machine has no usable "
+                                  "clock chip, so the time was saved to disk and "
+                                  "will be restored at the next start up.").arg(when),
+                          "#FFC24B");
+        } else if (rtcFailed) {
             setTimeStatus(QString("Clock synced at %1, but the battery-backed clock "
                                   "could not be updated. The time may be wrong again "
                                   "after a shutdown.").arg(when),
@@ -2469,7 +2547,6 @@ exit 0
             refreshTimer->stop();
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
-            mapLabel->setText("Mini map of local area\n\nLocation is turned off");
             setSourceReadoutMessage("Location is turned off");
             return;
         }
@@ -2526,7 +2603,6 @@ exit 0
         if (!info.error.isEmpty()) {
             gpsLabel->setText(info.error);
             satLabel->setText(info.error);
-            mapLabel->setText("Mini map of local area\n\n" + info.error);
             setSourceReadoutMessage("not known");
             busy = false;
             return;
@@ -2563,19 +2639,6 @@ exit 0
         }
 
         satLabel->setText(satText);
-
-        // Mini map placeholder text
-        QString mapText = "Mini map of local area";
-        if (info.hasFix) {
-            mapText += QString("\n\nLat: %1\nLon: %2")
-                           .arg(info.lat, 0, 'f', 6)
-                           .arg(info.lon, 0, 'f', 6);
-        } else {
-            mapText += "\n\nNo position fix";
-        }
-        mapText += "\n(Use external map app for full view)";
-
-        mapLabel->setText(mapText);
 
         updateSourceReadout(info);
         busy = false;
