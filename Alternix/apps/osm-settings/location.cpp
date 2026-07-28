@@ -18,7 +18,24 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QCoreApplication>
+#include <QDialog>
+#include <QDateTime>
+#include <QDateTimeEdit>
+#include <QTimeZone>
+#include <QProcessEnvironment>
+#include <QFile>
+#include <QPair>
 #include <functional>
+
+// Direct serial access for GNSS receivers that speak plain NMEA.
+// Deliberately POSIX rather than QtSerialPort: no extra Qt module and no
+// extra -dev package needed at build time.
+#include <fcntl.h>
+#include <unistd.h>
+#include <termios.h>
+#include <errno.h>
+#include <string.h>
+#include <sys/select.h>
 
 // ---------------------------------------------------------
 // Helpers (button + command runner)
@@ -260,6 +277,477 @@ static LocationInfo getLocationFromAT()
     return info;
 }
 
+// ---------------------------------------------------------
+// Runtime options (mirrored from osm-settings.conf so the 2s refresh
+// loop does not re-read the INI file on every tick)
+// ---------------------------------------------------------
+
+static bool g_netLocEnabled    = false;   // Location/network_enabled
+static bool g_serialGpsEnabled = true;    // Location/serial_gps_enabled
+
+// ---------------------------------------------------------
+// Root command runner
+//
+// Fast path is `sudo -n`, which succeeds because install-alternix_devuan.sh
+// grants NOPASSWD. If that path produces no marker line the request never
+// reached the script (sudo refused), so we retry through SUDO_ASKPASS
+// (osm-sudo). Waits are polled rather than a single fixed waitForFinished
+// so the caller's spinner keeps animating and long syncs are not truncated.
+// ---------------------------------------------------------
+
+static QString askpassHelperPath()
+{
+    QString fromEnv = qEnvironmentVariable("SUDO_ASKPASS");
+    if (!fromEnv.isEmpty() && QFile::exists(fromEnv))
+        return fromEnv;
+
+    const QStringList candidates = {
+        "/usr/bin/osm-sudo",
+        "/usr/local/bin/osm-sudo",
+        "/usr/lib/alternix/osm-sudo"
+    };
+    for (const QString &c : candidates) {
+        if (QFile::exists(c))
+            return c;
+    }
+    return QString();
+}
+
+// Returns combined stdout+stderr. `reachedScript` reports whether the
+// script itself ran (marker seen), as opposed to sudo blocking us.
+static QString runAsRootShell(const QString &script,
+                              const QString &marker,
+                              int timeoutMs,
+                              bool *reachedScript)
+{
+    if (reachedScript) *reachedScript = false;
+
+    auto attempt = [&](bool useAskpass) -> QString {
+        QProcess proc;
+
+        if (useAskpass) {
+            QString helper = askpassHelperPath();
+            if (helper.isEmpty())
+                return QStringLiteral("osm-sudo askpass helper not found");
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert("SUDO_ASKPASS", helper);
+            proc.setProcessEnvironment(env);
+            proc.start("sudo", {"-A", "/bin/sh", "-c", script});
+        } else {
+            proc.start("sudo", {"-n", "/bin/sh", "-c", script});
+        }
+
+        QElapsedTimer t;
+        t.start();
+        while (!proc.waitForFinished(80)) {
+            if (proc.error() == QProcess::FailedToStart)
+                return QStringLiteral("sudo could not be started");
+            if (t.elapsed() > timeoutMs) {
+                proc.kill();
+                proc.waitForFinished(500);
+                break;
+            }
+            if (g_locTick) g_locTick();
+            QCoreApplication::processEvents();
+        }
+
+        QString out = proc.readAllStandardOutput();
+        out += proc.readAllStandardError();
+        return out;
+    };
+
+    QString out = attempt(false);
+    if (out.contains(marker)) {
+        if (reachedScript) *reachedScript = true;
+        return out;
+    }
+
+    QString fallback = attempt(true);
+    if (fallback.contains(marker)) {
+        if (reachedScript) *reachedScript = true;
+        return fallback;
+    }
+
+    return out + "\n" + fallback;
+}
+
+// ---------------------------------------------------------
+// Direct serial NMEA backend (offline GNSS chips)
+//
+// Covers receivers exposed as a plain serial port: u-blox over USB CDC
+// (/dev/ttyACM*), USB dongles (/dev/ttyUSB*) and on-board GNSS wired to a
+// legacy UART (/dev/ttyS*). Works with no daemon at all, so it functions
+// when gpsd is absent and there is no network.
+//
+// The port and baud rate are cached once found: the page auto-refreshes
+// every 2 seconds and a blind re-probe of every tty at every baud rate on
+// each tick would stall the UI completely.
+// ---------------------------------------------------------
+
+static QString g_nmeaPort;                 // cached working device node
+static speed_t g_nmeaBaud = B9600;         // cached working baud
+static QElapsedTimer g_nmeaProbeAge;       // time since last full probe
+static bool g_nmeaProbed = false;
+static QString g_nmeaError;                // last open() failure, if any
+
+static const speed_t NMEA_BAUDS[] = { B9600, B115200, B38400, B4800 };
+static const int NMEA_BAUD_COUNT = 4;
+
+static const char* nmeaBaudName(speed_t b)
+{
+    if (b == B9600)   return "9600";
+    if (b == B115200) return "115200";
+    if (b == B38400)  return "38400";
+    if (b == B4800)   return "4800";
+    return "?";
+}
+
+static bool nmeaChecksumOk(const QString &sentence)
+{
+    int star = sentence.lastIndexOf('*');
+    if (star < 1 || star + 2 >= sentence.size())
+        return false;
+
+    unsigned char sum = 0;
+    for (int i = 1; i < star; ++i)
+        sum ^= static_cast<unsigned char>(sentence.at(i).toLatin1());
+
+    bool ok = false;
+    unsigned int given = sentence.mid(star + 1, 2).toUInt(&ok, 16);
+    return ok && given == sum;
+}
+
+// Read raw bytes from one port at one baud rate for up to msTimeout.
+static QByteArray readNmeaRaw(const QString &dev, speed_t baud, int msTimeout)
+{
+    QByteArray buf;
+
+    int fd = ::open(dev.toLocal8Bit().constData(),
+                    O_RDONLY | O_NOCTTY | O_NONBLOCK);
+    if (fd < 0) {
+        if (errno == EACCES || errno == EPERM) {
+            g_nmeaError = QString("%1: permission denied "
+                                  "(user is not in the 'dialout' group)")
+                              .arg(dev);
+        }
+        return buf;
+    }
+
+    struct termios tio;
+    if (::tcgetattr(fd, &tio) != 0) {
+        ::close(fd);
+        return buf;
+    }
+
+    ::cfmakeraw(&tio);
+    ::cfsetispeed(&tio, baud);
+    ::cfsetospeed(&tio, baud);
+    tio.c_cflag |= (CLOCAL | CREAD);
+    tio.c_cflag &= ~CRTSCTS;
+    tio.c_cc[VMIN]  = 0;
+    tio.c_cc[VTIME] = 0;
+    ::tcsetattr(fd, TCSANOW, &tio);
+    ::tcflush(fd, TCIFLUSH);
+
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < msTimeout) {
+        fd_set rf;
+        FD_ZERO(&rf);
+        FD_SET(fd, &rf);
+
+        struct timeval tv;
+        tv.tv_sec  = 0;
+        tv.tv_usec = 60000;
+
+        int r = ::select(fd + 1, &rf, nullptr, nullptr, &tv);
+        if (r > 0) {
+            char tmp[512];
+            ssize_t n = ::read(fd, tmp, sizeof(tmp));
+            if (n > 0)
+                buf.append(tmp, static_cast<int>(n));
+        }
+
+        if (g_locTick) g_locTick();
+        QCoreApplication::processEvents();
+
+        // Enough for a full position + satellite picture: stop early.
+        if (buf.contains("RMC") && buf.contains("GGA") && buf.size() > 512)
+            break;
+    }
+
+    ::close(fd);
+    return buf;
+}
+
+// Does this blob contain at least one structurally valid NMEA sentence?
+static bool looksLikeNmea(const QByteArray &raw)
+{
+    const QStringList lines = QString::fromLatin1(raw).split('\n');
+    for (const QString &lineRaw : lines) {
+        QString line = lineRaw.trimmed();
+        if (line.startsWith('$') && line.contains('*') && nmeaChecksumOk(line))
+            return true;
+    }
+    return false;
+}
+
+static QStringList nmeaCandidatePorts()
+{
+    QStringList ports;
+
+    // Named GNSS nodes first (udev rules, gpsd symlinks).
+    const QStringList named = { "/dev/gps0", "/dev/gnss0", "/dev/ttyGPS0" };
+    for (const QString &p : named) {
+        if (QFile::exists(p))
+            ports << p;
+    }
+
+    // USB CDC and USB serial dongles.
+    for (int i = 0; i < 4; ++i) {
+        QString p = QString("/dev/ttyACM%1").arg(i);
+        if (QFile::exists(p)) ports << p;
+    }
+    for (int i = 0; i < 4; ++i) {
+        QString p = QString("/dev/ttyUSB%1").arg(i);
+        if (QFile::exists(p)) ports << p;
+    }
+
+    // Legacy UARTs last. On x86 tablets ttyS0-3 always exist whether or not
+    // anything is wired to them, so probing these is the slow case.
+    for (int i = 0; i < 6; ++i) {
+        QString p = QString("/dev/ttyS%1").arg(i);
+        if (QFile::exists(p)) ports << p;
+    }
+
+    return ports;
+}
+
+// DDMM.MMMM -> decimal degrees
+static double nmeaToDecimal(const QString &coord, const QString &hem)
+{
+    if (coord.isEmpty())
+        return 0.0;
+    bool ok = false;
+    double val = coord.toDouble(&ok);
+    if (!ok)
+        return 0.0;
+
+    int degrees   = static_cast<int>(val / 100.0);
+    double minutes = val - degrees * 100.0;
+    double dec = degrees + minutes / 60.0;
+
+    if (hem == "S" || hem == "W")
+        dec = -dec;
+    return dec;
+}
+
+static void parseNmea(const QByteArray &raw, LocationInfo &info)
+{
+    const QStringList lines = QString::fromLatin1(raw).split('\n');
+
+    int gsvInView = -1;
+
+    for (const QString &lineRaw : lines) {
+        QString line = lineRaw.trimmed();
+        if (!line.startsWith('$') || !line.contains('*'))
+            continue;
+        if (!nmeaChecksumOk(line))
+            continue;
+
+        QString body = line.left(line.lastIndexOf('*'));
+        QStringList f = body.split(',', Qt::KeepEmptyParts);
+        if (f.isEmpty())
+            continue;
+
+        // Talker ID varies by constellation: GP/GN/GL/GA/BD/QZ.
+        QString type = f.value(0);
+        if (type.size() < 6)
+            continue;
+        QString kind = type.right(3);
+
+        if (kind == "GGA" && f.size() >= 8) {
+            // 1 time, 2 lat, 3 N/S, 4 lon, 5 E/W, 6 fix quality, 7 sats used
+            int quality = f.value(6).toInt();
+            if (quality > 0) {
+                double lat = nmeaToDecimal(f.value(2), f.value(3));
+                double lon = nmeaToDecimal(f.value(4), f.value(5));
+                if (lat != 0.0 || lon != 0.0) {
+                    info.lat = lat;
+                    info.lon = lon;
+                    info.hasFix = true;
+                }
+            }
+            bool ok = false;
+            int used = f.value(7).toInt(&ok);
+            if (ok && used > 0) {
+                info.satellites = used;
+                info.hasSat = true;
+            }
+        } else if (kind == "RMC" && f.size() >= 9) {
+            // 1 time, 2 status, 3 lat, 4 N/S, 5 lon, 6 E/W, 7 speed, 8 course
+            if (f.value(2) == "A") {
+                double lat = nmeaToDecimal(f.value(3), f.value(4));
+                double lon = nmeaToDecimal(f.value(5), f.value(6));
+                if (lat != 0.0 || lon != 0.0) {
+                    info.lat = lat;
+                    info.lon = lon;
+                    info.hasFix = true;
+                }
+                bool ok = false;
+                double course = f.value(8).toDouble(&ok);
+                if (ok && !f.value(8).isEmpty()) {
+                    info.heading = course;
+                    info.hasHeading = true;
+                }
+            }
+        } else if (kind == "GSV" && f.size() >= 4) {
+            // 3 = satellites in view for this constellation
+            bool ok = false;
+            int inView = f.value(3).toInt(&ok);
+            if (ok) {
+                if (gsvInView < 0) gsvInView = 0;
+                gsvInView = qMax(gsvInView, inView);
+            }
+        }
+    }
+
+    // Satellites in view is the more useful "can it see the sky" number;
+    // prefer it over the smaller "used in fix" count from GGA.
+    if (gsvInView > 0) {
+        info.satellites = gsvInView;
+        info.hasSat = true;
+    }
+}
+
+static LocationInfo getLocationFromSerialNmea()
+{
+    LocationInfo info;
+    if (!g_serialGpsEnabled)
+        return info;
+
+    g_nmeaError.clear();
+
+    // Cached port: read it directly, no probing.
+    if (!g_nmeaPort.isEmpty() && QFile::exists(g_nmeaPort)) {
+        QByteArray raw = readNmeaRaw(g_nmeaPort, g_nmeaBaud, 1200);
+        if (looksLikeNmea(raw)) {
+            info.source = QString("GPS %1 @ %2")
+                              .arg(g_nmeaPort, nmeaBaudName(g_nmeaBaud));
+            parseNmea(raw, info);
+            // A receiver with no sky view still streams valid sentences.
+            if (!info.hasFix && !info.hasSat) {
+                info.hasSat = true;
+                info.satellites = 0;
+            }
+            return info;
+        }
+        // Port went away or stopped talking: drop the cache and re-probe.
+        g_nmeaPort.clear();
+    }
+
+    // Rate-limit full probes. Without this the 2s refresh would spend
+    // several seconds walking every tty on every tick.
+    if (g_nmeaProbed && g_nmeaProbeAge.isValid() &&
+        g_nmeaProbeAge.elapsed() < 30000) {
+        return info;
+    }
+
+    const QStringList ports = nmeaCandidatePorts();
+    for (const QString &port : ports) {
+        for (int b = 0; b < NMEA_BAUD_COUNT; ++b) {
+            QByteArray raw = readNmeaRaw(port, NMEA_BAUDS[b], 350);
+            if (raw.isEmpty())
+                break;                       // dead port, skip other bauds
+            if (!looksLikeNmea(raw))
+                continue;                    // bytes but garbage: try next baud
+
+            g_nmeaPort = port;
+            g_nmeaBaud = NMEA_BAUDS[b];
+
+            QByteArray full = readNmeaRaw(port, NMEA_BAUDS[b], 1200);
+            info.source = QString("GPS %1 @ %2")
+                              .arg(port, nmeaBaudName(NMEA_BAUDS[b]));
+            parseNmea(full, info);
+            if (!info.hasFix && !info.hasSat) {
+                info.hasSat = true;
+                info.satellites = 0;
+            }
+
+            g_nmeaProbed = true;
+            g_nmeaProbeAge.restart();
+            return info;
+        }
+    }
+
+    g_nmeaProbed = true;
+    g_nmeaProbeAge.restart();
+    return info;
+}
+
+// ---------------------------------------------------------
+// Network geolocation ("location services")
+//
+// Off by default: this sends a request to an outside service and reveals
+// the device's public IP address to it. Accuracy is town/city at best, so
+// it only ever runs after every GPS backend has failed.
+// ---------------------------------------------------------
+
+static LocationInfo getLocationFromNetwork()
+{
+    LocationInfo info;
+    if (!g_netLocEnabled)
+        return info;
+
+    QString script = R"SH(
+FETCH=""
+if command -v curl >/dev/null 2>&1; then FETCH="curl -s -m 8"
+elif command -v wget >/dev/null 2>&1; then FETCH="wget -q -T 8 -O -"
+else exit 1
+fi
+for u in "https://ipwho.is/" "http://ip-api.com/json/?fields=status,lat,lon,city,country"; do
+  OUT=$($FETCH "$u" 2>/dev/null)
+  case "$OUT" in
+    *latitude*|*\"lat\"*) printf '%s' "$OUT"; exit 0 ;;
+  esac
+done
+exit 1
+)SH";
+
+    QString out = runCommand("/bin/sh", {"-c", script});
+    if (out.trimmed().isEmpty())
+        return info;
+
+    // ipwho.is uses latitude/longitude, ip-api.com uses lat/lon.
+    QRegularExpression latRe("\"lat(?:itude)?\"\\s*:\\s*([-0-9\\.]+)");
+    QRegularExpression lonRe("\"lon(?:gitude)?\"\\s*:\\s*([-0-9\\.]+)");
+    QRegularExpression cityRe("\"city\"\\s*:\\s*\"([^\"]*)\"");
+    QRegularExpression countryRe("\"country\"\\s*:\\s*\"([^\"]*)\"");
+
+    QRegularExpressionMatch latM = latRe.match(out);
+    QRegularExpressionMatch lonM = lonRe.match(out);
+    if (!latM.hasMatch() || !lonM.hasMatch())
+        return info;
+
+    info.lat = latM.captured(1).toDouble();
+    info.lon = lonM.captured(1).toDouble();
+    info.hasFix = true;
+
+    QString place;
+    QRegularExpressionMatch cityM = cityRe.match(out);
+    QRegularExpressionMatch countryM = countryRe.match(out);
+    if (cityM.hasMatch())
+        place = cityM.captured(1);
+    if (countryM.hasMatch())
+        place += (place.isEmpty() ? QString() : QString(", ")) + countryM.captured(1);
+
+    info.source = place.isEmpty()
+                      ? QString("Network - approximate only")
+                      : QString("Network - approximate only (%1)").arg(place);
+
+    return info;
+}
+
 static LocationInfo getBestLocation()
 {
     LocationInfo info;
@@ -272,11 +760,21 @@ static LocationInfo getBestLocation()
     if (info.hasFix || info.hasSat)
         return info;
 
+    info = getLocationFromSerialNmea();
+    if (info.hasFix || info.hasSat)
+        return info;
+
     info = getLocationFromAT();
     if (info.hasFix || info.hasSat)
         return info;
 
+    info = getLocationFromNetwork();
+    if (info.hasFix || info.hasSat)
+        return info;
+
     info.error = "Adaptor or libraires no found";
+    if (!g_nmeaError.isEmpty())
+        info.error += "\n\n" + g_nmeaError;
     return info;
 }
 
@@ -405,6 +903,129 @@ public:
 
         midLayout->addWidget(mapFrame);
 
+        // -------------------------------------------------
+        // Card 4: Date & time
+        // -------------------------------------------------
+        QFrame *timeFrame = new QFrame(this);
+        timeFrame->setStyleSheet(
+            "QFrame {"
+            " background:#3a3a3a;"
+            " border-radius:40px;"
+            "}"
+        );
+        timeFrame->setFixedHeight(520);
+
+        QVBoxLayout *timeLayout = new QVBoxLayout(timeFrame);
+        timeLayout->setContentsMargins(30, 30, 30, 30);
+        timeLayout->setSpacing(14);
+
+        QLabel *timeHeading = new QLabel("Date & time", timeFrame);
+        timeHeading->setAlignment(Qt::AlignCenter);
+        timeHeading->setStyleSheet(
+            "QLabel { font-size:30px; font-weight:bold; color:white; }"
+        );
+        timeLayout->addWidget(timeHeading);
+
+        clockLabel = new QLabel("--", timeFrame);
+        clockLabel->setAlignment(Qt::AlignCenter);
+        clockLabel->setWordWrap(true);
+        clockLabel->setStyleSheet("QLabel { font-size:34px; color:white; }");
+        timeLayout->addWidget(clockLabel);
+
+        tzInfoLabel = new QLabel("", timeFrame);
+        tzInfoLabel->setAlignment(Qt::AlignCenter);
+        tzInfoLabel->setWordWrap(true);
+        tzInfoLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
+        timeLayout->addWidget(tzInfoLabel);
+
+        // Zone selector: Local / UTC / GMT
+        QHBoxLayout *zoneRow = new QHBoxLayout();
+        zoneRow->setSpacing(16);
+        zoneRow->setAlignment(Qt::AlignHCenter);
+
+        localZoneButton = smallBtnBT("Local");
+        utcZoneButton   = smallBtnBT("UTC");
+        gmtZoneButton   = smallBtnBT("GMT");
+        localZoneButton->setFixedSize(150, 56);
+        utcZoneButton->setFixedSize(150, 56);
+        gmtZoneButton->setFixedSize(150, 56);
+
+        zoneRow->addWidget(localZoneButton);
+        zoneRow->addWidget(utcZoneButton);
+        zoneRow->addWidget(gmtZoneButton);
+        timeLayout->addLayout(zoneRow);
+
+        // Actions: change the clock by hand, or fetch it from the internet
+        QHBoxLayout *timeActionRow = new QHBoxLayout();
+        timeActionRow->setSpacing(24);
+        timeActionRow->setAlignment(Qt::AlignHCenter);
+
+        setTimeButton  = smallBtnBT("Change");
+        syncTimeButton = smallBtnBT("Sync now");
+        setTimeButton->setFixedSize(190, 60);
+        syncTimeButton->setFixedSize(190, 60);
+
+        timeActionRow->addWidget(setTimeButton);
+        timeActionRow->addWidget(syncTimeButton);
+        timeLayout->addLayout(timeActionRow);
+
+        timeStatusLabel = new QLabel("", timeFrame);
+        timeStatusLabel->setAlignment(Qt::AlignCenter);
+        timeStatusLabel->setWordWrap(true);
+        timeStatusLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
+        timeLayout->addWidget(timeStatusLabel);
+
+        midLayout->addWidget(timeFrame);
+
+        // -------------------------------------------------
+        // Card 5: Location sources
+        // -------------------------------------------------
+        QFrame *srcFrame = new QFrame(this);
+        srcFrame->setStyleSheet(
+            "QFrame {"
+            " background:#3a3a3a;"
+            " border-radius:40px;"
+            "}"
+        );
+        srcFrame->setFixedHeight(330);
+
+        QVBoxLayout *srcLayout = new QVBoxLayout(srcFrame);
+        srcLayout->setContentsMargins(30, 30, 30, 30);
+        srcLayout->setSpacing(14);
+
+        QLabel *srcHeading = new QLabel("Location sources", srcFrame);
+        srcHeading->setAlignment(Qt::AlignCenter);
+        srcHeading->setStyleSheet(
+            "QLabel { font-size:30px; font-weight:bold; color:white; }"
+        );
+        srcLayout->addWidget(srcHeading);
+
+        QLabel *srcInfo = new QLabel(
+            "GPS works with no internet and is used first.\n"
+            "Network location estimates your position from your internet\n"
+            "address. It is only accurate to about your town, and it asks\n"
+            "an outside company where you are.",
+            srcFrame);
+        srcInfo->setAlignment(Qt::AlignCenter);
+        srcInfo->setWordWrap(true);
+        srcInfo->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
+        srcLayout->addWidget(srcInfo);
+
+        QHBoxLayout *srcRow = new QHBoxLayout();
+        srcRow->setSpacing(24);
+        srcRow->setAlignment(Qt::AlignHCenter);
+
+        serialGpsButton = smallBtnBT("GPS chip");
+        netLocButton    = smallBtnBT("Network");
+        serialGpsButton->setFixedSize(210, 60);
+        netLocButton->setFixedSize(210, 60);
+
+        srcRow->addWidget(serialGpsButton);
+        srcRow->addWidget(netLocButton);
+        srcLayout->addLayout(srcRow);
+
+        midLayout->addWidget(srcFrame);
+
         midLayout->addStretch();
 
         midScroll->setWidget(midContainer);
@@ -462,6 +1083,30 @@ public:
             }
         });
 
+        connect(localZoneButton, &QPushButton::clicked,
+                this, [this]() { setClockMode(0); });
+        connect(utcZoneButton, &QPushButton::clicked,
+                this, [this]() { setClockMode(1); });
+        connect(gmtZoneButton, &QPushButton::clicked,
+                this, [this]() { setClockMode(2); });
+
+        connect(setTimeButton, &QPushButton::clicked,
+                this, &LocationPage::openSetTimeDialog);
+        connect(syncTimeButton, &QPushButton::clicked,
+                this, &LocationPage::syncTimeFromInternet);
+
+        connect(serialGpsButton, &QPushButton::clicked,
+                this, &LocationPage::toggleSerialGps);
+        connect(netLocButton, &QPushButton::clicked,
+                this, &LocationPage::toggleNetworkLocation);
+
+        // Clock ticks once a second, independently of the location refresh:
+        // turning Location off must not stop the clock.
+        clockTimer = new QTimer(this);
+        clockTimer->setInterval(1000);
+        connect(clockTimer, &QTimer::timeout,
+                this, &LocationPage::updateClock);
+
         // Timer: 2 second refresh while on and page visible
         refreshTimer = new QTimer(this);
         refreshTimer->setInterval(2000);
@@ -479,7 +1124,19 @@ public:
         QSettings settings(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
                            QSettings::IniFormat);
         locationEnabled = settings.value("Location/enabled", true).toBool();
+        clockMode          = settings.value("DateTime/clock_mode", 0).toInt();
+        if (clockMode < 0 || clockMode > 2)
+            clockMode = 0;
+        g_netLocEnabled    = settings.value("Location/network_enabled", false).toBool();
+        g_serialGpsEnabled = settings.value("Location/serial_gps_enabled", true).toBool();
+
         updatePowerButton();
+        updateZoneButtons();
+        updateSourceButtons();
+        updateClock();
+
+        if (!stackedWidget || stackedWidget->currentWidget() == this)
+            clockTimer->start();
 
         if (locationEnabled) {
             if (!stackedWidget || stackedWidget->currentWidget() == this)
@@ -507,6 +1164,24 @@ private:
 
     QTimer *refreshTimer = nullptr;
     bool locationEnabled = true;
+
+    // Date & time
+    QLabel *clockLabel      = nullptr;
+    QLabel *tzInfoLabel     = nullptr;
+    QLabel *timeStatusLabel = nullptr;
+
+    QPushButton *localZoneButton = nullptr;
+    QPushButton *utcZoneButton   = nullptr;
+    QPushButton *gmtZoneButton   = nullptr;
+    QPushButton *setTimeButton   = nullptr;
+    QPushButton *syncTimeButton  = nullptr;
+
+    QTimer *clockTimer = nullptr;
+    int clockMode = 0;              // 0 = Local, 1 = UTC, 2 = GMT
+
+    // Location sources
+    QPushButton *serialGpsButton = nullptr;
+    QPushButton *netLocButton    = nullptr;
 
     // -------------------------------------------------
     // UI helpers
@@ -546,6 +1221,446 @@ private:
         }
     }
 
+    void applyBtnColour(QPushButton *b, const QString &colour, int fontPx = 26)
+    {
+        if (!b) return;
+        b->setStyleSheet(QString(
+            "QPushButton {"
+            " background:#444444;"
+            " color:%1;"
+            " border:1px solid #222222;"
+            " border-radius:16px;"
+            " font-size:%2px;"
+            " font-weight:bold;"
+            " padding:6px 12px;"
+            "}"
+            "QPushButton:hover { background:#555555; }"
+            "QPushButton:pressed { background:#333333; }"
+            "QPushButton:disabled { color:#888888; }"
+        ).arg(colour).arg(fontPx));
+    }
+
+    void saveSetting(const QString &key, const QVariant &value)
+    {
+        QSettings settings(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                           QSettings::IniFormat);
+        settings.setValue(key, value);
+        settings.sync();
+    }
+
+    void showDetail(const QString &title, const QString &text, const QString &detail)
+    {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Critical);
+        box.setWindowTitle(title);
+        box.setText(text);
+        if (!detail.trimmed().isEmpty())
+            box.setDetailedText(detail);
+        box.setStyleSheet("background:#282828; color:white; font-size:24px;");
+        box.exec();
+    }
+
+    // Animate a button's spinner across a long blocking call, and keep the
+    // 2s location refresh from interleaving with it.
+    void runWithSpinner(QPushButton *btn, const QString &restoreText,
+                        const std::function<void()> &work)
+    {
+        if (!btn || !btn->isEnabled())
+            return;
+
+        bool wasRefreshing = refreshTimer && refreshTimer->isActive();
+        if (refreshTimer) refreshTimer->stop();
+
+        if (setTimeButton)  setTimeButton->setEnabled(false);
+        if (syncTimeButton) syncTimeButton->setEnabled(false);
+
+        int frame = 0;
+        btn->setText(QString::fromUtf8(SPIN_FRAMES_LOC[0]));
+        g_locTick = [btn, &frame]() {
+            frame = (frame + 1) % SPIN_COUNT_LOC;
+            btn->setText(QString::fromUtf8(SPIN_FRAMES_LOC[frame]));
+        };
+
+        work();
+
+        g_locTick = nullptr;
+        btn->setText(restoreText);
+        if (setTimeButton)  setTimeButton->setEnabled(true);
+        if (syncTimeButton) syncTimeButton->setEnabled(true);
+        if (wasRefreshing && refreshTimer) refreshTimer->start();
+    }
+
+    // -------------------------------------------------
+    // Date & time
+    // -------------------------------------------------
+
+    // Note: GMT and UTC are the same offset. GMT is offered because that is
+    // what the label says on most clocks; it is strictly UTC+0 here and does
+    // not follow British Summer Time.
+    QDateTime nowInMode() const
+    {
+        QDateTime n = QDateTime::currentDateTime();
+        if (clockMode == 0)
+            return n;
+        return n.toUTC();
+    }
+
+    QString zoneSuffix() const
+    {
+        if (clockMode == 1) return QStringLiteral("UTC");
+        if (clockMode == 2) return QStringLiteral("GMT");
+        return QDateTime::currentDateTime().timeZoneAbbreviation();
+    }
+
+    void updateClock()
+    {
+        if (!clockLabel)
+            return;
+
+        QDateTime n = nowInMode();
+        clockLabel->setText(n.toString("dddd d MMMM yyyy") + "\n" +
+                            n.toString("HH:mm:ss") + " " + zoneSuffix());
+
+        if (tzInfoLabel) {
+            QTimeZone tz = QTimeZone::systemTimeZone();
+            int offs = tz.offsetFromUtc(QDateTime::currentDateTime());
+            QChar sign = (offs < 0) ? QChar('-') : QChar('+');
+            int a = qAbs(offs);
+            QString offStr = QString("%1%2:%3")
+                                 .arg(sign)
+                                 .arg(a / 3600, 2, 10, QChar('0'))
+                                 .arg((a % 3600) / 60, 2, 10, QChar('0'));
+            tzInfoLabel->setText(QString("System time zone: %1  (UTC%2)")
+                                     .arg(QString::fromUtf8(tz.id()), offStr));
+        }
+    }
+
+    void updateZoneButtons()
+    {
+        applyBtnColour(localZoneButton, clockMode == 0 ? "#7CFC00" : "white", 24);
+        applyBtnColour(utcZoneButton,   clockMode == 1 ? "#7CFC00" : "white", 24);
+        applyBtnColour(gmtZoneButton,   clockMode == 2 ? "#7CFC00" : "white", 24);
+    }
+
+    void setClockMode(int mode)
+    {
+        clockMode = mode;
+        saveSetting("DateTime/clock_mode", mode);
+        updateZoneButtons();
+        updateClock();
+    }
+
+    void setTimeStatus(const QString &text, const QString &colour)
+    {
+        if (!timeStatusLabel)
+            return;
+        timeStatusLabel->setText(text);
+        timeStatusLabel->setStyleSheet(
+            QString("QLabel { font-size:22px; color:%1; }").arg(colour));
+    }
+
+    void openSetTimeDialog()
+    {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Change date & time");
+        dlg.setModal(true);
+        dlg.setStyleSheet("background:#282828; color:white;");
+        dlg.resize(760, 480);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setContentsMargins(40, 40, 40, 40);
+        lay->setSpacing(20);
+
+        QLabel *head = new QLabel(
+            clockMode == 0
+                ? QString("Enter the time shown on your local clock")
+                : QString("Enter the time in %1").arg(zoneSuffix()),
+            &dlg);
+        head->setAlignment(Qt::AlignCenter);
+        head->setWordWrap(true);
+        head->setStyleSheet("QLabel { font-size:28px; font-weight:bold; color:white; }");
+        lay->addWidget(head);
+
+        QDateTimeEdit *edit = new QDateTimeEdit(&dlg);
+        edit->setTimeSpec(clockMode == 0 ? Qt::LocalTime : Qt::UTC);
+        edit->setDisplayFormat("dd MMM yyyy    HH:mm:ss");
+        edit->setCalendarPopup(false);
+        edit->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        edit->setAlignment(Qt::AlignCenter);
+        edit->setMinimumHeight(100);
+        edit->setDateTimeRange(QDateTime(QDate(2000, 1, 1), QTime(0, 0, 0)),
+                               QDateTime(QDate(2099, 12, 31), QTime(23, 59, 59)));
+        edit->setDateTime(nowInMode());
+        edit->setStyleSheet(
+            "QDateTimeEdit {"
+            " background:#3a3a3a;"
+            " color:white;"
+            " border:1px solid #222222;"
+            " border-radius:16px;"
+            " font-size:40px;"
+            " padding:10px 20px;"
+            "}"
+            "QDateTimeEdit::section:selected { background:#7CFC00; color:#222222; }"
+        );
+        lay->addWidget(edit);
+
+        QLabel *hint = new QLabel("Tap a number, then use the arrows below", &dlg);
+        hint->setAlignment(Qt::AlignCenter);
+        hint->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
+        lay->addWidget(hint);
+
+        // Explicit large step buttons: the spin box's own arrows are far too
+        // small for a finger on a tablet.
+        QHBoxLayout *stepRow = new QHBoxLayout();
+        stepRow->setSpacing(30);
+        stepRow->setAlignment(Qt::AlignHCenter);
+
+        QPushButton *downBtn = smallBtnBT(QStringLiteral("\u25BC"));
+        QPushButton *upBtn   = smallBtnBT(QStringLiteral("\u25B2"));
+        downBtn->setFixedSize(160, 70);
+        upBtn->setFixedSize(160, 70);
+        stepRow->addWidget(downBtn);
+        stepRow->addWidget(upBtn);
+        lay->addLayout(stepRow);
+
+        connect(downBtn, &QPushButton::clicked, edit, &QDateTimeEdit::stepDown);
+        connect(upBtn,   &QPushButton::clicked, edit, &QDateTimeEdit::stepUp);
+
+        QHBoxLayout *actionRow = new QHBoxLayout();
+        actionRow->setSpacing(30);
+        actionRow->setAlignment(Qt::AlignHCenter);
+
+        QPushButton *cancelBtn = smallBtnBT("Cancel");
+        QPushButton *applyBtn  = smallBtnBT("Set");
+        cancelBtn->setFixedSize(190, 66);
+        applyBtn->setFixedSize(190, 66);
+        actionRow->addWidget(cancelBtn);
+        actionRow->addWidget(applyBtn);
+        lay->addLayout(actionRow);
+
+        connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+        connect(applyBtn,  &QPushButton::clicked, &dlg, &QDialog::accept);
+
+        // The dialog pumps events; do not let the location refresh run under it.
+        bool wasRefreshing = refreshTimer && refreshTimer->isActive();
+        if (refreshTimer) refreshTimer->stop();
+        int result = dlg.exec();
+        if (wasRefreshing && refreshTimer) refreshTimer->start();
+
+        if (result != QDialog::Accepted)
+            return;
+
+        applySystemDateTime(edit->dateTime().toUTC());
+    }
+
+    void applySystemDateTime(const QDateTime &utc)
+    {
+        QString stamp = utc.toString("yyyy-MM-dd HH:mm:ss");
+
+        QString script = QString(
+            "date -u -s \"%1\" >/dev/null 2>&1 || { echo OSMSET_FAIL; exit 1; }\n"
+            "RTC=ok\n"
+            "hwclock --systohc >/dev/null 2>&1 || RTC=failed\n"
+            "echo \"OSMSET_OK:$RTC\"\n"
+            "exit 0\n"
+        ).arg(stamp);
+
+        bool reached = false;
+        QString out;
+        runWithSpinner(setTimeButton, "Change", [&]() {
+            out = runAsRootShell(script, "OSMSET_", 30000, &reached);
+        });
+
+        if (!reached) {
+            setTimeStatus("The clock could not be changed: permission was refused.",
+                          "#FF6B6B");
+            showDetail("Change date & time",
+                       "The system would not allow the clock to be changed.",
+                       out);
+            return;
+        }
+
+        if (out.contains("OSMSET_FAIL")) {
+            setTimeStatus("The clock could not be changed: the date command failed.",
+                          "#FF6B6B");
+            showDetail("Change date & time",
+                       "The date could not be applied to the system clock.",
+                       out);
+            return;
+        }
+
+        updateClock();
+
+        if (out.contains("OSMSET_OK:failed")) {
+            setTimeStatus("Clock changed, but the battery-backed clock could not be "
+                          "updated. The time may be wrong again after a shutdown.",
+                          "#FFC24B");
+        } else {
+            setTimeStatus("Clock changed by hand at " +
+                          QDateTime::currentDateTime().toString("HH:mm:ss") + ".",
+                          "#7CFC00");
+        }
+    }
+
+    void syncTimeFromInternet()
+    {
+        // NTP first where it exists, then the HTTP Date header, which is the
+        // fallback already relied on during installation for machines whose
+        // RTC is too far out for TLS to work at all.
+        QString script = R"SH(
+LOG=""
+SRC=""
+
+HAVE_NTPDATE=0; command -v ntpdate >/dev/null 2>&1 && HAVE_NTPDATE=1
+HAVE_SNTP=0;    command -v sntp    >/dev/null 2>&1 && HAVE_SNTP=1
+HAVE_CURL=0;    command -v curl    >/dev/null 2>&1 && HAVE_CURL=1
+HAVE_WGET=0;    command -v wget    >/dev/null 2>&1 && HAVE_WGET=1
+
+[ "$HAVE_NTPDATE" = 0 ] && LOG="$LOG
+ntpdate: not installed"
+[ "$HAVE_SNTP" = 0 ] && LOG="$LOG
+sntp: not installed"
+
+for srv in pool.ntp.org time.cloudflare.com; do
+  if [ "$HAVE_NTPDATE" = 1 ]; then
+    O=$(ntpdate -u -b "$srv" 2>&1)
+    if [ $? -eq 0 ]; then SRC="ntpdate $srv"; break; fi
+    LOG="$LOG
+ntpdate $srv: $O"
+  fi
+  if [ "$HAVE_SNTP" = 1 ]; then
+    O=$(sntp -S "$srv" 2>&1)
+    if [ $? -eq 0 ]; then SRC="sntp $srv"; break; fi
+    LOG="$LOG
+sntp $srv: $O"
+  fi
+done
+
+if [ -z "$SRC" ]; then
+  for url in https://deb.devuan.org/ http://deb.devuan.org/ http://www.google.com/; do
+    D=""
+    if [ "$HAVE_CURL" = 1 ]; then
+      D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
+    fi
+    if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
+      D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
+    fi
+    if [ -n "$D" ]; then
+      if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
+      LOG="$LOG
+could not apply date from $url: $D"
+    else
+      LOG="$LOG
+no date sent by $url"
+    fi
+  done
+fi
+
+if [ -z "$SRC" ]; then
+  echo "OSMSYNC_FAIL"
+  echo "$LOG"
+  exit 1
+fi
+
+RTC=ok
+hwclock --systohc >/dev/null 2>&1 || RTC=failed
+echo "OSMSYNC_OK:$RTC:$SRC"
+echo "$LOG"
+exit 0
+)SH";
+
+        bool reached = false;
+        QString out;
+        runWithSpinner(syncTimeButton, "Sync now", [&]() {
+            out = runAsRootShell(script, "OSMSYNC_", 90000, &reached);
+        });
+
+        if (!reached) {
+            setTimeStatus("The clock could not be synced: permission was refused.",
+                          "#FF6B6B");
+            showDetail("Sync date & time",
+                       "The system would not allow the clock to be changed.",
+                       out);
+            return;
+        }
+
+        if (out.contains("OSMSYNC_FAIL")) {
+            setTimeStatus("The clock could not be synced. Check that you are "
+                          "connected to a network, then try again.",
+                          "#FF6B6B");
+            showDetail("Sync date & time",
+                       "No time source could be reached.",
+                       out);
+            return;
+        }
+
+        updateClock();
+
+        QString source;
+        QRegularExpression okRe("OSMSYNC_OK:([^:]*):(.*)");
+        QRegularExpressionMatch okM = okRe.match(out);
+        bool rtcFailed = false;
+        if (okM.hasMatch()) {
+            rtcFailed = (okM.captured(1).trimmed() == "failed");
+            source = okM.captured(2).trimmed();
+        }
+
+        QString when = QDateTime::currentDateTime().toString("HH:mm:ss");
+        if (rtcFailed) {
+            setTimeStatus(QString("Clock synced at %1, but the battery-backed clock "
+                                  "could not be updated. The time may be wrong again "
+                                  "after a shutdown.").arg(when),
+                          "#FFC24B");
+        } else if (!source.isEmpty()) {
+            setTimeStatus(QString("Clock synced at %1 from %2.").arg(when, source),
+                          "#7CFC00");
+        } else {
+            setTimeStatus(QString("Clock synced at %1.").arg(when), "#7CFC00");
+        }
+    }
+
+    // -------------------------------------------------
+    // Location sources
+    // -------------------------------------------------
+
+    void updateSourceButtons()
+    {
+        if (serialGpsButton) {
+            serialGpsButton->setText(g_serialGpsEnabled ? "GPS chip: On"
+                                                        : "GPS chip: Off");
+            applyBtnColour(serialGpsButton,
+                           g_serialGpsEnabled ? "#7CFC00" : "#CC6666", 22);
+        }
+        if (netLocButton) {
+            netLocButton->setText(g_netLocEnabled ? "Network: On" : "Network: Off");
+            applyBtnColour(netLocButton,
+                           g_netLocEnabled ? "#7CFC00" : "#CC6666", 22);
+        }
+    }
+
+    void toggleSerialGps()
+    {
+        g_serialGpsEnabled = !g_serialGpsEnabled;
+        saveSetting("Location/serial_gps_enabled", g_serialGpsEnabled);
+
+        // Force a fresh port hunt on the next refresh.
+        g_nmeaPort.clear();
+        g_nmeaProbed = false;
+
+        updateSourceButtons();
+        if (locationEnabled)
+            refreshDataOnce();
+    }
+
+    void toggleNetworkLocation()
+    {
+        g_netLocEnabled = !g_netLocEnabled;
+        saveSetting("Location/network_enabled", g_netLocEnabled);
+        updateSourceButtons();
+        if (locationEnabled)
+            refreshDataOnce();
+    }
+
     void togglePower()
     {
         locationEnabled = !locationEnabled;
@@ -578,10 +1693,22 @@ private:
         if (!stackedWidget)
             return;
 
-        if (stackedWidget->widget(idx) == this && locationEnabled) {
+        bool visible = (stackedWidget->widget(idx) == this);
+
+        if (visible && locationEnabled) {
             refreshTimer->start();
         } else {
             refreshTimer->stop();
+        }
+
+        // The clock is not part of Location, so it follows visibility only.
+        if (clockTimer) {
+            if (visible) {
+                updateClock();
+                clockTimer->start();
+            } else {
+                clockTimer->stop();
+            }
         }
     }
 
