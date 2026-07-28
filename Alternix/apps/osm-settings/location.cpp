@@ -112,6 +112,7 @@ struct LocationInfo {
     int satellites = 0;
 
     QString source;   // "ModemManager", "gpsd", "AT"
+    QString place;    // estimated town / country, when one is known
     QString error;
 };
 
@@ -370,6 +371,52 @@ static QString runAsRootShell(const QString &script,
 
     return out + "\n" + fallback;
 }
+
+// ---------------------------------------------------------
+// Battery-backed clock (RTC)
+//
+// `hwclock --systohc` alone is not enough on these tablets: the plain call
+// can fail while writing through an explicit /dev/rtc node or the direct ISA
+// path still works. The earlier version sent hwclock's error to /dev/null,
+// so a failure was reported with no reason attached. This keeps the reason.
+// ---------------------------------------------------------
+
+static const char *RTC_WRITE_SH = R"SH(
+RTCLOG=""
+rtc_write() {
+  HW=""
+  for c in /sbin/hwclock /usr/sbin/hwclock /bin/hwclock /usr/bin/hwclock; do
+    if [ -x "$c" ]; then HW="$c"; break; fi
+  done
+  if [ -z "$HW" ]; then
+    RTCLOG="hwclock is not installed (it comes from the util-linux package)"
+    return 1
+  fi
+
+  if O=$("$HW" --systohc 2>&1); then return 0; fi
+  RTCLOG="$HW --systohc: $O"
+
+  for d in /dev/rtc /dev/rtc0 /dev/rtc1; do
+    [ -e "$d" ] || continue
+    if O=$("$HW" --systohc -f "$d" 2>&1); then return 0; fi
+    RTCLOG="$RTCLOG
+$HW --systohc -f $d: $O"
+  done
+
+  if O=$("$HW" --systohc --directisa 2>&1); then return 0; fi
+  RTCLOG="$RTCLOG
+$HW --systohc --directisa: $O"
+
+  if [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ]; then
+    RTCLOG="$RTCLOG
+
+There is no /dev/rtc0 on this machine, so the kernel has not registered a
+battery-backed clock at all. The time will have to be set again, or synced
+again, after every power off."
+  fi
+  return 1
+}
+)SH";
 
 // ---------------------------------------------------------
 // Direct serial NMEA backend (offline GNSS chips)
@@ -741,11 +788,97 @@ exit 1
     if (countryM.hasMatch())
         place += (place.isEmpty() ? QString() : QString(", ")) + countryM.captured(1);
 
+    info.place = place;
     info.source = place.isEmpty()
                       ? QString("Network - approximate only")
                       : QString("Network - approximate only (%1)").arg(place);
 
     return info;
+}
+
+// ---------------------------------------------------------
+// Reverse geocoding: turn a GPS fix into a town and country name.
+//
+// This needs the network, so it sits behind the same Network toggle as IP
+// geolocation. It is rate limited hard on purpose: the page refreshes every
+// two seconds and OpenStreetMap's public service allows roughly one request
+// per second, so a naive call here would get the whole project blocked.
+// ---------------------------------------------------------
+
+static QString g_placeName;
+static double g_placeLat = 0.0;
+static double g_placeLon = 0.0;
+static QElapsedTimer g_placeAge;
+static bool g_placeQueried = false;
+
+static QString reverseGeocode(double lat, double lon)
+{
+    if (!g_netLocEnabled)
+        return QString();
+
+    // About a kilometre. Below this the town name will not have changed.
+    bool moved = (qAbs(lat - g_placeLat) > 0.01) || (qAbs(lon - g_placeLon) > 0.01);
+
+    if (!g_placeName.isEmpty() && !moved)
+        return g_placeName;
+    if (g_placeQueried && !moved &&
+        g_placeAge.isValid() && g_placeAge.elapsed() < 60000)
+        return g_placeName;
+
+    g_placeQueried = true;
+    g_placeAge.restart();
+    g_placeLat = lat;
+    g_placeLon = lon;
+
+    QString url = QString("https://nominatim.openstreetmap.org/reverse"
+                          "?format=jsonv2&zoom=10&addressdetails=1&lat=%1&lon=%2")
+                      .arg(lat, 0, 'f', 5)
+                      .arg(lon, 0, 'f', 5);
+
+    // A descriptive User-Agent is required by the service's terms of use.
+    QString ua = "Alternix-osm-settings/1.0 (+https://github.com/DansDesigns/Alternix)";
+
+    QString script = QString(
+        "if command -v curl >/dev/null 2>&1; then\n"
+        "  curl -s -m 8 -A \"%2\" \"%1\" && exit 0\n"
+        "fi\n"
+        "if command -v wget >/dev/null 2>&1; then\n"
+        "  wget -q -T 8 -O - --user-agent=\"%2\" \"%1\" && exit 0\n"
+        "fi\n"
+        "exit 1\n").arg(url, ua);
+
+    QString out = runCommand("/bin/sh", {"-c", script});
+    if (out.trimmed().isEmpty())
+        return g_placeName;
+
+    QRegularExpression townRe(
+        "\"(?:city|town|village|hamlet|municipality|suburb)\"\\s*:\\s*\"([^\"]*)\"");
+    QRegularExpression countyRe("\"county\"\\s*:\\s*\"([^\"]*)\"");
+    QRegularExpression countryRe("\"country\"\\s*:\\s*\"([^\"]*)\"");
+
+    QString town;
+    QRegularExpressionMatch tm = townRe.match(out);
+    if (tm.hasMatch())
+        town = tm.captured(1);
+    else {
+        QRegularExpressionMatch cm = countyRe.match(out);
+        if (cm.hasMatch())
+            town = cm.captured(1);
+    }
+
+    QString country;
+    QRegularExpressionMatch com = countryRe.match(out);
+    if (com.hasMatch())
+        country = com.captured(1);
+
+    QString place = town;
+    if (!country.isEmpty())
+        place += (place.isEmpty() ? QString() : QString(", ")) + country;
+
+    if (!place.isEmpty())
+        g_placeName = place;
+
+    return g_placeName;
 }
 
 static LocationInfo getBestLocation()
@@ -796,13 +929,28 @@ public:
         setFont(f);   // page-local: do NOT change the app-wide font
 
         // Global white text + dark bg
-        QPalette pal = qApp->palette();
+        //
+        // GREY NUMBERS FIX - DO NOT REMOVE
+        // This used to call qApp->setPalette(), which mutated the palette of
+        // the whole application from inside a plugin and left every other
+        // page's numbers rendering grey. The palette is now applied to this
+        // page only, exactly like the page-local font above, and the
+        // stylesheet uses explicit class selectors as wifi.cpp does. An
+        // unqualified "color:white" does not reliably reach the internal
+        // child widgets of QDateTimeEdit / QMessageBox, which is what made
+        // the digits come out grey.
+        QPalette pal = palette();
         pal.setColor(QPalette::WindowText, Qt::white);
         pal.setColor(QPalette::Text, Qt::white);
         pal.setColor(QPalette::ButtonText, Qt::white);
-        qApp->setPalette(pal);
+        setPalette(pal);
 
-        setStyleSheet("background:#282828; color:white;");
+        setStyleSheet(
+            "QScrollArea { background:#282828; font-family:Sans; border:none; }"
+            "QWidget { background:#282828; font-family:Sans; }"
+            "QLabel { color:white; font-family:Sans; }"
+            "QMessageBox QLabel { color:white; font-family:Sans; }"
+        );
 
         QVBoxLayout *rootLayout = new QVBoxLayout(this);
         rootLayout->setContentsMargins(40, 40, 40, 40);
@@ -929,26 +1077,34 @@ public:
         clockLabel = new QLabel("--", timeFrame);
         clockLabel->setAlignment(Qt::AlignCenter);
         clockLabel->setWordWrap(true);
+        clockLabel->setMinimumWidth(1);
+        clockLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         clockLabel->setStyleSheet("QLabel { font-size:34px; color:white; }");
         timeLayout->addWidget(clockLabel);
 
         tzInfoLabel = new QLabel("", timeFrame);
         tzInfoLabel->setAlignment(Qt::AlignCenter);
         tzInfoLabel->setWordWrap(true);
+        tzInfoLabel->setMinimumWidth(1);
+        tzInfoLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         tzInfoLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
         timeLayout->addWidget(tzInfoLabel);
 
         // Zone selector: Local / UTC / GMT
         QHBoxLayout *zoneRow = new QHBoxLayout();
-        zoneRow->setSpacing(16);
+        zoneRow->setSpacing(14);
         zoneRow->setAlignment(Qt::AlignHCenter);
 
         localZoneButton = smallBtnBT("Local");
         utcZoneButton   = smallBtnBT("UTC");
         gmtZoneButton   = smallBtnBT("GMT");
-        localZoneButton->setFixedSize(150, 56);
-        utcZoneButton->setFixedSize(150, 56);
-        gmtZoneButton->setFixedSize(150, 56);
+        // WIDTH FIX - DO NOT REMOVE
+        // 3*104 + 2*14 = 340, which is the card's inner width at 720px. Any
+        // wider and this row becomes the widest thing on the page and drags
+        // the whole settings window past the screen edge.
+        localZoneButton->setFixedSize(104, 56);
+        utcZoneButton->setFixedSize(104, 56);
+        gmtZoneButton->setFixedSize(104, 56);
 
         zoneRow->addWidget(localZoneButton);
         zoneRow->addWidget(utcZoneButton);
@@ -957,13 +1113,16 @@ public:
 
         // Actions: change the clock by hand, or fetch it from the internet
         QHBoxLayout *timeActionRow = new QHBoxLayout();
-        timeActionRow->setSpacing(24);
+        timeActionRow->setSpacing(20);
         timeActionRow->setAlignment(Qt::AlignHCenter);
 
         setTimeButton  = smallBtnBT("Change");
         syncTimeButton = smallBtnBT("Sync now");
-        setTimeButton->setFixedSize(190, 60);
-        syncTimeButton->setFixedSize(190, 60);
+        // WIDTH FIX - DO NOT REMOVE: 2*160 + 20 = 340
+        setTimeButton->setFixedSize(160, 62);
+        syncTimeButton->setFixedSize(160, 62);
+        applyBtnColour(setTimeButton,  "white", 22);
+        applyBtnColour(syncTimeButton, "white", 22);
 
         timeActionRow->addWidget(setTimeButton);
         timeActionRow->addWidget(syncTimeButton);
@@ -972,6 +1131,8 @@ public:
         timeStatusLabel = new QLabel("", timeFrame);
         timeStatusLabel->setAlignment(Qt::AlignCenter);
         timeStatusLabel->setWordWrap(true);
+        timeStatusLabel->setMinimumWidth(1);
+        timeStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         timeStatusLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
         timeLayout->addWidget(timeStatusLabel);
 
@@ -987,7 +1148,7 @@ public:
             " border-radius:40px;"
             "}"
         );
-        srcFrame->setFixedHeight(330);
+        srcFrame->setFixedHeight(460);
 
         QVBoxLayout *srcLayout = new QVBoxLayout(srcFrame);
         srcLayout->setContentsMargins(30, 30, 30, 30);
@@ -1001,28 +1162,54 @@ public:
         srcLayout->addWidget(srcHeading);
 
         QLabel *srcInfo = new QLabel(
-            "GPS works with no internet and is used first.\n"
-            "Network location estimates your position from your internet\n"
-            "address. It is only accurate to about your town, and it asks\n"
+            "GPS works with no internet and is used first. "
+            "Network location estimates your position from your internet "
+            "address. It is only accurate to about your town, and it asks "
             "an outside company where you are.",
             srcFrame);
         srcInfo->setAlignment(Qt::AlignCenter);
         srcInfo->setWordWrap(true);
+        // WIDTH FIX - DO NOT REMOVE
+        // A wrapping QLabel reports a minimum width wide enough for its
+        // longest unbreakable run, which pushed the whole page past 720px
+        // and produced horizontal scrolling. Letting it shrink to 1px means
+        // the label wraps to whatever width the card actually has.
+        srcInfo->setMinimumWidth(1);
+        srcInfo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         srcInfo->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
         srcLayout->addWidget(srcInfo);
 
         QHBoxLayout *srcRow = new QHBoxLayout();
-        srcRow->setSpacing(24);
+        srcRow->setSpacing(10);
         srcRow->setAlignment(Qt::AlignHCenter);
 
         serialGpsButton = smallBtnBT("GPS chip");
         netLocButton    = smallBtnBT("Network");
-        serialGpsButton->setFixedSize(210, 60);
-        netLocButton->setFixedSize(210, 60);
+        // WIDTH FIX - DO NOT REMOVE: 2*165 + 10 = 340. The state goes on a
+        // second line so the button stays narrow without abbreviating.
+        serialGpsButton->setFixedSize(165, 76);
+        netLocButton->setFixedSize(165, 76);
 
         srcRow->addWidget(serialGpsButton);
         srcRow->addWidget(netLocButton);
         srcLayout->addLayout(srcRow);
+
+        // Readout: where the device currently thinks it is.
+        srcCoordLabel = new QLabel("Coordinates: not known yet", srcFrame);
+        srcCoordLabel->setAlignment(Qt::AlignCenter);
+        srcCoordLabel->setWordWrap(true);
+        srcCoordLabel->setMinimumWidth(1);
+        srcCoordLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        srcCoordLabel->setStyleSheet("QLabel { font-size:24px; color:white; }");
+        srcLayout->addWidget(srcCoordLabel);
+
+        srcPlaceLabel = new QLabel("Estimated place: not known yet", srcFrame);
+        srcPlaceLabel->setAlignment(Qt::AlignCenter);
+        srcPlaceLabel->setWordWrap(true);
+        srcPlaceLabel->setMinimumWidth(1);
+        srcPlaceLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        srcPlaceLabel->setStyleSheet("QLabel { font-size:24px; color:white; }");
+        srcLayout->addWidget(srcPlaceLabel);
 
         midLayout->addWidget(srcFrame);
 
@@ -1149,6 +1336,7 @@ public:
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
             mapLabel->setText("Mini map of local area\n\nLocation is turned off");
+            setSourceReadoutMessage("Location is turned off");
         }
     }
 
@@ -1182,6 +1370,8 @@ private:
     // Location sources
     QPushButton *serialGpsButton = nullptr;
     QPushButton *netLocButton    = nullptr;
+    QLabel *srcCoordLabel = nullptr;
+    QLabel *srcPlaceLabel = nullptr;
 
     // -------------------------------------------------
     // UI helpers
@@ -1248,10 +1438,11 @@ private:
         settings.sync();
     }
 
-    void showDetail(const QString &title, const QString &text, const QString &detail)
+    void showDetail(const QString &title, const QString &text, const QString &detail,
+                    QMessageBox::Icon icon = QMessageBox::Critical)
     {
         QMessageBox box(this);
-        box.setIcon(QMessageBox::Critical);
+        box.setIcon(icon);
         box.setWindowTitle(title);
         box.setText(text);
         if (!detail.trimmed().isEmpty())
@@ -1364,12 +1555,20 @@ private:
         QDialog dlg(this);
         dlg.setWindowTitle("Change date & time");
         dlg.setModal(true);
-        dlg.setStyleSheet("background:#282828; color:white;");
-        dlg.resize(760, 480);
+        // Explicit selectors, not a bare "color:white": see the grey numbers
+        // note in the constructor.
+        dlg.setStyleSheet(
+            "QWidget { background:#282828; font-family:Sans; }"
+            "QLabel { color:white; font-family:Sans; }"
+        );
+        // WIDTH FIX - DO NOT REMOVE
+        // Must stay inside a 720px wide screen.
+        dlg.setMaximumWidth(700);
+        dlg.resize(640, 470);
 
         QVBoxLayout *lay = new QVBoxLayout(&dlg);
-        lay->setContentsMargins(40, 40, 40, 40);
-        lay->setSpacing(20);
+        lay->setContentsMargins(30, 30, 30, 30);
+        lay->setSpacing(18);
 
         QLabel *head = new QLabel(
             clockMode == 0
@@ -1378,27 +1577,51 @@ private:
             &dlg);
         head->setAlignment(Qt::AlignCenter);
         head->setWordWrap(true);
+        head->setMinimumWidth(1);
         head->setStyleSheet("QLabel { font-size:28px; font-weight:bold; color:white; }");
         lay->addWidget(head);
 
         QDateTimeEdit *edit = new QDateTimeEdit(&dlg);
         edit->setTimeSpec(clockMode == 0 ? Qt::LocalTime : Qt::UTC);
-        edit->setDisplayFormat("dd MMM yyyy    HH:mm:ss");
+        edit->setDisplayFormat("dd MMM yyyy  HH:mm:ss");
         edit->setCalendarPopup(false);
         edit->setButtonSymbols(QAbstractSpinBox::NoButtons);
         edit->setAlignment(Qt::AlignCenter);
-        edit->setMinimumHeight(100);
+        edit->setMinimumHeight(96);
+        edit->setMinimumWidth(1);
         edit->setDateTimeRange(QDateTime(QDate(2000, 1, 1), QTime(0, 0, 0)),
                                QDateTime(QDate(2099, 12, 31), QTime(23, 59, 59)));
         edit->setDateTime(nowInMode());
+
+        // GREY NUMBERS FIX - DO NOT REMOVE
+        // QDateTimeEdit draws its digits through an internal QLineEdit, which
+        // takes its colour from the palette rather than from a stylesheet rule
+        // on the QDateTimeEdit itself. Setting both is what keeps the digits
+        // white instead of grey. The palette is set on this widget only.
+        QPalette ep = edit->palette();
+        ep.setColor(QPalette::Text,            Qt::white);
+        ep.setColor(QPalette::WindowText,      Qt::white);
+        ep.setColor(QPalette::ButtonText,      Qt::white);
+        ep.setColor(QPalette::HighlightedText, QColor("#222222"));
+        ep.setColor(QPalette::Highlight,       QColor("#7CFC00"));
+        ep.setColor(QPalette::Base,            QColor("#3a3a3a"));
+        ep.setColor(QPalette::Button,          QColor("#3a3a3a"));
+        edit->setPalette(ep);
+
         edit->setStyleSheet(
             "QDateTimeEdit {"
             " background:#3a3a3a;"
             " color:white;"
             " border:1px solid #222222;"
             " border-radius:16px;"
-            " font-size:40px;"
-            " padding:10px 20px;"
+            " font-size:34px;"
+            " font-family:Sans;"
+            " padding:8px 14px;"
+            "}"
+            "QDateTimeEdit QLineEdit {"
+            " background:transparent;"
+            " color:white;"
+            " border:none;"
             "}"
             "QDateTimeEdit::section:selected { background:#7CFC00; color:#222222; }"
         );
@@ -1457,11 +1680,17 @@ private:
     {
         QString stamp = utc.toString("yyyy-MM-dd HH:mm:ss");
 
-        QString script = QString(
-            "date -u -s \"%1\" >/dev/null 2>&1 || { echo OSMSET_FAIL; exit 1; }\n"
+        QString script = QString::fromLatin1(RTC_WRITE_SH) + QString(
+            "\n"
+            "if ! O=$(date -u -s \"%1\" 2>&1); then\n"
+            "  echo OSMSET_FAIL\n"
+            "  echo \"date -u -s: $O\"\n"
+            "  exit 1\n"
+            "fi\n"
             "RTC=ok\n"
-            "hwclock --systohc >/dev/null 2>&1 || RTC=failed\n"
+            "rtc_write || RTC=failed\n"
             "echo \"OSMSET_OK:$RTC\"\n"
+            "echo \"$RTCLOG\"\n"
             "exit 0\n"
         ).arg(stamp);
 
@@ -1495,6 +1724,11 @@ private:
             setTimeStatus("Clock changed, but the battery-backed clock could not be "
                           "updated. The time may be wrong again after a shutdown.",
                           "#FFC24B");
+            showDetail("Battery-backed clock",
+                       "The time on screen is now correct, but it could not be "
+                       "written to the clock chip that keeps time while the "
+                       "machine is switched off. The reason is below.",
+                       out, QMessageBox::Warning);
         } else {
             setTimeStatus("Clock changed by hand at " +
                           QDateTime::currentDateTime().toString("HH:mm:ss") + ".",
@@ -1507,7 +1741,7 @@ private:
         // NTP first where it exists, then the HTTP Date header, which is the
         // fallback already relied on during installation for machines whose
         // RTC is too far out for TLS to work at all.
-        QString script = R"SH(
+        QString script = QString::fromLatin1(RTC_WRITE_SH) + R"SH(
 LOG=""
 SRC=""
 
@@ -1563,9 +1797,10 @@ if [ -z "$SRC" ]; then
 fi
 
 RTC=ok
-hwclock --systohc >/dev/null 2>&1 || RTC=failed
+rtc_write || RTC=failed
 echo "OSMSYNC_OK:$RTC:$SRC"
 echo "$LOG"
+echo "$RTCLOG"
 exit 0
 )SH";
 
@@ -1611,6 +1846,12 @@ exit 0
                                   "could not be updated. The time may be wrong again "
                                   "after a shutdown.").arg(when),
                           "#FFC24B");
+            showDetail("Battery-backed clock",
+                       "The time was fetched successfully and the clock on screen "
+                       "is now correct. It could not be written to the clock chip "
+                       "that keeps time while the machine is switched off, so it "
+                       "may be wrong again after a reboot. The reason is below.",
+                       out, QMessageBox::Warning);
         } else if (!source.isEmpty()) {
             setTimeStatus(QString("Clock synced at %1 from %2.").arg(when, source),
                           "#7CFC00");
@@ -1623,16 +1864,53 @@ exit 0
     // Location sources
     // -------------------------------------------------
 
+    void updateSourceReadout(const LocationInfo &info)
+    {
+        if (srcCoordLabel) {
+            if (info.hasFix) {
+                srcCoordLabel->setText(QString("Coordinates: %1, %2")
+                                           .arg(info.lat, 0, 'f', 6)
+                                           .arg(info.lon, 0, 'f', 6));
+            } else {
+                srcCoordLabel->setText("Coordinates: not known yet");
+            }
+        }
+
+        if (!srcPlaceLabel)
+            return;
+
+        QString place = info.place;
+        if (place.isEmpty() && info.hasFix)
+            place = reverseGeocode(info.lat, info.lon);
+
+        if (!place.isEmpty()) {
+            srcPlaceLabel->setText("Estimated place: " + place);
+        } else if (!info.hasFix) {
+            srcPlaceLabel->setText("Estimated place: not known yet");
+        } else if (!g_netLocEnabled) {
+            srcPlaceLabel->setText("Estimated place: turn Network on to look up "
+                                   "a town name");
+        } else {
+            srcPlaceLabel->setText("Estimated place: could not be looked up");
+        }
+    }
+
+    void setSourceReadoutMessage(const QString &msg)
+    {
+        if (srcCoordLabel) srcCoordLabel->setText("Coordinates: " + msg);
+        if (srcPlaceLabel) srcPlaceLabel->setText("Estimated place: " + msg);
+    }
+
     void updateSourceButtons()
     {
         if (serialGpsButton) {
-            serialGpsButton->setText(g_serialGpsEnabled ? "GPS chip: On"
-                                                        : "GPS chip: Off");
+            serialGpsButton->setText(g_serialGpsEnabled ? "GPS chip\nOn"
+                                                        : "GPS chip\nOff");
             applyBtnColour(serialGpsButton,
                            g_serialGpsEnabled ? "#7CFC00" : "#CC6666", 22);
         }
         if (netLocButton) {
-            netLocButton->setText(g_netLocEnabled ? "Network: On" : "Network: Off");
+            netLocButton->setText(g_netLocEnabled ? "Network\nOn" : "Network\nOff");
             applyBtnColour(netLocButton,
                            g_netLocEnabled ? "#7CFC00" : "#CC6666", 22);
         }
@@ -1678,6 +1956,7 @@ exit 0
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
             mapLabel->setText("Mini map of local area\n\nLocation is turned off");
+            setSourceReadoutMessage("Location is turned off");
             return;
         }
 
@@ -1734,6 +2013,7 @@ exit 0
             gpsLabel->setText(info.error);
             satLabel->setText(info.error);
             mapLabel->setText("Mini map of local area\n\n" + info.error);
+            setSourceReadoutMessage("not known");
             busy = false;
             return;
         }
@@ -1782,6 +2062,8 @@ exit 0
         mapText += "\n(Use external map app for full view)";
 
         mapLabel->setText(mapText);
+
+        updateSourceReadout(info);
         busy = false;
     }
 
