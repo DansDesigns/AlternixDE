@@ -668,6 +668,8 @@ sudo cp "$HOME/Alternix/update/os-check-update" /usr/bin/
 sudo mkdir -p /usr/share/alternix/
 sudo cp "$HOME/Alternix/update/version.txt" /usr/share/alternix/
 
+echo "• Creating Alternix Updater shortcut..."
+
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
 Name=System Update
@@ -678,6 +680,32 @@ Terminal=true
 Categories=System;
 EOF
 
+echo "• Creating Ranger shortcut..."
+cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Terminal File Manager for Alternix / OSM-Phone
+Exec=ranger %F
+Icon=ranger
+Terminal=true
+Categories=System;FileTools;FileManager;
+StartupNotify=false
+EOF
+
+
+echo "• Creating Volume Control shortcut..."
+cat <<EOF > "$HOME/.local/share/applications/pavucontrol.desktop"
+[Desktop Entry]
+Type=Application
+Name=Volume Control
+Comment=Audio Mixer for Alternix / OSM-Phone
+Exec=pavucontrol
+Icon=pavucontrol
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;Settings;
+StartupNotify=true
+EOF
 
 
 # ────────────────────────────────────────────────

@@ -20,7 +20,7 @@ sleep 1
 # Settings to be updated (configs, system icons & settings):
 #===========================================================
 echo ""
-#echo "No Settings or Configs to update..."
+# echo "No Settings or Configs to update..."
 echo ""
 echo ""
 echo "[Config] Updating Grub Entry.."
@@ -34,12 +34,40 @@ sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse ud
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
+
+echo "• Creating Ranger shortcut..."
+cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Terminal File Manager for Alternix / OSM-Phone
+Exec=ranger %F
+Icon=ranger
+Terminal=true
+Categories=System;FileTools;FileManager;
+StartupNotify=false
+EOF
+
+
+echo "• Creating Volume Control shortcut..."
+cat <<EOF > "$HOME/.local/share/applications/pavucontrol.desktop"
+[Desktop Entry]
+Type=Application
+Name=Volume Control
+Comment=Audio Mixer for Alternix / OSM-Phone
+Exec=pavucontrol
+Icon=pavucontrol
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;Settings;
+StartupNotify=true
+EOF
+
 echo ""
 #===========================================================
 # Apps to be updated (compilation commands & icons):
 #===========================================================
 echo ""
-#echo "No Apps need updating..."
+# echo "No Apps need updating..."
 echo ""
 
 # ────────────────────────────────────────────────
@@ -198,23 +226,6 @@ echo ""
 #===========================================================
 # Updater:
 #===========================================================
-echo "[Updating Alternix Updater]"
-
-# Un-Comment to update icon:
-echo "• Updating Icon..."
-sudo cp icons/os-check-update.png /usr/share/icons/hicolor/64x64/apps/os-check-update.png
-
-#=========================================
-# Un-Comment to remove old update and upgrade shortcuts:
-echo "• Revmoing old shortcuts..."
-sudo rm -r /usr/share/applications/update.desktop
-sudo rm -r /usr/share/applications/upgrade.desktop
-
-#=========================================
-# Update Updater:
-echo "• Installing the Updater..."
-sudo chmod +x "$ALT_ROOT/update/os-check-update"
-sudo cp "$ALT_ROOT/update/os-check-update" /usr/bin/
 
 #=========================================
 # Create Folder if not already existing:

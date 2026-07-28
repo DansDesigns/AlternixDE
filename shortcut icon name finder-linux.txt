@@ -1,0 +1,1 @@
+grep -H '^Icon=' /usr/share/applications/*.desktop ~/.local/share/applications/*.desktop 2>/dev/null | grep -Ei 'ranger|pavu|mixer'
