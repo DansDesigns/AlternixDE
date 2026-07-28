@@ -141,7 +141,7 @@ sudo nala install -y \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
     python3-venv qtile python3-cffi python3-xcffib picom redshift onboard \
-    samba xdotool alacritty sqlite3 fuse \
+    samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 ranger \
