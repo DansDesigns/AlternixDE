@@ -140,7 +140,8 @@ sudo nala install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml \
-    python3-venv qtile python3-cffi python3-xcffib picom redshift onboard samba xdotool alacritty sqlite3 fuse \
+    python3-venv qtile python3-cffi python3-xcffib picom redshift onboard \
+    samba xdotool alacritty sqlite3 fuse ntpdate \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 ranger \

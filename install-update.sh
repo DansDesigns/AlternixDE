@@ -29,7 +29,7 @@ echo "[Config] Updating Grub Entry.."
 sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 sudo update-grub
 
-sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount -y
+sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount ntpdate -y
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
@@ -108,6 +108,9 @@ echo "• Building ui.so..."
 g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv ui.so /usr/local/bin/
 
+echo "• Building location.so..."
+g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo mv location.so /usr/local/bin/
 
 cd "$ALT_ROOT/Alternix/apps"
 
