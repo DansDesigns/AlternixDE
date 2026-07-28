@@ -25,6 +25,7 @@
 #include <QProcessEnvironment>
 #include <QFile>
 #include <QPair>
+#include <QVector>
 #include <functional>
 
 // Direct serial access for GNSS receivers that speak plain NMEA.
@@ -39,6 +40,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <grp.h>
 
 // ---------------------------------------------------------
 // Helpers (button + command runner)
@@ -845,6 +847,252 @@ static void parseNmea(const QByteArray &raw, LocationInfo &info)
     }
 }
 
+// ---------------------------------------------------------
+// GPS hardware detection
+//
+// Same shape as the rotation sensor check: work out whether the hardware is
+// actually present, and if it is not usable say plainly why (REASON) and
+// what to do about it (HINT). Silent failure is the thing to avoid - without
+// this the page just quietly falls back to network location and the user has
+// no idea whether the machine even has a GPS chip.
+// ---------------------------------------------------------
+
+static LocationInfo getLocationFromSerialNmea();
+
+struct GpsProbe {
+    bool talking          = false;   // a receiver is actually sending NMEA
+    bool chipEvidence     = false;   // something GNSS-shaped exists
+    bool permissionDenied = false;   // ports exist but we cannot open them
+    QString device;
+    QString reason;
+    QString hint;
+    QStringList detail;              // full report for the dialog
+};
+
+static QString readSysFile(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return QString();
+    QString v = QString::fromLatin1(f.readAll()).trimmed();
+    f.close();
+    return v;
+}
+
+static bool userInGroup(const char *name)
+{
+    struct group *g = ::getgrnam(name);
+    if (!g)
+        return false;
+    gid_t target = g->gr_gid;
+    if (::getegid() == target)
+        return true;
+
+    int n = ::getgroups(0, nullptr);
+    if (n <= 0)
+        return false;
+    QVector<gid_t> list(n);
+    if (::getgroups(n, list.data()) != n)
+        return false;
+    for (int i = 0; i < list.size(); ++i)
+        if (list.at(i) == target)
+            return true;
+    return false;
+}
+
+// USB vendors worth calling out. The serial-bridge chips are also used by
+// plenty of non-GPS hardware, so they are reported as "possible" only.
+struct UsbId { const char *vid; const char *name; bool definite; };
+static const UsbId USB_GNSS_IDS[] = {
+    { "1546", "u-blox GNSS receiver",              true  },
+    { "1163", "SiRF GNSS receiver",                true  },
+    { "091e", "Garmin GNSS receiver",              true  },
+    { "067b", "Prolific USB serial (often a GPS cable)", false },
+    { "10c4", "Silicon Labs USB serial (often a GPS)",   false },
+    { "0403", "FTDI USB serial (sometimes a GPS)",       false },
+    { "1199", "Sierra Wireless modem (may provide GPS)", false },
+    { "12d1", "Huawei modem (may provide GPS)",          false }
+};
+static const int USB_GNSS_COUNT = 8;
+
+static GpsProbe probeGpsHardware(bool deepScan)
+{
+    GpsProbe p;
+
+    // --- 1. Kernel GNSS subsystem (the clearest possible evidence) --------
+    QDir gnssDir("/sys/class/gnss");
+    if (gnssDir.exists()) {
+        const QStringList nodes = gnssDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &n : nodes) {
+            p.chipEvidence = true;
+            p.detail << QString("Kernel GNSS device: /dev/%1").arg(n);
+        }
+    }
+    if (!p.chipEvidence)
+        p.detail << "Kernel GNSS subsystem: nothing registered";
+
+    // --- 2. ACPI / platform GNSS identifiers ------------------------------
+    // Broadcom GNSS on Bay Trail and Cherry Trail tablets shows up here.
+    const QStringList acpiRoots = { "/sys/bus/acpi/devices", "/sys/bus/platform/devices" };
+    const QStringList acpiIds   = { "BCM4752", "BCM4750", "BCM4751", "GNSS", "UBLX" };
+    bool acpiHit = false;
+    for (const QString &root : acpiRoots) {
+        QDir d(root);
+        if (!d.exists())
+            continue;
+        const QStringList entries = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &e : entries) {
+            for (const QString &id : acpiIds) {
+                if (e.contains(id, Qt::CaseInsensitive)) {
+                    p.chipEvidence = true;
+                    acpiHit = true;
+                    p.detail << QString("Firmware reports a GNSS device: %1/%2").arg(root, e);
+                }
+            }
+        }
+    }
+    if (!acpiHit)
+        p.detail << "Firmware device list: no GNSS chip declared";
+
+    // --- 3. USB receivers and serial bridges ------------------------------
+    QDir usbDir("/sys/bus/usb/devices");
+    bool usbHit = false;
+    if (usbDir.exists()) {
+        const QStringList devs = usbDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QString &d : devs) {
+            QString vid = readSysFile(usbDir.filePath(d) + "/idVendor");
+            if (vid.isEmpty())
+                continue;
+            for (int i = 0; i < USB_GNSS_COUNT; ++i) {
+                if (vid.compare(USB_GNSS_IDS[i].vid, Qt::CaseInsensitive) != 0)
+                    continue;
+                usbHit = true;
+                if (USB_GNSS_IDS[i].definite)
+                    p.chipEvidence = true;
+                QString pid = readSysFile(usbDir.filePath(d) + "/idProduct");
+                p.detail << QString("USB %1:%2 - %3")
+                                .arg(vid, pid, QString::fromLatin1(USB_GNSS_IDS[i].name));
+            }
+        }
+    }
+    if (!usbHit)
+        p.detail << "USB devices: no GNSS receiver or GPS serial cable attached";
+
+    // --- 4. Serial ports and whether we are allowed to open them ----------
+    const QStringList ports = nmeaCandidatePorts();
+    if (ports.isEmpty()) {
+        p.detail << "Serial ports: none present at all";
+    } else {
+        p.detail << QString("Serial ports found: %1").arg(ports.join(", "));
+        bool anyOpenable = false;
+        QStringList blocked;
+        for (const QString &port : ports) {
+            int fd = ::open(port.toLocal8Bit().constData(),
+                            O_RDONLY | O_NOCTTY | O_NONBLOCK);
+            if (fd >= 0) {
+                anyOpenable = true;
+                ::close(fd);
+            } else if (errno == EACCES || errno == EPERM) {
+                blocked << port;
+            }
+        }
+        if (!blocked.isEmpty()) {
+            p.permissionDenied = true;
+            p.detail << QString("Cannot be opened (permission denied): %1")
+                            .arg(blocked.join(", "));
+        }
+        if (!anyOpenable && !blocked.isEmpty())
+            p.detail << "No serial port could be opened at all";
+    }
+    p.detail << QString("This user is %1a member of the 'dialout' group")
+                    .arg(userInGroup("dialout") ? "" : "NOT ");
+
+    // --- 5. gpsd -----------------------------------------------------------
+    bool gpsdInstalled = QFile::exists("/usr/sbin/gpsd") || QFile::exists("/usr/bin/gpsd");
+    bool gpsdSocket    = QFile::exists("/var/run/gpsd.sock") ||
+                         QFile::exists("/run/gpsd.sock");
+    p.detail << QString("gpsd: %1, socket %2")
+                    .arg(gpsdInstalled ? "installed" : "not installed",
+                         gpsdSocket ? "present" : "absent");
+
+    // --- 6. Live listen on the serial ports --------------------------------
+    bool savedToggle = g_serialGpsEnabled;
+    g_serialGpsEnabled = true;      // the check listens regardless of the toggle
+    g_nmeaPort.clear();             // force a real hunt, not the cached port
+    g_nmeaProbed = false;
+    LocationInfo live = getLocationFromSerialNmea();
+    g_serialGpsEnabled = savedToggle;
+    if (!live.source.isEmpty()) {
+        p.talking = true;
+        p.chipEvidence = true;
+        p.device = live.source;
+        p.detail << QString("Listening: %1 is sending valid NMEA data").arg(live.source);
+        if (live.hasFix)
+            p.detail << QString("Position: %1, %2")
+                            .arg(live.lat, 0, 'f', 6).arg(live.lon, 0, 'f', 6);
+        else
+            p.detail << "Position: receiver is running but has no fix yet";
+    } else {
+        p.detail << "Listening: no serial port sent any recognisable GPS data";
+    }
+
+    // --- 7. Slow checks, only for the explicit Check button -----------------
+    if (deepScan) {
+        QString modems = runCommand("mmcli", {"-L"});
+        if (modems.contains("/Modem/")) {
+            QRegularExpression re("/Modem/(\\d+)");
+            QRegularExpressionMatch m = re.match(modems);
+            if (m.hasMatch()) {
+                QString st = runCommand("mmcli", {"-m", m.captured(1), "--location-status"});
+                bool gpsCapable = st.contains("gps", Qt::CaseInsensitive);
+                if (gpsCapable)
+                    p.chipEvidence = true;
+                p.detail << QString("Mobile broadband modem %1: %2")
+                                .arg(m.captured(1),
+                                     gpsCapable ? "reports GPS capability"
+                                                : "present but reports no GPS");
+            }
+        } else {
+            p.detail << "Mobile broadband: no modem present (ModemManager found nothing)";
+        }
+
+        QString dm = runCommand("/bin/sh",
+            {"-c", "dmesg 2>/dev/null | grep -iE 'gnss|u-blox|ublox|bcm475|nmea' | head -n 8"});
+        if (!dm.trimmed().isEmpty())
+            p.detail << "Kernel messages:\n" + dm.trimmed();
+        else
+            p.detail << "Kernel messages: nothing about GNSS in the log";
+    }
+
+    // --- Conclusion: REASON and HINT ---------------------------------------
+    if (p.talking) {
+        if (live.hasFix) {
+            p.reason = QString("Working: %1").arg(p.device);
+            p.hint.clear();
+        } else {
+            p.reason = QString("GPS chip found on %1, waiting for a fix").arg(p.device);
+            p.hint = "A receiver needs a clear view of the sky. Indoors it can "
+                     "take several minutes, or never get a fix at all.";
+        }
+    } else if (p.permissionDenied) {
+        p.reason = "A serial port was found but cannot be opened";
+        p.hint = "This user is not in the 'dialout' group, which is what grants "
+                 "access to serial ports. Add the user to that group and sign "
+                 "out and back in.";
+    } else if (p.chipEvidence) {
+        p.reason = "GPS hardware is present but is not sending anything";
+        p.hint = "The chip may need its driver loaded or a power-on command. "
+                 "The full report below shows what was found.";
+    } else {
+        p.reason = "No GPS chip found in this machine";
+        p.hint = "Most x86 tablets have no GNSS receiver at all. Either plug in "
+                 "a USB GPS receiver, or use Network location, which estimates "
+                 "your position from your internet address.";
+    }
+
+    return p;
+}
+
 static LocationInfo getLocationFromSerialNmea()
 {
     LocationInfo info;
@@ -1326,7 +1574,7 @@ public:
             " border-radius:40px;"
             "}"
         );
-        srcFrame->setFixedHeight(460);
+        srcFrame->setFixedHeight(600);
 
         QVBoxLayout *srcLayout = new QVBoxLayout(srcFrame);
         srcLayout->setContentsMargins(30, 30, 30, 30);
@@ -1371,6 +1619,24 @@ public:
         srcRow->addWidget(serialGpsButton);
         srcRow->addWidget(netLocButton);
         srcLayout->addLayout(srcRow);
+
+        // What the GPS check found, always on screen.
+        gpsStatusLabel = new QLabel("GPS chip: not checked yet", srcFrame);
+        gpsStatusLabel->setAlignment(Qt::AlignCenter);
+        gpsStatusLabel->setWordWrap(true);
+        gpsStatusLabel->setMinimumWidth(1);
+        gpsStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        gpsStatusLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
+        srcLayout->addWidget(gpsStatusLabel);
+
+        QHBoxLayout *checkRow = new QHBoxLayout();
+        checkRow->setAlignment(Qt::AlignHCenter);
+        checkGpsButton = smallBtnBT("Check GPS");
+        // WIDTH FIX - DO NOT REMOVE: stays under the 340px card inner width.
+        checkGpsButton->setFixedSize(220, 60);
+        applyBtnColour(checkGpsButton, "white", 22);
+        checkRow->addWidget(checkGpsButton);
+        srcLayout->addLayout(checkRow);
 
         // Readout: where the device currently thinks it is.
         srcCoordLabel = new QLabel("Coordinates: not known yet", srcFrame);
@@ -1464,6 +1730,8 @@ public:
                 this, &LocationPage::toggleSerialGps);
         connect(netLocButton, &QPushButton::clicked,
                 this, &LocationPage::toggleNetworkLocation);
+        connect(checkGpsButton, &QPushButton::clicked,
+                this, &LocationPage::runGpsCheck);
 
         // Clock ticks once a second, independently of the location refresh:
         // turning Location off must not stop the clock.
@@ -1510,6 +1778,9 @@ public:
             // messages → AT probe) previously ran before the page could
             // paint, freezing the hub for seconds. Show the page first.
             QTimer::singleShot(50, this, [this]() { refreshDataOnce(); });
+            // Deferred as well: the sysfs walk is quick but the page should
+            // paint first.
+            QTimer::singleShot(120, this, [this]() { quickGpsCheck(); });
         } else {
             gpsLabel->setText("Location is turned off");
             satLabel->setText("Visible satellites\n\nLocation is turned off");
@@ -1550,6 +1821,8 @@ private:
     QPushButton *netLocButton    = nullptr;
     QLabel *srcCoordLabel = nullptr;
     QLabel *srcPlaceLabel = nullptr;
+    QLabel *gpsStatusLabel = nullptr;
+    QPushButton *checkGpsButton = nullptr;
 
     // -------------------------------------------------
     // UI helpers
@@ -1642,6 +1915,7 @@ private:
 
         if (setTimeButton)  setTimeButton->setEnabled(false);
         if (syncTimeButton) syncTimeButton->setEnabled(false);
+        if (checkGpsButton) checkGpsButton->setEnabled(false);
 
         int frame = 0;
         btn->setText(QString::fromUtf8(SPIN_FRAMES_LOC[0]));
@@ -1656,6 +1930,7 @@ private:
         btn->setText(restoreText);
         if (setTimeButton)  setTimeButton->setEnabled(true);
         if (syncTimeButton) syncTimeButton->setEnabled(true);
+        if (checkGpsButton) checkGpsButton->setEnabled(true);
         if (wasRefreshing && refreshTimer) refreshTimer->start();
     }
 
@@ -2057,6 +2332,48 @@ exit 0
     // Location sources
     // -------------------------------------------------
 
+    void applyGpsProbe(const GpsProbe &p)
+    {
+        if (!gpsStatusLabel)
+            return;
+
+        QString colour = p.talking ? "#7CFC00" : "#FFC24B";
+        if (!p.talking && !p.chipEvidence && !p.permissionDenied)
+            colour = "#BBBBBB";          // nothing wrong, there is just no chip
+
+        QString text = "GPS chip: " + p.reason;
+        if (!p.hint.isEmpty())
+            text += "\n" + p.hint;
+
+        gpsStatusLabel->setText(text);
+        gpsStatusLabel->setStyleSheet(
+            QString("QLabel { font-size:22px; color:%1; }").arg(colour));
+    }
+
+    // Quick check on the way in: sysfs only, no slow mmcli or dmesg.
+    void quickGpsCheck()
+    {
+        applyGpsProbe(probeGpsHardware(false));
+    }
+
+    // The Check GPS button: everything, with the full report shown.
+    void runGpsCheck()
+    {
+        GpsProbe p;
+        runWithSpinner(checkGpsButton, "Check GPS", [&]() {
+            p = probeGpsHardware(true);
+        });
+
+        applyGpsProbe(p);
+
+        QString body = p.reason;
+        if (!p.hint.isEmpty())
+            body += "\n\n" + p.hint;
+
+        showDetail("GPS chip check", body, p.detail.join("\n"),
+                   p.talking ? QMessageBox::Information : QMessageBox::Warning);
+    }
+
     void updateSourceReadout(const LocationInfo &info)
     {
         if (srcCoordLabel) {
@@ -2119,6 +2436,10 @@ exit 0
         g_nmeaProbed = false;
 
         updateSourceButtons();
+        if (g_serialGpsEnabled)
+            quickGpsCheck();
+        else if (gpsStatusLabel)
+            gpsStatusLabel->setText("GPS chip: switched off");
         if (locationEnabled)
             refreshDataOnce();
     }
