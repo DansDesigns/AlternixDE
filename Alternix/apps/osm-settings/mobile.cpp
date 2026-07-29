@@ -21,12 +21,33 @@
 #include <QSettings>
 #include <QDir>
 #include <QRegularExpression>
+#include <QXmlStreamReader>
+#include <QFile>
+#include <functional>
 
 // ---------------------------------------------------------
 // Constants
 // ---------------------------------------------------------
 
 static const char *NM_CON_NAME = "Alternix Mobile";
+
+// Offline APN database. This is the same file NetworkManager itself reads,
+// shipped by the 'mobile-broadband-provider-info' package.
+static const char *PROVIDER_DB =
+    "/usr/share/mobile-broadband-provider-info/serviceproviders.xml";
+
+// Spinner frames - identical to wifi.cpp (Braille rotation, present in
+// DejaVu Sans, so no font fallback and no grey glyphs).
+static const char* const SPIN_FRAMES[] = {
+    "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
+};
+static const int SPIN_COUNT = 10;
+
+// Set by whichever page or dialog wants its spinner animated during a
+// blocking command. runProc() calls it on every poll, which is what keeps
+// the icon moving through a two minute tower scan. Single threaded GUI, so
+// a file scope hook avoids threading a callback through every call site.
+static std::function<void()> g_spinTick;
 
 // ---------------------------------------------------------
 // Helpers (same as Bluetooth)
@@ -69,8 +90,9 @@ static QString runProc(const QString &prog, const QStringList &args,
 
     QEventLoop loop;
     QTimer poll;
-    poll.setInterval(50);
+    poll.setInterval(80);   // same cadence as wifi.cpp's runCmdAnimated
     QObject::connect(&poll, &QTimer::timeout, [&]() {
+        if (g_spinTick) g_spinTick();
         if (p.state() == QProcess::NotRunning) loop.quit();
     });
 
@@ -334,6 +356,190 @@ static QString waitForState(const QStringList &wanted, int timeoutMs)
     }
 
     return st;
+}
+
+// ---------------------------------------------------------
+// IP readout (same idea as wifi.cpp's getIP)
+//
+// NetworkManager owns the connection, so the device it has bound to the
+// gsm profile is the authority on which kernel interface carries the data
+// session. Falls back to a direct `ip -4 addr` on any wwan interface.
+// ---------------------------------------------------------
+
+static QString mobileDevice()
+{
+    QString out = runPriv("nmcli", {"-t", "-f", "DEVICE,TYPE", "device", "status"}, 10000);
+    const QStringList lines = out.split('\n');
+    for (const QString &line : lines) {
+        int sep = line.lastIndexOf(':');
+        if (sep < 0) continue;
+        if (line.mid(sep + 1).trimmed() == "gsm")
+            return line.left(sep).trimmed();
+    }
+    return QString();
+}
+
+static QString getMobileIP()
+{
+    QString dev = mobileDevice();
+    if (!dev.isEmpty()) {
+        QString out = runPriv("nmcli", {"-g", "IP4.ADDRESS", "device", "show", dev}, 10000);
+        QString ip = out.split('\n').value(0).trimmed();
+        if (!ip.isEmpty() && ip != "--") {
+            int slash = ip.indexOf('/');          // strip the /24
+            return slash > 0 ? ip.left(slash) : ip;
+        }
+    }
+
+    // Fallback: the modem's data interface is usually wwanN / wwpNsM.
+    // Matched by name explicitly - a bare "first non-loopback address"
+    // would happily report the WiFi address as the mobile one.
+    return runCmd("ip -o -4 addr show 2>/dev/null "
+                  "| awk '$2 ~ /^(wwan|wwp|cdc-wdm|mhi)/ {print $4}' "
+                  "| cut -d/ -f1 | head -n1", 8000).trimmed();
+}
+
+// ---------------------------------------------------------
+// Automatic APN lookup
+//
+// The settings are read from the local provider database rather than
+// fetched over the network, because there is no network to fetch them
+// over: you cannot download an APN using a data connection that needs
+// the APN to come up. This is the same file NetworkManager consults.
+// If the database is absent it can be installed over WiFi via apt.
+// ---------------------------------------------------------
+
+struct ApnEntry {
+    QString apn;
+    QString user;
+    QString pass;
+    QString name;
+    bool    mmsOnly = false;
+};
+
+static QString stripLeadingZeros(const QString &s)
+{
+    QString t = s;
+    while (t.length() > 1 && t.startsWith('0')) t.remove(0, 1);
+    return t;
+}
+
+// An operator id is MCC+MNC concatenated: 23430 -> mcc 234, mnc 30.
+static bool splitOperatorId(const QString &id, QString &mcc, QString &mnc)
+{
+    QString s = id.trimmed();
+    if (s.length() < 5) return false;
+    mcc = s.left(3);
+    mnc = s.mid(3);
+    return true;
+}
+
+// Operator id from the SIM first: that works before the modem has
+// registered anywhere, which is exactly when the APN is still missing.
+static QString getOperatorId(QString *operatorName = nullptr)
+{
+    QString status  = modemStatus();
+    QString simPath = mmcliSimPath(status);
+
+    if (!simPath.isEmpty()) {
+        QString simOut = runPriv("mmcli", {"-i", simPath}, 15000);
+        QString id = mmcliField(simOut, "operator id");
+        if (operatorName) {
+            QString n = mmcliField(simOut, "operator name");
+            if (!n.isEmpty() && n != "--") *operatorName = n;
+        }
+        if (!id.isEmpty() && id != "--") return id;
+    }
+
+    if (operatorName && operatorName->isEmpty()) {
+        QString n = mmcliField(status, "operator name");
+        if (!n.isEmpty() && n != "--") *operatorName = n;
+    }
+
+    QString id = mmcliField(status, "operator id");
+    return (id == "--") ? QString() : id;
+}
+
+static QList<ApnEntry> lookupApns(const QString &mcc, const QString &mnc,
+                                  QString *providerOut, QString *errOut)
+{
+    QList<ApnEntry> result;
+
+    QFile f(PROVIDER_DB);
+    if (!f.exists()) {
+        if (errOut)
+            *errOut = "missing-db";
+        return result;
+    }
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (errOut)
+            *errOut = QString("Could not read %1").arg(PROVIDER_DB);
+        return result;
+    }
+
+    const QString wantMnc = stripLeadingZeros(mnc);
+
+    QXmlStreamReader xml(&f);
+    QString curProvider;
+    bool    idMatch = false;
+    bool    inApn = false;
+    QList<ApnEntry> curApns;
+    ApnEntry cur;
+
+    while (!xml.atEnd()) {
+        xml.readNext();
+
+        if (xml.isStartElement()) {
+            const QStringRef n = xml.name();
+
+            if (n == QLatin1String("provider")) {
+                curProvider.clear();
+                idMatch = false;
+                inApn = false;
+                curApns.clear();
+            } else if (n == QLatin1String("network-id")) {
+                QString m1 = xml.attributes().value("mcc").toString().trimmed();
+                QString m2 = xml.attributes().value("mnc").toString().trimmed();
+                if (m1 == mcc && stripLeadingZeros(m2) == wantMnc)
+                    idMatch = true;
+            } else if (n == QLatin1String("apn")) {
+                inApn = true;
+                cur = ApnEntry();
+                cur.apn = xml.attributes().value("value").toString().trimmed();
+            } else if (n == QLatin1String("usage")) {
+                if (inApn && xml.attributes().value("type").toString() == QLatin1String("mms"))
+                    cur.mmsOnly = true;
+            } else if (n == QLatin1String("name")) {
+                QString t = xml.readElementText().trimmed();
+                if (inApn) { if (cur.name.isEmpty()) cur.name = t; }
+                else if (curProvider.isEmpty()) curProvider = t;
+            } else if (n == QLatin1String("username")) {
+                if (inApn) cur.user = xml.readElementText().trimmed();
+            } else if (n == QLatin1String("password")) {
+                if (inApn) cur.pass = xml.readElementText().trimmed();
+            }
+        } else if (xml.isEndElement()) {
+            const QStringRef n = xml.name();
+
+            if (n == QLatin1String("apn")) {
+                inApn = false;
+                if (!cur.apn.isEmpty()) curApns << cur;
+            } else if (n == QLatin1String("provider")) {
+                if (idMatch && !curApns.isEmpty()) {
+                    if (providerOut) *providerOut = curProvider;
+                    // Internet entries first; an MMS-only APN is no use here.
+                    for (const ApnEntry &e : curApns) if (!e.mmsOnly) result << e;
+                    for (const ApnEntry &e : curApns) if (e.mmsOnly)  result << e;
+                    return result;
+                }
+            }
+        }
+    }
+
+    if (xml.hasError() && errOut)
+        *errOut = "Provider database is malformed: " + xml.errorString();
+
+    return result;
 }
 
 // Returns an empty string on success, or a human-readable error.
@@ -634,6 +840,8 @@ public:
         else resize(900, 700);
     }
 
+    ~MobileSetupDialog() override { g_spinTick = nullptr; }
+
     QStringList towers() const { return foundTowers; }
     bool succeeded() const { return ok; }
 
@@ -644,11 +852,79 @@ private:
     QStringList foundTowers;
     bool ok = false;
     bool running = false;
+    bool spinnerActive = false;
+    int  spinnerFrame = 0;
 
-    void say(const QString &s)      { logView->append("<span style=\"color:#ffffff; font-family:'DejaVu Sans';\">" + s.toHtmlEscaped() + "</span>"); pump(); }
-    void good(const QString &s)     { logView->append("<span style=\"color:#7CFC00; font-family:'DejaVu Sans';\">OK: " + s.toHtmlEscaped() + "</span>"); pump(); }
-    void bad(const QString &s)      { logView->append("<span style=\"color:#FF5555; font-weight:bold; font-family:'DejaVu Sans';\">ERROR: " + s.toHtmlEscaped() + "</span>"); pump(); }
-    void warnLine(const QString &s) { logView->append("<span style=\"color:#FFC066; font-family:'DejaVu Sans';\">WARNING: " + s.toHtmlEscaped() + "</span>"); pump(); }
+    void say(const QString &s)      { logLine(s, "#ffffff", false); }
+    void good(const QString &s)     { logLine("OK: " + s, "#7CFC00", false); }
+    void bad(const QString &s)      { logLine("ERROR: " + s, "#FF5555", true); }
+    void warnLine(const QString &s) { logLine("WARNING: " + s, "#FFC066", false); }
+
+    // Any line that announces work in progress gets the spinner from
+    // wifi.cpp's Refresh button on the line underneath it, animating for as
+    // long as the command runs. It is removed when the next line arrives.
+    void logLine(const QString &text, const QString &colour, bool bold)
+    {
+        spinnerStop();
+
+        logView->append(QString("<span style=\"color:%1; %2 font-family:'DejaVu Sans';\">%3</span>")
+                            .arg(colour)
+                            .arg(bold ? "font-weight:bold;" : "")
+                            .arg(text.toHtmlEscaped()));
+
+        const QString lower = text.toLower();
+        if (lower.contains("scanning") || lower.contains("loading") ||
+            lower.contains("waiting")  || lower.contains("downloading"))
+            spinnerStart();
+
+        pump();
+    }
+
+    QString spinnerHtml(int frame) const
+    {
+        return QString("<span style=\"color:#66CCFF; font-family:'DejaVu Sans';\">   %1</span>")
+                   .arg(QString::fromUtf8(SPIN_FRAMES[frame]));
+    }
+
+    void spinnerStart()
+    {
+        spinnerFrame = 0;
+        spinnerActive = true;
+        logView->append(spinnerHtml(0));
+        logView->moveCursor(QTextCursor::End);
+        g_spinTick = [this]() { spinnerTick(); };
+    }
+
+    void spinnerTick()
+    {
+        if (!spinnerActive) return;
+        spinnerFrame = (spinnerFrame + 1) % SPIN_COUNT;
+        replaceLastBlock(spinnerHtml(spinnerFrame));
+    }
+
+    void spinnerStop()
+    {
+        if (!spinnerActive) return;
+        spinnerActive = false;
+        g_spinTick = nullptr;
+        removeLastBlock();
+    }
+
+    void removeLastBlock()
+    {
+        QTextCursor c(logView->document());
+        c.movePosition(QTextCursor::End);
+        c.select(QTextCursor::BlockUnderCursor);
+        c.removeSelectedText();
+        logView->moveCursor(QTextCursor::End);
+    }
+
+    void replaceLastBlock(const QString &html)
+    {
+        removeLastBlock();
+        logView->append(html);
+        logView->moveCursor(QTextCursor::End);
+    }
 
     void pump()
     {
@@ -920,6 +1196,8 @@ private:
 
     void finish()
     {
+        spinnerStop();
+        g_spinTick = nullptr;
         running = false;
         runButton->setEnabled(true);
         runButton->setText("Run again");
@@ -968,6 +1246,9 @@ public:
         apnEdit = new QLineEdit(conf.apn, body);
         apnEdit->setPlaceholderText("e.g. everywhere");
         v->addWidget(apnEdit);
+
+        autoApnButton = twoLineBtnBT("Get APN\nautomatically");
+        v->addWidget(autoApnButton, 0, Qt::AlignLeft);
 
         v->addWidget(mkLabel("Username (optional)"));
         userEdit = new QLineEdit(conf.user, body);
@@ -1047,6 +1328,7 @@ public:
             roamButton->setText(conf.roaming ? "Allowed" : "Blocked");
         });
 
+        connect(autoApnButton, &QPushButton::clicked, this, [this]() { autoFillApn(true); });
         connect(unlockButton, &QPushButton::clicked, this, &MobileSettingsDialog::unlockSim);
         connect(saveButton, &QPushButton::clicked, this, [this]() { apply(false); });
         connect(connectButton, &QPushButton::clicked, this, [this]() { apply(true); });
@@ -1054,7 +1336,18 @@ public:
 
         if (parent) resize(parent->width() - 120, parent->height() - 120);
         else resize(900, 800);
+
+        // Deferred so the dialog is painted first: the lookup runs mmcli and
+        // would otherwise happen behind an unshown window with no spinner.
+        QTimer::singleShot(50, this, [this]() {
+            if (apnEdit->text().trimmed().isEmpty())
+                autoFillApn(false);
+        });
     }
+
+    // The spin hook captures `this`; a stale lambda called from a later
+    // runProc would dereference a dead dialog.
+    ~MobileSettingsDialog() override { g_spinTick = nullptr; }
 
 private:
     MobileConf conf;
@@ -1071,7 +1364,11 @@ private:
     QPushButton *saveButton = nullptr;
     QPushButton *connectButton = nullptr;
     QPushButton *cancelButton = nullptr;
+    QPushButton *autoApnButton = nullptr;
     QLabel *resultLabel = nullptr;
+
+    QString busyMsg;
+    int spinFrame = 0;
 
     QLabel* mkLabel(const QString &txt)
     {
@@ -1082,14 +1379,111 @@ private:
 
     void showError(const QString &msg)
     {
+        clearBusy();
         resultLabel->setStyleSheet("font-size:24px; color:#FF5555; font-weight:bold;");
         resultLabel->setText("ERROR: " + msg);
     }
 
     void showOk(const QString &msg)
     {
+        clearBusy();
         resultLabel->setStyleSheet("font-size:24px; color:#7CFC00;");
         resultLabel->setText(msg);
+    }
+
+    // Same spinner as the setup log and wifi.cpp's Refresh button, on the
+    // line underneath the message.
+    void showBusy(const QString &msg)
+    {
+        busyMsg = msg;
+        spinFrame = 0;
+        resultLabel->setStyleSheet("font-size:24px; color:#66CCFF;");
+        resultLabel->setText(msg + "\n" + QString::fromUtf8(SPIN_FRAMES[0]));
+        g_spinTick = [this]() {
+            spinFrame = (spinFrame + 1) % SPIN_COUNT;
+            resultLabel->setText(busyMsg + "\n" + QString::fromUtf8(SPIN_FRAMES[spinFrame]));
+        };
+        QApplication::processEvents();
+    }
+
+    void clearBusy()
+    {
+        g_spinTick = nullptr;
+        busyMsg.clear();
+    }
+
+    // Fills the fields from the local provider database, keyed on the SIM's
+    // MCC/MNC. announce=false is the silent pass done when the dialog opens
+    // with no APN set yet.
+    void autoFillApn(bool announce)
+    {
+        QString opName;
+        showBusy("Loading APN settings for this SIM...");
+        QString opId = getOperatorId(&opName);
+
+        if (opId.isEmpty()) {
+            clearBusy();
+            if (announce)
+                showError("No operator id available from the SIM. The modem must be "
+                          "on and a SIM present before the APN can be looked up.");
+            return;
+        }
+
+        QString mcc, mnc;
+        if (!splitOperatorId(opId, mcc, mnc)) {
+            clearBusy();
+            if (announce)
+                showError("Could not read the network code from the SIM (got '" + opId + "').");
+            return;
+        }
+
+        QString provider, err;
+        QList<ApnEntry> list = lookupApns(mcc, mnc, &provider, &err);
+
+        // The database is a package, so if it is missing it can be fetched
+        // over WiFi. This is the only part of the lookup that touches the
+        // network, and it is not needed at all on a normal install.
+        if (list.isEmpty() && err == "missing-db") {
+            showBusy("Downloading the provider database over WiFi...");
+            int rc = 0;
+            runPriv("apt-get", {"install", "-y", "mobile-broadband-provider-info"}, 180000, &rc);
+            err.clear();
+            list = lookupApns(mcc, mnc, &provider, &err);
+
+            if (list.isEmpty() && err == "missing-db") {
+                clearBusy();
+                showError("The provider database is not installed and could not be "
+                          "downloaded. Connect to WiFi and try again, or enter the "
+                          "APN by hand - your operator publishes it.");
+                return;
+            }
+        }
+
+        clearBusy();
+
+        if (list.isEmpty()) {
+            if (!err.isEmpty() && err != "missing-db") {
+                showError(err);
+            } else if (announce) {
+                showError("No APN on file for " +
+                          (opName.isEmpty() ? ("network " + opId) : opName) +
+                          " (MCC " + mcc + ", MNC " + mnc + "). Enter it by hand.");
+            }
+            return;
+        }
+
+        const ApnEntry &e = list.first();
+        apnEdit->setText(e.apn);
+        userEdit->setText(e.user);
+        if (!e.pass.isEmpty())
+            passEdit->setText(e.pass);
+
+        QString who = provider.isEmpty() ? opName : provider;
+        QString msg = "APN set automatically for " + (who.isEmpty() ? opId : who) +
+                      ": " + e.apn;
+        if (list.size() > 1)
+            msg += QString("  (%1 profiles on file, first one used)").arg(list.size());
+        showOk(msg);
     }
 
     void unlockSim()
@@ -1106,6 +1500,7 @@ private:
             return;
         }
 
+        showBusy("Unlocking SIM...");
         int rc = 0;
         QString out = runPriv("mmcli",
                               {"-m", QString::number(idx), "--pin=" + pin},
@@ -1131,6 +1526,7 @@ private:
 
         saveMobileConf(conf);
 
+        showBusy("Saving mobile profile...");
         int rc = 0;
         QString log = applyMobileProfile(conf, passEdit->text(), &rc);
         if (rc != 0) {
@@ -1143,8 +1539,7 @@ private:
             return;
         }
 
-        showOk("Connecting...");
-        QApplication::processEvents();
+        showBusy("Connecting...");
 
         log = bringUpMobileProfile(&rc);
         if (rc != 0) {
@@ -1254,6 +1649,10 @@ public:
         timeLabel->setStyleSheet("font-size:26px; color:white;");
         infoLayout->addWidget(timeLabel);
 
+        ipLabel = new QLabel("IP address: ---", this);
+        ipLabel->setStyleSheet("font-size:26px; color:white;");
+        infoLayout->addWidget(ipLabel);
+
         // Persistent error line: written on failure, never auto-cleared.
         errorLabel = new QLabel("", this);
         errorLabel->setWordWrap(true);
@@ -1359,6 +1758,7 @@ private:
     QLabel *simLabel = nullptr;
     QLabel *carrierLabel = nullptr;
     QLabel *timeLabel = nullptr;
+    QLabel *ipLabel = nullptr;
     QLabel *errorLabel = nullptr;
 
     QPushButton *powerButton = nullptr;
@@ -1489,6 +1889,7 @@ private:
             simLabel->setText("SIM: no modem");
             carrierLabel->setText("No modem detected");
             timeLabel->setText("Connection time: N/A");
+            ipLabel->setText("IP address: -");
             if (!mmcliInstalled())
                 setError("mmcli is missing - the 'modemmanager' package is not installed.");
             busy = false;
@@ -1503,6 +1904,15 @@ private:
         simLabel->setText(getSimSummary(status));
         carrierLabel->setText(getCurrentCarrier(status));
         timeLabel->setText(getConnectionTime(status));
+
+        // Only query the address when there is a data session: getMobileIP()
+        // costs two nmcli calls and this runs every two seconds.
+        if (mmcliField(status, "state").startsWith("connected")) {
+            QString ip = getMobileIP();
+            ipLabel->setText("IP address: " + (ip.isEmpty() ? QString("-") : ip));
+        } else {
+            ipLabel->setText("IP address: -");
+        }
 
         busy = false;
     }
