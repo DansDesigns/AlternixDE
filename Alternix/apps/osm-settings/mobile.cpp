@@ -561,22 +561,33 @@ static void styleDialog(QDialog *d)
     // needs its own rule here; an unqualified "color:white" does not reach
     // them. QComboBox's popup is a separate top level window, so it needs
     // the QAbstractItemView rule as well.
+    //
+    // The family must be named concretely. Dialogs are parented to the main
+    // window, so they inherit the application font rather than the page
+    // font, and the family that was in use had no digit glyphs - fontconfig
+    // substituted a separate face for 0-9, which drew in its own colour and
+    // ignored every colour rule below. That is what made only the numbers
+    // grey. wifi.cpp avoids this by naming DejaVu Sans outright.
+    QFont df;
+    df.setFamily("DejaVu Sans");
+    d->setFont(df);
+
     d->setStyleSheet(
-        "QDialog { background:#282828; font-family:Sans; }"
-        "QWidget { background:#282828; font-family:Sans; }"
-        "QScrollArea { background:#282828; font-family:Sans; border:none; }"
-        "QLabel { color:white; background:transparent; font-family:Sans; }"
-        "QMessageBox QLabel { color:white; font-family:Sans; }"
-        "QLineEdit { background:#3a3a3a; color:white; font-family:Sans; "
+        "QDialog { background:#282828; font-family:'DejaVu Sans'; }"
+        "QWidget { background:#282828; font-family:'DejaVu Sans'; }"
+        "QScrollArea { background:#282828; font-family:'DejaVu Sans'; border:none; }"
+        "QLabel { color:white; background:transparent; font-family:'DejaVu Sans'; }"
+        "QMessageBox QLabel { color:white; font-family:'DejaVu Sans'; }"
+        "QLineEdit { background:#3a3a3a; color:white; font-family:'DejaVu Sans'; "
         "  border:1px solid #222222; border-radius:12px; font-size:26px; "
         "  padding:10px 14px; min-height:44px; }"
-        "QComboBox { background:#3a3a3a; color:white; font-family:Sans; "
+        "QComboBox { background:#3a3a3a; color:white; font-family:'DejaVu Sans'; "
         "  border:1px solid #222222; border-radius:12px; font-size:26px; "
         "  padding:10px 14px; min-height:44px; }"
         "QComboBox QAbstractItemView { background:#3a3a3a; color:white; "
-        "  font-family:Sans; font-size:26px; selection-background-color:#555555; "
+        "  font-family:'DejaVu Sans'; font-size:26px; selection-background-color:#555555; "
         "  selection-color:white; }"
-        "QTextEdit { background:#1e1e1e; color:white; font-family:Sans; "
+        "QTextEdit { background:#1e1e1e; color:white; font-family:'DejaVu Sans'; "
         "  border:1px solid #222222; border-radius:16px; font-size:22px; }"
     );
 }
@@ -634,10 +645,10 @@ private:
     bool ok = false;
     bool running = false;
 
-    void say(const QString &s)      { logView->append("<span style='color:#ffffff;'>" + s.toHtmlEscaped() + "</span>"); pump(); }
-    void good(const QString &s)     { logView->append("<span style='color:#7CFC00;'>OK: " + s.toHtmlEscaped() + "</span>"); pump(); }
-    void bad(const QString &s)      { logView->append("<span style='color:#FF5555; font-weight:bold;'>ERROR: " + s.toHtmlEscaped() + "</span>"); pump(); }
-    void warnLine(const QString &s) { logView->append("<span style='color:#FFC066;'>WARNING: " + s.toHtmlEscaped() + "</span>"); pump(); }
+    void say(const QString &s)      { logView->append("<span style=\"color:#ffffff; font-family:'DejaVu Sans';\">" + s.toHtmlEscaped() + "</span>"); pump(); }
+    void good(const QString &s)     { logView->append("<span style=\"color:#7CFC00; font-family:'DejaVu Sans';\">OK: " + s.toHtmlEscaped() + "</span>"); pump(); }
+    void bad(const QString &s)      { logView->append("<span style=\"color:#FF5555; font-weight:bold; font-family:'DejaVu Sans';\">ERROR: " + s.toHtmlEscaped() + "</span>"); pump(); }
+    void warnLine(const QString &s) { logView->append("<span style=\"color:#FFC066; font-family:'DejaVu Sans';\">WARNING: " + s.toHtmlEscaped() + "</span>"); pump(); }
 
     void pump()
     {
@@ -948,7 +959,7 @@ public:
         QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
         QWidget *body = new QWidget(scroll);
-        body->setStyleSheet("QWidget { background:#282828; font-family:Sans; }");
+        body->setStyleSheet("QWidget { background:#282828; font-family:'DejaVu Sans'; }");
         QVBoxLayout *v = new QVBoxLayout(body);
         v->setContentsMargins(10, 10, 10, 10);
         v->setSpacing(16);
@@ -1159,8 +1170,14 @@ public:
         // -------------------------------------------------
         // GLOBAL FONT FIX — identical to WiFi/Bluetooth
         // -------------------------------------------------
+        // GREY NUMBERS FIX - DO NOT REMOVE
+        // The family here must be DejaVu Sans, as wifi.cpp uses. "Noto Sans"
+        // resolved to a face with no digit glyphs on the target hardware, so
+        // fontconfig substituted a different font for 0-9 only. The
+        // substituted face renders its own colour and ignores the stylesheet,
+        // which is why letters were white and every number came out grey.
         QFont f;
-        f.setFamily("Noto Sans");
+        f.setFamily("DejaVu Sans");
         f.setPointSize(26);
         setFont(f);   // page-local: do NOT change the app-wide font
 
@@ -1174,10 +1191,10 @@ public:
         // labels inside its info frame.
         // -------------------------------------------------
         setStyleSheet(
-            "QScrollArea { background:#282828; font-family:Sans; border:none; }"
-            "QWidget { background:#282828; font-family:Sans; }"
-            "QLabel { color:white; background:transparent; font-family:Sans; }"
-            "QMessageBox QLabel { color:white; font-family:Sans; }"
+            "QScrollArea { background:#282828; font-family:'DejaVu Sans'; border:none; }"
+            "QWidget { background:#282828; font-family:'DejaVu Sans'; }"
+            "QLabel { color:white; background:transparent; font-family:'DejaVu Sans'; }"
+            "QMessageBox QLabel { color:white; font-family:'DejaVu Sans'; }"
         );
 
         QVBoxLayout *root = new QVBoxLayout(this);
