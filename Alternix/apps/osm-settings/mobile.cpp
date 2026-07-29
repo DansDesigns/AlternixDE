@@ -134,9 +134,9 @@ static QString runProc(const QString &prog, const QStringList &args,
 
 // Same look as smallBtnBT, but tall enough for two lines of 26px text.
 // QPushButton honours a literal \n in its text; "&&" renders as one "&".
-static QPushButton* twoLineBtnBT(const QString &txt) {
+static QPushButton* twoLineBtnBT(const QString &txt, int w = 240) {
     QPushButton *b = new QPushButton(txt);
-    b->setFixedSize(240, 104);
+    b->setFixedSize(w, 104);
     b->setStyleSheet(
         "QPushButton {"
         " background:#444444;"
@@ -460,6 +460,40 @@ static QString getOperatorId(QString *operatorName = nullptr)
     return (id == "--") ? QString() : id;
 }
 
+// Finds a working non-mobile connection to download over. Ethernet is
+// preferred over WiFi. Returns the device name, empty if nothing is up.
+static QString onlineNonMobileDevice(QString *typeOut)
+{
+    QString out = runPriv("nmcli", {"-t", "-f", "DEVICE,TYPE,STATE", "device", "status"}, 10000);
+
+    QString wifiDev;
+    const QStringList lines = out.split('\n');
+    for (const QString &line : lines) {
+        const QStringList f = line.split(':');
+        if (f.size() < 3) continue;
+
+        const QString dev   = f.at(0).trimmed();
+        const QString type  = f.at(1).trimmed();
+        const QString state = f.at(2).trimmed();
+
+        if (!state.startsWith("connected")) continue;
+
+        if (type == "ethernet") {
+            if (typeOut) *typeOut = "Ethernet";
+            return dev;                       // wired wins outright
+        }
+        if (type == "wifi" && wifiDev.isEmpty())
+            wifiDev = dev;
+    }
+
+    if (!wifiDev.isEmpty()) {
+        if (typeOut) *typeOut = "WiFi";
+        return wifiDev;
+    }
+
+    return QString();
+}
+
 static QList<ApnEntry> lookupApns(const QString &mcc, const QString &mnc,
                                   QString *providerOut, QString *errOut)
 {
@@ -546,7 +580,7 @@ static QList<ApnEntry> lookupApns(const QString &mcc, const QString &mnc,
 static QString setMobilePowered(bool on)
 {
     if (!modemAvailable())
-        return "No mobile adaptor found. Run Setup & SIM Setup first.";
+        return "No mobile adaptor found. Run Setup first.";
 
     QString before = modemState();
     if (before.startsWith("failed"))
@@ -721,6 +755,13 @@ static QString applyMobileProfile(const MobileConf &c, const QString &password, 
 
     if (exitCode) *exitCode = rc;
     return log;
+}
+
+static bool mobileProfileExists()
+{
+    int rc = 0;
+    runPriv("nmcli", {"-g", "connection.id", "connection", "show", NM_CON_NAME}, 15000, &rc);
+    return rc == 0;
 }
 
 static QString bringUpMobileProfile(int *exitCode)
@@ -1033,7 +1074,7 @@ private:
                 bad("No usable SIM. ModemManager reports: " + reason);
                 bad("Insert a SIM, or check it is seated the right way round and "
                     "that it is in the SIM tray rather than the microSD slot. "
-                    "Then run Setup & SIM Setup again.");
+                    "Then run Setup again.");
                 say("Nothing else can be configured until the modem sees a SIM.");
                 finish();
                 return;
@@ -1444,17 +1485,41 @@ private:
         // over WiFi. This is the only part of the lookup that touches the
         // network, and it is not needed at all on a normal install.
         if (list.isEmpty() && err == "missing-db") {
-            showBusy("Downloading the provider database over WiFi...");
+            QString linkType;
+            QString link = onlineNonMobileDevice(&linkType);
+
+            if (link.isEmpty()) {
+                clearBusy();
+                showError("The provider database is not installed, and there is no "
+                          "WiFi or Ethernet connection to download it over. Connect "
+                          "to WiFi first, or enter the APN by hand - your operator "
+                          "publishes it.");
+                return;
+            }
+
+            showBusy("Downloading the provider database over " + linkType +
+                     " (" + link + ")...");
+
             int rc = 0;
             runPriv("apt-get", {"install", "-y", "mobile-broadband-provider-info"}, 180000, &rc);
+
+            if (rc != 0) {
+                // Stale package lists are the usual cause on a fresh install.
+                showBusy("Refreshing package lists over " + linkType + "...");
+                runPriv("apt-get", {"update"}, 180000, &rc);
+                showBusy("Downloading the provider database over " + linkType + "...");
+                runPriv("apt-get", {"install", "-y", "mobile-broadband-provider-info"},
+                        180000, &rc);
+            }
+
             err.clear();
             list = lookupApns(mcc, mnc, &provider, &err);
 
             if (list.isEmpty() && err == "missing-db") {
                 clearBusy();
-                showError("The provider database is not installed and could not be "
-                          "downloaded. Connect to WiFi and try again, or enter the "
-                          "APN by hand - your operator publishes it.");
+                showError("The provider database could not be downloaded over " +
+                          linkType + ". Enter the APN by hand - your operator "
+                          "publishes it.");
                 return;
             }
         }
@@ -1496,7 +1561,7 @@ private:
 
         int idx = modemIndex();
         if (idx < 0) {
-            showError("No mobile adaptor found. Run Setup & SIM Setup first.");
+            showError("No mobile adaptor found. Run Setup first.");
             return;
         }
 
@@ -1696,12 +1761,15 @@ public:
         root->addLayout(btnsTop);
 
         QHBoxLayout *btnsBottom = new QHBoxLayout();
-        btnsBottom->setSpacing(40);
+        btnsBottom->setSpacing(20);
 
-        setupButton = twoLineBtnBT("Setup &&\nSIM Setup");
-        settingsButton = twoLineBtnBT("APN\nSettings");
+        // 190px each + 2x20 spacing + 80 margins = 690, inside the 720 limit.
+        setupButton    = twoLineBtnBT("Setup", 190);
+        connectButton  = twoLineBtnBT("Connect", 190);
+        settingsButton = twoLineBtnBT("APN\nSettings", 190);
 
         btnsBottom->addWidget(setupButton);
+        btnsBottom->addWidget(connectButton);
         btnsBottom->addWidget(settingsButton);
         root->addLayout(btnsBottom);
 
@@ -1727,6 +1795,7 @@ public:
         connect(powerButton, &QPushButton::clicked, this, &MobilePage::togglePower);
         connect(refreshButton, &QPushButton::clicked, this, &MobilePage::refreshInfo);
         connect(setupButton, &QPushButton::clicked, this, &MobilePage::openSetup);
+        connect(connectButton, &QPushButton::clicked, this, &MobilePage::connectMobile);
         connect(settingsButton, &QPushButton::clicked, this, &MobilePage::openSettings);
 
         connect(backButton, &QPushButton::clicked, this, [this]() {
@@ -1764,7 +1833,9 @@ private:
     QPushButton *powerButton = nullptr;
     QPushButton *refreshButton = nullptr;
     QPushButton *setupButton = nullptr;
+    QPushButton *connectButton = nullptr;
     QPushButton *settingsButton = nullptr;
+    int connectSpinFrame = 0;
 
     QTimer *refreshTimer = nullptr;
 
@@ -1823,6 +1894,65 @@ private:
             setError(err);
 
         // The button now follows the modem's real state, not the click.
+        refreshInfo();
+    }
+
+    void connectMobile()
+    {
+        if (busy) return;
+
+        if (!modemAvailable()) {
+            setError("No mobile adaptor found. Run Setup first.");
+            return;
+        }
+
+        if (!mobileProfileExists()) {
+            setError("No mobile profile yet. Open APN Settings and save one first - "
+                     "it can fill the APN in for you automatically.");
+            return;
+        }
+
+        busy = true;
+        refreshTimer->stop();
+
+        const QString label = connectButton->text();
+        connectButton->setEnabled(false);
+
+        // Spinner on the button itself while the session comes up, the same
+        // way wifi.cpp animates its Refresh button.
+        connectSpinFrame = 0;
+        connectButton->setText(QString::fromUtf8(SPIN_FRAMES[0]));
+        g_spinTick = [this]() {
+            connectSpinFrame = (connectSpinFrame + 1) % SPIN_COUNT;
+            connectButton->setText(QString::fromUtf8(SPIN_FRAMES[connectSpinFrame]));
+        };
+
+        // The data session cannot come up on a disabled modem.
+        QString err;
+        if (!isMobilePowered(modemStatus()))
+            err = setMobilePowered(true);
+
+        int rc = 0;
+        QString log;
+        if (err.isEmpty())
+            log = bringUpMobileProfile(&rc);
+
+        g_spinTick = nullptr;
+        connectButton->setText(label);
+        connectButton->setEnabled(true);
+        busy = false;
+        refreshTimer->start();
+
+        if (!err.isEmpty()) {
+            setError(err);
+        } else if (rc != 0) {
+            setError(log.trimmed().isEmpty()
+                         ? QString("Connect failed with no output from nmcli.")
+                         : log.trimmed());
+        } else {
+            errorLabel->setVisible(false);   // a successful connect clears the last failure
+        }
+
         refreshInfo();
     }
 
@@ -1897,7 +2027,7 @@ private:
         }
 
         if (towerList.isEmpty())
-            setTowerList({"Press Setup & SIM Setup to search for towers"});
+            setTowerList({"Press Setup to search for towers"});
         else
             setTowerList(towerList);
 
