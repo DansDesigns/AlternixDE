@@ -697,7 +697,6 @@ private slots:
     void doSleep() {
 
         QProcess::startDetached("osm-sudo", QStringList() << "pm-suspend");
-        QProcess::startDetached("osm-lockd", QStringList());
         close();
     }
 

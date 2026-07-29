@@ -21,9 +21,6 @@
 #include <QSettings>
 #include <QDir>
 #include <QRegularExpression>
-#include <QPalette>
-#include <QColor>
-#include <QAbstractItemView>
 
 // ---------------------------------------------------------
 // Constants
@@ -189,11 +186,17 @@ static QString mmcliField(const QString &out, const QString &key)
 }
 
 // Field name for the SIM path moved between mmcli releases.
+//
+// The bare "path" key must never be accepted on its own: `mmcli -m N` also
+// prints "General | path: /org/freedesktop/ModemManager1/Modem/0", which is
+// the modem's own object path. Matching that made a modem with no SIM look
+// as though a SIM were present. Only a value under /SIM/ counts.
 static QString mmcliSimPath(const QString &out)
 {
     QString p = mmcliField(out, "primary sim path");
     if (p.isEmpty()) p = mmcliField(out, "sim path");
     if (p.isEmpty()) p = mmcliField(out, "path");
+    if (!p.contains("/SIM", Qt::CaseInsensitive)) return QString();
     return p;
 }
 
@@ -551,63 +554,31 @@ static bool readMobileProfile(MobileConf &c)
 static void styleDialog(QDialog *d)
 {
     // GREY NUMBERS FIX - DO NOT REMOVE
-    // Dialog-local palette only, never qApp->setPalette(). Base/Text are set
-    // explicitly because QLineEdit and QComboBox draw their text through the
-    // palette, not through an inherited "color" property, and QComboBox's
-    // popup view is a separate top-level window that needs its own selector.
-    QPalette pal = d->palette();
-    pal.setColor(QPalette::WindowText, Qt::white);
-    pal.setColor(QPalette::Text, Qt::white);
-    pal.setColor(QPalette::ButtonText, Qt::white);
-    pal.setColor(QPalette::Base, QColor("#3a3a3a"));
-    pal.setColor(QPalette::Highlight, QColor("#555555"));
-    pal.setColor(QPalette::HighlightedText, Qt::white);
-    d->setPalette(pal);
-
+    // Same method as wifi.cpp: explicit class selectors in a stylesheet and
+    // NO palette manipulation anywhere. Setting a palette - on the app, on
+    // the dialog, or on individual input widgets - is what produced the grey
+    // text in the first place. Every widget class that draws its own text
+    // needs its own rule here; an unqualified "color:white" does not reach
+    // them. QComboBox's popup is a separate top level window, so it needs
+    // the QAbstractItemView rule as well.
     d->setStyleSheet(
-        "QDialog { background:#282828; }"
-        "QLabel { color:white; font-size:26px; }"
-        "QLineEdit { background:#3a3a3a; color:white; border:1px solid #222222; "
-        "  border-radius:12px; font-size:26px; padding:10px 14px; min-height:44px; }"
-        "QComboBox { background:#3a3a3a; color:white; border:1px solid #222222; "
-        "  border-radius:12px; font-size:26px; padding:10px 14px; min-height:44px; }"
+        "QDialog { background:#282828; font-family:Sans; }"
+        "QWidget { background:#282828; font-family:Sans; }"
+        "QScrollArea { background:#282828; font-family:Sans; border:none; }"
+        "QLabel { color:white; background:transparent; font-family:Sans; }"
+        "QMessageBox QLabel { color:white; font-family:Sans; }"
+        "QLineEdit { background:#3a3a3a; color:white; font-family:Sans; "
+        "  border:1px solid #222222; border-radius:12px; font-size:26px; "
+        "  padding:10px 14px; min-height:44px; }"
+        "QComboBox { background:#3a3a3a; color:white; font-family:Sans; "
+        "  border:1px solid #222222; border-radius:12px; font-size:26px; "
+        "  padding:10px 14px; min-height:44px; }"
         "QComboBox QAbstractItemView { background:#3a3a3a; color:white; "
-        "  selection-background-color:#555555; font-size:26px; }"
-        "QTextEdit { background:#1e1e1e; color:white; border:1px solid #222222; "
-        "  border-radius:16px; font-size:22px; }"
+        "  font-family:Sans; font-size:26px; selection-background-color:#555555; "
+        "  selection-color:white; }"
+        "QTextEdit { background:#1e1e1e; color:white; font-family:Sans; "
+        "  border:1px solid #222222; border-radius:16px; font-size:22px; }"
     );
-}
-
-// GREY NUMBERS FIX - DO NOT REMOVE
-// A palette set on the dialog does NOT reach the internal child widgets that
-// QLineEdit, QComboBox and QTextEdit construct for themselves - those are
-// built with their own palettes, which is why the text inside the input
-// fields stayed grey while the labels around them went white. The palette
-// has to be set on each input widget directly, and on the combo box's popup
-// view, which is a separate top-level window and inherits nothing.
-static void whiteText(QWidget *w)
-{
-    if (!w) return;
-
-    QPalette p = w->palette();
-    p.setColor(QPalette::Text, Qt::white);
-    p.setColor(QPalette::WindowText, Qt::white);
-    p.setColor(QPalette::ButtonText, Qt::white);
-    p.setColor(QPalette::Base, QColor("#3a3a3a"));
-    p.setColor(QPalette::Button, QColor("#3a3a3a"));
-    p.setColor(QPalette::Highlight, QColor("#555555"));
-    p.setColor(QPalette::HighlightedText, Qt::white);
-    w->setPalette(p);
-
-    if (QComboBox *cb = qobject_cast<QComboBox*>(w)) {
-        if (cb->view()) {
-            cb->view()->setPalette(p);
-            if (cb->view()->viewport())
-                cb->view()->viewport()->setPalette(p);
-        }
-        if (cb->lineEdit())
-            cb->lineEdit()->setPalette(p);
-    }
 }
 
 // ---------------------------------------------------------
@@ -635,7 +606,6 @@ public:
 
         logView = new QTextEdit(this);
         logView->setReadOnly(true);
-        whiteText(logView);
         v->addWidget(logView, 1);
 
         QHBoxLayout *row = new QHBoxLayout();
@@ -767,20 +737,40 @@ private:
             QString reason = modemFailReason(status);
             warnLine("The modem is in a failed state: " + reason);
 
-            // The user has no terminal, so recovery has to happen here.
-            // A failed modem almost always needs a reset; the SIM is
-            // re-read on the way back up.
+            // SIM FAILURE FIX - DO NOT REMOVE
+            // A reset cannot conjure a SIM. Resetting on sim-missing only
+            // dropped the modem off the bus and produced a misleading
+            // "modem did not come back" error on top of the real problem.
+            // SIM reasons are reported and the run stops here.
+            if (reason.contains("sim", Qt::CaseInsensitive)) {
+                bad("No usable SIM. ModemManager reports: " + reason);
+                bad("Insert a SIM, or check it is seated the right way round and "
+                    "that it is in the SIM tray rather than the microSD slot. "
+                    "Then run Setup & SIM Setup again.");
+                say("Nothing else can be configured until the modem sees a SIM.");
+                finish();
+                return;
+            }
+
+            // Non-SIM failure: a reset is worth one attempt. The user has no
+            // terminal, so it has to happen here.
             say("Resetting the modem...");
             runPriv("mmcli", {"-m", QString::number(idx), "--reset"}, 30000, &rc);
 
-            // The modem comes back on a new object path after a reset.
-            say("Waiting for the modem to come back...");
-            uiSleep(8000);
-            idx = detectModemIndex();
+            // The modem drops off the bus and re-enumerates on a new object
+            // path. That takes far longer than a single short sleep, so poll
+            // for it rather than checking once.
+            say("Waiting for the modem to come back (up to 45 seconds)...");
+            idx = -1;
+            for (int waited = 0; waited < 45000 && idx < 0; waited += 3000) {
+                uiSleep(3000);
+                idx = detectModemIndex();
+            }
 
             if (idx < 0) {
                 bad("The modem did not come back after the reset. Power the tablet "
                     "off fully (not suspend) and try again.");
+                say(runCmd("dmesg | tail -n 30 2>&1", 8000));
                 finish();
                 return;
             }
@@ -958,12 +948,7 @@ public:
         QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
         QWidget *body = new QWidget(scroll);
-        // Painted through the palette rather than an unqualified stylesheet:
-        // an unqualified rule here cascades into every child input widget.
-        body->setAutoFillBackground(true);
-        QPalette bodyPal = body->palette();
-        bodyPal.setColor(QPalette::Window, QColor("#282828"));
-        body->setPalette(bodyPal);
+        body->setStyleSheet("QWidget { background:#282828; font-family:Sans; }");
         QVBoxLayout *v = new QVBoxLayout(body);
         v->setContentsMargins(10, 10, 10, 10);
         v->setSpacing(16);
@@ -1020,15 +1005,6 @@ public:
         pinRow->addWidget(unlockButton, 0);
         v->addLayout(pinRow);
 
-        // GREY NUMBERS FIX - DO NOT REMOVE (see whiteText())
-        // Every input widget gets the palette applied directly. Inheriting
-        // it from the dialog is not enough for these classes.
-        whiteText(apnEdit);
-        whiteText(userEdit);
-        whiteText(passEdit);
-        whiteText(pinEdit);
-        whiteText(authBox);
-        whiteText(ipBox);
 
         resultLabel = new QLabel("", body);
         resultLabel->setWordWrap(true);
@@ -1190,28 +1166,18 @@ public:
 
         // -------------------------------------------------
         // GREY NUMBERS FIX - DO NOT REMOVE
-        // The palette is set on this page only. It must never be applied
-        // with qApp->setPalette(), which mutates the whole application from
-        // inside a plugin and leaves every other page's numbers grey. The
-        // stylesheet uses explicit class selectors for the same reason an
-        // unqualified "color:white" is not enough: it does not reliably
-        // reach the internal child widgets of QLineEdit / QComboBox /
-        // QTextEdit / QMessageBox, which is what makes digits come out grey.
-        // QLabel is given a transparent background so labels sitting on the
-        // #3a3a3a card do not paint the page colour behind themselves.
+        // Same method as wifi.cpp: explicit class selectors, no palette
+        // manipulation of any kind. Setting a palette from inside a plugin
+        // is what caused this bug originally. QLabel gets a transparent
+        // background so labels sitting on the #3a3a3a card do not paint the
+        // page colour behind themselves, matching how wifi.cpp styles the
+        // labels inside its info frame.
         // -------------------------------------------------
-        QPalette pal = palette();
-        pal.setColor(QPalette::WindowText, Qt::white);
-        pal.setColor(QPalette::Text, Qt::white);
-        pal.setColor(QPalette::ButtonText, Qt::white);
-        pal.setColor(QPalette::Base, QColor("#3a3a3a"));
-        setPalette(pal);
-
         setStyleSheet(
-            "QWidget { background:#282828; }"
-            "QScrollArea { background:#282828; border:none; }"
-            "QLabel { color:white; background:transparent; }"
-            "QMessageBox QLabel { color:white; background:transparent; }"
+            "QScrollArea { background:#282828; font-family:Sans; border:none; }"
+            "QWidget { background:#282828; font-family:Sans; }"
+            "QLabel { color:white; background:transparent; font-family:Sans; }"
+            "QMessageBox QLabel { color:white; font-family:Sans; }"
         );
 
         QVBoxLayout *root = new QVBoxLayout(this);
