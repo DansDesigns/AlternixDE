@@ -192,40 +192,7 @@ chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 
 
-echo "• Updating Wave Music Player.."
-cd ~
-sudo rm -r music_player
-git clone https://github.com/DansDesigns/music_player
-cd music_player
-chmod +x install_music_player.sh
-./install_music_player.sh
-
-
-echo "• Updating Ponder.."
-cd ~
-sudo rm -r Ponder
-git clone https://github.com/DansDesigns/Ponder
-cd Ponder
-chmod +x install.sh
-./install.sh
-
-
-# ──────────────────────────────────────────────── 
-# install rounded-corners
-# ────────────────────────────────────────────────
-echo " "
-
-echo "• Updating rounded-corners..."
-cd ~
-sudo rm -r rounded-corners
-git clone https://github.com/DansDesigns/rounded_corners
-cd rounded_corners
-chmod +x install_corners.sh
-sudo ./install_corners.sh
-
-
-
-echo "• Update & Install Complete."
+echo "• App Update & Install Complete."
 echo ""
 #===========================================================
 # Updater:
