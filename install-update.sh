@@ -39,7 +39,7 @@ echo "• Creating Ranger shortcut..."
 cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
 [Desktop Entry]
 Type=Application
-Name=Ranger
+Name=ranger
 Comment=Terminal File Manager for Alternix / OSM-Phone
 Exec=alacritty -e ranger
 Icon=ranger
@@ -53,7 +53,7 @@ echo "• Creating Volume Control shortcut..."
 cat <<EOF > "$HOME/.local/share/applications/pavucontrol.desktop"
 [Desktop Entry]
 Type=Application
-Name=Volume Control
+Name=Volume-Control
 Comment=Audio Mixer for Alternix / OSM-Phone
 Exec=pavucontrol
 Icon=pavucontrol
