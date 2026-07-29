@@ -414,6 +414,8 @@ struct ApnEntry {
     QString user;
     QString pass;
     QString name;
+    QString mmsc;        // <mmsc> in serviceproviders.xml
+    QString mmsProxy;    // <mmsproxy>
     bool    mmsOnly = false;
 };
 
@@ -551,6 +553,10 @@ static QList<ApnEntry> lookupApns(const QString &mcc, const QString &mnc,
                 if (inApn) cur.user = xml.readElementText().trimmed();
             } else if (n == QLatin1String("password")) {
                 if (inApn) cur.pass = xml.readElementText().trimmed();
+            } else if (n == QLatin1String("mmsc")) {
+                if (inApn) cur.mmsc = xml.readElementText().trimmed();
+            } else if (n == QLatin1String("mmsproxy")) {
+                if (inApn) cur.mmsProxy = xml.readElementText().trimmed();
             }
         } else if (xml.isEndElement()) {
             const QStringRef n = xml.name();
@@ -660,8 +666,11 @@ static QString settingsPath()
 struct MobileConf {
     QString apn;
     QString user;
-    QString auth;      // auto | pap | chap
-    QString iptype;    // ipv4 | ipv6 | ipv4v6
+    QString auth;       // auto | pap | chap
+    QString iptype;     // ipv4 | ipv6 | ipv4v6
+    QString mmsc;       // MMSC URL
+    QString mmsProxy;   // MMS proxy, host or host:port
+    QString apnType;    // Android style: default | default,mms | mms | ...
     bool    roaming = true;
 };
 
@@ -672,9 +681,12 @@ static MobileConf loadMobileConf()
     MobileConf c;
     c.apn     = s.value("APN", "").toString();
     c.user    = s.value("Username", "").toString();
-    c.auth    = s.value("AuthType", "auto").toString();
-    c.iptype  = s.value("IPType", "ipv4v6").toString();
-    c.roaming = s.value("Roaming", true).toBool();
+    c.auth     = s.value("AuthType", "auto").toString();
+    c.iptype   = s.value("IPType", "ipv4v6").toString();
+    c.mmsc     = s.value("MMSC", "").toString();
+    c.mmsProxy = s.value("MMSProxy", "").toString();
+    c.apnType  = s.value("APNType", "default").toString();
+    c.roaming  = s.value("Roaming", true).toBool();
     s.endGroup();
     return c;
 }
@@ -687,6 +699,9 @@ static void saveMobileConf(const MobileConf &c)
     s.setValue("Username", c.user);
     s.setValue("AuthType", c.auth);
     s.setValue("IPType", c.iptype);
+    s.setValue("MMSC", c.mmsc);
+    s.setValue("MMSProxy", c.mmsProxy);
+    s.setValue("APNType", c.apnType);
     s.setValue("Roaming", c.roaming);
     s.endGroup();
     s.sync();
@@ -752,6 +767,32 @@ static QString applyMobileProfile(const MobileConf &c, const QString &password, 
 
     log += "> nmcli connection add type gsm apn=" + c.apn + "\n";
     log += runPriv("nmcli", args, 20000, &rc);
+
+    // MMSC, MMS proxy and APN type have no native property in NetworkManager's
+    // gsm setting - NM only carries the data APN. They are kept in
+    // osm-settings.conf, and also attached to the profile as namespaced
+    // user.data so an MMS daemon or messaging app can find them without
+    // having to know about Alternix's config file. Added one at a time
+    // rather than as a comma joined list, because an MMSC URL that contained
+    // a comma would otherwise split into two bogus entries.
+    if (rc == 0) {
+        struct { const char *key; QString val; } extras[] = {
+            { "org.alternix.mmsc",     c.mmsc     },
+            { "org.alternix.mmsproxy", c.mmsProxy },
+            { "org.alternix.apntype",  c.apnType  },
+        };
+
+        for (const auto &e : extras) {
+            if (e.val.trimmed().isEmpty()) continue;
+            int erc = 0;
+            runPriv("nmcli",
+                    {"connection", "modify", NM_CON_NAME,
+                     "+user.data", QString("%1=%2").arg(e.key).arg(e.val.trimmed())},
+                    15000, &erc);
+            if (erc != 0)
+                log += QString("note: could not attach %1 to the profile\n").arg(e.key);
+        }
+    }
 
     if (exitCode) *exitCode = rc;
     return log;
@@ -1306,6 +1347,25 @@ public:
         pwRow->addWidget(showPassButton, 0);
         v->addLayout(pwRow);
 
+        v->addWidget(mkLabel("MMSC"));
+        mmscEdit = new QLineEdit(conf.mmsc, body);
+        mmscEdit->setPlaceholderText("e.g. http://mms.example.com/mms/wapenc");
+        v->addWidget(mmscEdit);
+
+        v->addWidget(mkLabel("MMS proxy"));
+        mmsProxyEdit = new QLineEdit(conf.mmsProxy, body);
+        mmsProxyEdit->setPlaceholderText("host, or host:port");
+        v->addWidget(mmsProxyEdit);
+
+        v->addWidget(mkLabel("APN type"));
+        apnTypeBox = new QComboBox(body);
+        apnTypeBox->addItem("Internet only", "default");
+        apnTypeBox->addItem("Internet and MMS", "default,mms");
+        apnTypeBox->addItem("MMS only", "mms");
+        apnTypeBox->addItem("Internet, MMS and SUPL", "default,mms,supl");
+        apnTypeBox->setCurrentIndex(qMax(0, apnTypeBox->findData(conf.apnType)));
+        v->addWidget(apnTypeBox);
+
         v->addWidget(mkLabel("Authentication"));
         authBox = new QComboBox(body);
         authBox->addItem("Automatic", "auto");
@@ -1397,6 +1457,9 @@ private:
     QLineEdit *userEdit = nullptr;
     QLineEdit *passEdit = nullptr;
     QLineEdit *pinEdit = nullptr;
+    QLineEdit *mmscEdit = nullptr;
+    QLineEdit *mmsProxyEdit = nullptr;
+    QComboBox *apnTypeBox = nullptr;
     QComboBox *authBox = nullptr;
     QComboBox *ipBox = nullptr;
     QPushButton *roamButton = nullptr;
@@ -1543,9 +1606,30 @@ private:
         if (!e.pass.isEmpty())
             passEdit->setText(e.pass);
 
+        // MMS details may live on the same entry, or on a separate MMS-only
+        // APN. Either way the values are worth filling in, but the APN type
+        // is only "default,mms" when this APN really does carry both.
+        QString mmsFrom;
+        if (!e.mmsc.isEmpty()) {
+            mmscEdit->setText(e.mmsc);
+            mmsProxyEdit->setText(e.mmsProxy);
+            apnTypeBox->setCurrentIndex(qMax(0, apnTypeBox->findData("default,mms")));
+        } else {
+            for (const ApnEntry &m : list) {
+                if (m.mmsc.isEmpty()) continue;
+                mmscEdit->setText(m.mmsc);
+                mmsProxyEdit->setText(m.mmsProxy);
+                mmsFrom = m.apn;
+                break;
+            }
+            apnTypeBox->setCurrentIndex(qMax(0, apnTypeBox->findData("default")));
+        }
+
         QString who = provider.isEmpty() ? opName : provider;
         QString msg = "APN set automatically for " + (who.isEmpty() ? opId : who) +
                       ": " + e.apn;
+        if (!mmsFrom.isEmpty())
+            msg += "  MMS details taken from this operator's separate '" + mmsFrom + "' APN.";
         if (list.size() > 1)
             msg += QString("  (%1 profiles on file, first one used)").arg(list.size());
         showOk(msg);
@@ -1579,10 +1663,13 @@ private:
 
     void apply(bool alsoConnect)
     {
-        conf.apn    = apnEdit->text().trimmed();
-        conf.user   = userEdit->text().trimmed();
-        conf.auth   = authBox->currentData().toString();
-        conf.iptype = ipBox->currentData().toString();
+        conf.apn      = apnEdit->text().trimmed();
+        conf.user     = userEdit->text().trimmed();
+        conf.auth     = authBox->currentData().toString();
+        conf.iptype   = ipBox->currentData().toString();
+        conf.mmsc     = mmscEdit->text().trimmed();
+        conf.mmsProxy = mmsProxyEdit->text().trimmed();
+        conf.apnType  = apnTypeBox->currentData().toString();
 
         if (conf.apn.isEmpty()) {
             showError("APN cannot be empty. Your network operator supplies this value.");
