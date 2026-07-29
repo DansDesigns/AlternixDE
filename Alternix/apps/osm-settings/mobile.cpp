@@ -23,6 +23,7 @@
 #include <QRegularExpression>
 #include <QPalette>
 #include <QColor>
+#include <QAbstractItemView>
 
 // ---------------------------------------------------------
 // Constants
@@ -95,7 +96,21 @@ static QString runProc(const QString &prog, const QStringList &args,
     }
 
     if (exitCode) *exitCode = p.exitCode();
-    return QString::fromUtf8(p.readAll());
+
+    QString out = QString::fromUtf8(p.readAll());
+
+    // ANSI FIX - DO NOT REMOVE
+    // mmcli colourises its output even when stdout is a pipe, so a parsed
+    // field comes back as "\033[31mfailed\033[0m" rather than "failed".
+    // Every startsWith("failed") / startsWith("connected") test against a
+    // parsed value silently returned false because the string actually
+    // begins with an escape sequence, which is why state gating did nothing
+    // and the on/off button never reflected the modem. It also puts raw
+    // escape codes in the setup log. Stripped centrally, for every command.
+    static const QRegularExpression ansiRe("\\x1B\\[[0-9;?]*[ -/]*[@-~]");
+    out.remove(ansiRe);
+
+    return out;
 }
 
 // Same look as smallBtnBT, but tall enough for two lines of 26px text.
@@ -281,7 +296,8 @@ static QString modemState()
 static QString modemFailReason(const QString &status)
 {
     QString r = mmcliField(status, "failed reason");
-    if (r.isEmpty()) r = mmcliField(status, "power state");
+    if (r.isEmpty()) r = mmcliField(status, "state failed reason");
+    if (r.isEmpty() || r == "--") r = "no reason reported";
     return r;
 }
 
@@ -562,6 +578,38 @@ static void styleDialog(QDialog *d)
     );
 }
 
+// GREY NUMBERS FIX - DO NOT REMOVE
+// A palette set on the dialog does NOT reach the internal child widgets that
+// QLineEdit, QComboBox and QTextEdit construct for themselves - those are
+// built with their own palettes, which is why the text inside the input
+// fields stayed grey while the labels around them went white. The palette
+// has to be set on each input widget directly, and on the combo box's popup
+// view, which is a separate top-level window and inherits nothing.
+static void whiteText(QWidget *w)
+{
+    if (!w) return;
+
+    QPalette p = w->palette();
+    p.setColor(QPalette::Text, Qt::white);
+    p.setColor(QPalette::WindowText, Qt::white);
+    p.setColor(QPalette::ButtonText, Qt::white);
+    p.setColor(QPalette::Base, QColor("#3a3a3a"));
+    p.setColor(QPalette::Button, QColor("#3a3a3a"));
+    p.setColor(QPalette::Highlight, QColor("#555555"));
+    p.setColor(QPalette::HighlightedText, Qt::white);
+    w->setPalette(p);
+
+    if (QComboBox *cb = qobject_cast<QComboBox*>(w)) {
+        if (cb->view()) {
+            cb->view()->setPalette(p);
+            if (cb->view()->viewport())
+                cb->view()->viewport()->setPalette(p);
+        }
+        if (cb->lineEdit())
+            cb->lineEdit()->setPalette(p);
+    }
+}
+
 // ---------------------------------------------------------
 // Setup & scan dialog
 // ---------------------------------------------------------
@@ -587,6 +635,7 @@ public:
 
         logView = new QTextEdit(this);
         logView->setReadOnly(true);
+        whiteText(logView);
         v->addWidget(logView, 1);
 
         QHBoxLayout *row = new QHBoxLayout();
@@ -615,7 +664,7 @@ private:
     bool ok = false;
     bool running = false;
 
-    void say(const QString &s)      { logView->append("<span style='color:#dddddd;'>" + s.toHtmlEscaped() + "</span>"); pump(); }
+    void say(const QString &s)      { logView->append("<span style='color:#ffffff;'>" + s.toHtmlEscaped() + "</span>"); pump(); }
     void good(const QString &s)     { logView->append("<span style='color:#7CFC00;'>OK: " + s.toHtmlEscaped() + "</span>"); pump(); }
     void bad(const QString &s)      { logView->append("<span style='color:#FF5555; font-weight:bold;'>ERROR: " + s.toHtmlEscaped() + "</span>"); pump(); }
     void warnLine(const QString &s) { logView->append("<span style='color:#FFC066;'>WARNING: " + s.toHtmlEscaped() + "</span>"); pump(); }
@@ -715,11 +764,49 @@ private:
             say("SIM operator: " + simOp);
 
         if (state.startsWith("failed")) {
-            bad("The modem is in a failed state: " + modemFailReason(status) +
-                ". Nothing else can be done until that clears - usually a SIM or "
-                "firmware problem, or the card needs a power cycle.");
-            finish();
-            return;
+            QString reason = modemFailReason(status);
+            warnLine("The modem is in a failed state: " + reason);
+
+            // The user has no terminal, so recovery has to happen here.
+            // A failed modem almost always needs a reset; the SIM is
+            // re-read on the way back up.
+            say("Resetting the modem...");
+            runPriv("mmcli", {"-m", QString::number(idx), "--reset"}, 30000, &rc);
+
+            // The modem comes back on a new object path after a reset.
+            say("Waiting for the modem to come back...");
+            uiSleep(8000);
+            idx = detectModemIndex();
+
+            if (idx < 0) {
+                bad("The modem did not come back after the reset. Power the tablet "
+                    "off fully (not suspend) and try again.");
+                finish();
+                return;
+            }
+
+            good(QString("Modem is back at index %1.").arg(idx));
+            status = modemStatus();
+            state  = mmcliField(status, "state");
+            say("State after reset: " + state);
+
+            if (state.startsWith("failed")) {
+                QString r2 = modemFailReason(status);
+                bad("Still failed after a reset: " + r2 + ".");
+                if (r2.contains("sim", Qt::CaseInsensitive))
+                    bad("That reason points at the SIM. Check the SIM is seated the "
+                        "right way round in the tray, and that the tray is the SIM "
+                        "slot and not the microSD slot.");
+                else
+                    bad("This is a firmware or hardware fault in the WWAN card, not a "
+                        "settings problem. The card may need its firmware package "
+                        "installed, or re-seating.");
+                say(runCmd("dmesg | tail -n 30 2>&1", 8000));
+                finish();
+                return;
+            }
+
+            good("Reset cleared the failed state.");
         }
 
         // 5. enable the modem
@@ -871,7 +958,12 @@ public:
         QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
         QWidget *body = new QWidget(scroll);
-        body->setStyleSheet("background:#282828;");
+        // Painted through the palette rather than an unqualified stylesheet:
+        // an unqualified rule here cascades into every child input widget.
+        body->setAutoFillBackground(true);
+        QPalette bodyPal = body->palette();
+        bodyPal.setColor(QPalette::Window, QColor("#282828"));
+        body->setPalette(bodyPal);
         QVBoxLayout *v = new QVBoxLayout(body);
         v->setContentsMargins(10, 10, 10, 10);
         v->setSpacing(16);
@@ -927,6 +1019,16 @@ public:
         pinRow->addWidget(pinEdit, 1);
         pinRow->addWidget(unlockButton, 0);
         v->addLayout(pinRow);
+
+        // GREY NUMBERS FIX - DO NOT REMOVE (see whiteText())
+        // Every input widget gets the palette applied directly. Inheriting
+        // it from the dialog is not enough for these classes.
+        whiteText(apnEdit);
+        whiteText(userEdit);
+        whiteText(passEdit);
+        whiteText(pinEdit);
+        whiteText(authBox);
+        whiteText(ipBox);
 
         resultLabel = new QLabel("", body);
         resultLabel->setWordWrap(true);
@@ -987,7 +1089,7 @@ private:
     QLabel* mkLabel(const QString &txt)
     {
         QLabel *l = new QLabel(txt, this);
-        l->setStyleSheet("font-size:24px; color:#cccccc;");
+        l->setStyleSheet("font-size:24px; color:#ffffff; background:transparent;");
         return l;
     }
 
