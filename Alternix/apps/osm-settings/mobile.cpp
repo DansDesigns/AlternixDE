@@ -21,6 +21,8 @@
 #include <QSettings>
 #include <QDir>
 #include <QRegularExpression>
+#include <QPalette>
+#include <QColor>
 
 // ---------------------------------------------------------
 // Constants
@@ -94,6 +96,28 @@ static QString runProc(const QString &prog, const QStringList &args,
 
     if (exitCode) *exitCode = p.exitCode();
     return QString::fromUtf8(p.readAll());
+}
+
+// Same look as smallBtnBT, but tall enough for two lines of 26px text.
+// QPushButton honours a literal \n in its text; "&&" renders as one "&".
+static QPushButton* twoLineBtnBT(const QString &txt) {
+    QPushButton *b = new QPushButton(txt);
+    b->setFixedSize(240, 104);
+    b->setStyleSheet(
+        "QPushButton {"
+        " background:#444444;"
+        " color:white;"
+        " border:1px solid #222222;"
+        " border-radius:16px;"
+        " font-size:26px;"
+        " font-weight:bold;"
+        " padding:8px 12px;"
+        " text-align:center;"
+        "}"
+        "QPushButton:hover { background:#555555; }"
+        "QPushButton:pressed { background:#333333; }"
+    );
+    return b;
 }
 
 static QString runCmd(const QString &cmd, int timeoutMs = 10000, int *exitCode = nullptr)
@@ -247,14 +271,89 @@ static QString getSimSummary(const QString &status)
     return "SIM: present";
 }
 
-static void setMobilePowered(bool on)
+static QString modemState()
 {
-    if (!modemAvailable()) return;
+    return mmcliField(modemStatus(), "state");
+}
 
-    runPriv("mmcli",
-            {QString("-m"), QString::number(g_modemIndex),
-             on ? QString("--enable") : QString("--disable")},
-            20000);
+// ModemManager reports a failure reason when state == failed. Without this
+// the caller only sees "wrong state" and has nothing to act on.
+static QString modemFailReason(const QString &status)
+{
+    QString r = mmcliField(status, "failed reason");
+    if (r.isEmpty()) r = mmcliField(status, "power state");
+    return r;
+}
+
+// Sleep without freezing the UI.
+static void uiSleep(int ms)
+{
+    QEventLoop loop;
+    QTimer t;
+    t.setSingleShot(true);
+    QObject::connect(&t, &QTimer::timeout, &loop, &QEventLoop::quit);
+    t.start(ms);
+    loop.exec();
+}
+
+// --enable/--disable return before the modem has finished the transition.
+// Poll until the state is one we can act on, or until timeout.
+// Returns the final state.
+static QString waitForState(const QStringList &wanted, int timeoutMs)
+{
+    int waited = 0;
+    QString st = modemState();
+
+    while (waited < timeoutMs) {
+        for (const QString &w : wanted)
+            if (st.startsWith(w)) return st;
+        if (st.startsWith("failed")) return st;
+
+        uiSleep(500);
+        waited += 500;
+        st = modemState();
+    }
+
+    return st;
+}
+
+// Returns an empty string on success, or a human-readable error.
+static QString setMobilePowered(bool on)
+{
+    if (!modemAvailable())
+        return "No mobile adaptor found. Run Setup & SIM Setup first.";
+
+    QString before = modemState();
+    if (before.startsWith("failed"))
+        return "The modem is in a failed state (" + modemFailReason(modemStatus()) +
+               "). It cannot be turned on until that is cleared.";
+
+    if (on && before.startsWith("locked"))
+        return "The SIM is locked. Enter the PIN in APN Settings first.";
+
+    int rc = 0;
+    QString out = runPriv("mmcli",
+                          {QString("-m"), QString::number(g_modemIndex),
+                           on ? QString("--enable") : QString("--disable")},
+                          20000, &rc);
+
+    if (rc != 0 && !out.contains("successfully", Qt::CaseInsensitive))
+        return out.trimmed().isEmpty()
+                   ? QString("mmcli --%1 failed with no output.").arg(on ? "enable" : "disable")
+                   : out.trimmed();
+
+    // Wait for the transition to actually happen, otherwise the caller
+    // reads the old state back and the button appears to do nothing.
+    QString st = on ? waitForState({"enabled", "searching", "registered", "connected"}, 15000)
+                    : waitForState({"disabled"}, 10000);
+
+    if (st.startsWith("failed"))
+        return "The modem entered a failed state (" + modemFailReason(modemStatus()) + ").";
+
+    if (on && (st.startsWith("disabled") || st.startsWith("enabling")))
+        return "The modem did not come up (state is still '" + st + "').";
+
+    return QString();
 }
 
 // ---------------------------------------------------------
@@ -435,6 +534,20 @@ static bool readMobileProfile(MobileConf &c)
 
 static void styleDialog(QDialog *d)
 {
+    // GREY NUMBERS FIX - DO NOT REMOVE
+    // Dialog-local palette only, never qApp->setPalette(). Base/Text are set
+    // explicitly because QLineEdit and QComboBox draw their text through the
+    // palette, not through an inherited "color" property, and QComboBox's
+    // popup view is a separate top-level window that needs its own selector.
+    QPalette pal = d->palette();
+    pal.setColor(QPalette::WindowText, Qt::white);
+    pal.setColor(QPalette::Text, Qt::white);
+    pal.setColor(QPalette::ButtonText, Qt::white);
+    pal.setColor(QPalette::Base, QColor("#3a3a3a"));
+    pal.setColor(QPalette::Highlight, QColor("#555555"));
+    pal.setColor(QPalette::HighlightedText, Qt::white);
+    d->setPalette(pal);
+
     d->setStyleSheet(
         "QDialog { background:#282828; }"
         "QLabel { color:white; font-size:26px; }"
@@ -591,7 +704,7 @@ private:
 
         if (state.startsWith("locked")) {
             QString lock = mmcliField(status, "lock");
-            bad("SIM is locked (" + lock + "). Enter the PIN in Data Settings, then run setup again.");
+            bad("SIM is locked (" + lock + "). Enter the PIN in APN Settings, then run setup again.");
             finish();
             return;
         }
@@ -601,30 +714,98 @@ private:
         if (!simOp.isEmpty() && simOp != "--")
             say("SIM operator: " + simOp);
 
+        if (state.startsWith("failed")) {
+            bad("The modem is in a failed state: " + modemFailReason(status) +
+                ". Nothing else can be done until that clears - usually a SIM or "
+                "firmware problem, or the card needs a power cycle.");
+            finish();
+            return;
+        }
+
         // 5. enable the modem
-        say("Enabling modem...");
-        QString out = runPriv("mmcli", {"-m", QString::number(idx), "--enable"}, 30000, &rc);
-        if (rc != 0 && !out.contains("successfully", Qt::CaseInsensitive))
-            warnLine("Enable returned an error: " + out.trimmed());
-        else
-            good("Modem enabled.");
+        //
+        // WRONG STATE FIX - DO NOT REMOVE
+        // ModemManager rejects an operation that does not suit the modem's
+        // current state with Core.Error.WrongState. Two things caused it here:
+        // --enable being issued while the modem was already enabled, and
+        // --3gpp-register-home / --3gpp-scan being issued in the gap after
+        // --enable returned but before the modem had actually finished
+        // enabling. Every state changing call below is now gated on the real
+        // state, and the code waits for the transition rather than assuming it.
+        say("Enabling modem (state: " + state + ")...");
+
+        if (state.startsWith("enabled") || state.startsWith("searching") ||
+            state.startsWith("registered") || state.startsWith("connected")) {
+            good("Modem is already enabled - skipping.");
+        } else {
+            QString out = runPriv("mmcli", {"-m", QString::number(idx), "--enable"}, 30000, &rc);
+            if (rc != 0 && !out.contains("successfully", Qt::CaseInsensitive)) {
+                if (out.contains("WrongState", Qt::CaseInsensitive))
+                    warnLine("Modem refused --enable in state '" + state + "'. Continuing.");
+                else
+                    warnLine("Enable returned an error: " + out.trimmed());
+            } else {
+                good("Enable accepted - waiting for the modem to come up...");
+            }
+        }
+
+        state = waitForState({"enabled", "searching", "registered", "connected"}, 20000);
+        say("Modem state is now: " + state);
+
+        if (state.startsWith("failed")) {
+            bad("The modem failed while enabling: " + modemFailReason(modemStatus()));
+            finish();
+            return;
+        }
+
+        if (state.startsWith("disabled") || state.startsWith("enabling")) {
+            bad("The modem never reached the enabled state (stuck at '" + state +
+                "'). Registration and scanning cannot run from here.");
+            finish();
+            return;
+        }
 
         // 6. automatic network selection (home network / automatic registration)
-        say("Selecting network automatically...");
-        out = runPriv("mmcli", {"-m", QString::number(idx), "--3gpp-register-home"}, 60000, &rc);
-        if (rc != 0 && !out.contains("successfully", Qt::CaseInsensitive))
-            warnLine("Automatic registration returned an error: " + out.trimmed());
-        else
-            good("Automatic network selection requested.");
+        QString out;
+        if (state.startsWith("registered") || state.startsWith("connected")) {
+            good("Already registered - automatic selection not needed.");
+        } else {
+            say("Selecting network automatically...");
+            out = runPriv("mmcli", {"-m", QString::number(idx), "--3gpp-register-home"}, 60000, &rc);
+            if (rc != 0 && !out.contains("successfully", Qt::CaseInsensitive)) {
+                if (out.contains("WrongState", Qt::CaseInsensitive))
+                    warnLine("Modem is not ready for registration yet (state '" + state +
+                             "'). It will normally register on its own once it finds a network.");
+                else
+                    warnLine("Automatic registration returned an error: " + out.trimmed());
+            } else {
+                good("Automatic network selection requested.");
+            }
+            state = waitForState({"registered", "connected"}, 30000);
+        }
 
         status = modemStatus();
         QString carrier = mmcliField(status, "operator name");
         if (!carrier.isEmpty() && carrier != "--")
             good("Registered on: " + carrier);
         else
-            warnLine("Not registered on any network yet - the scan below may take a minute.");
+            warnLine("Not registered on any network yet - signal may be weak, or the "
+                     "SIM may not be provisioned for this network.");
 
         // 7. tower scan (slow - this is why it is behind a button)
+        //
+        // A manual scan is only legal once the modem is enabled, and many
+        // modems refuse it outright while a data session is up.
+        if (state.startsWith("connected")) {
+            warnLine("Skipping the tower scan: the modem has an active data connection "
+                     "and most modems refuse a manual scan in that state. Turn mobile "
+                     "data off first if you need the tower list.");
+            ok = true;
+            say("Setup finished.");
+            finish();
+            return;
+        }
+
         say("Scanning for towers - this can take up to 2 minutes...");
         out = runPriv("mmcli",
                       {"--timeout=180", "-m", QString::number(idx), "--3gpp-scan"},
@@ -632,7 +813,12 @@ private:
 
         foundTowers = parseScan(out);
         if (foundTowers.isEmpty()) {
-            warnLine("No towers reported. Some modems refuse a manual scan while connected.");
+            if (out.contains("WrongState", Qt::CaseInsensitive))
+                warnLine("The modem refused the scan in state '" + modemState() + "'.");
+            else if (out.contains("Unsupported", Qt::CaseInsensitive))
+                warnLine("This modem does not support scanning for towers.");
+            else
+                warnLine("No towers reported: " + out.trimmed());
         } else {
             good(QString("%1 network(s) found:").arg(foundTowers.size()));
             for (const QString &t : foundTowers)
@@ -640,7 +826,7 @@ private:
         }
 
         ok = true;
-        say("Setup finished. Set your APN in Data Settings if mobile data does not connect.");
+        say("Setup finished. Set your APN in APN Settings if mobile data does not connect.");
         finish();
     }
 
@@ -673,7 +859,7 @@ public:
         outer->setContentsMargins(30, 30, 30, 30);
         outer->setSpacing(20);
 
-        QLabel *t = new QLabel("Mobile data settings", this);
+        QLabel *t = new QLabel("APN Settings", this);
         t->setStyleSheet("font-size:34px; color:white; font-weight:bold;");
         t->setAlignment(Qt::AlignCenter);
         outer->addWidget(t);
@@ -827,7 +1013,7 @@ private:
 
         int idx = modemIndex();
         if (idx < 0) {
-            showError("No mobile adaptor found. Run Setup & Scan first.");
+            showError("No mobile adaptor found. Run Setup & SIM Setup first.");
             return;
         }
 
@@ -900,7 +1086,31 @@ public:
         f.setPointSize(26);
         setFont(f);   // page-local: do NOT change the app-wide font
 
-        setStyleSheet("background:#282828;");
+        // -------------------------------------------------
+        // GREY NUMBERS FIX - DO NOT REMOVE
+        // The palette is set on this page only. It must never be applied
+        // with qApp->setPalette(), which mutates the whole application from
+        // inside a plugin and leaves every other page's numbers grey. The
+        // stylesheet uses explicit class selectors for the same reason an
+        // unqualified "color:white" is not enough: it does not reliably
+        // reach the internal child widgets of QLineEdit / QComboBox /
+        // QTextEdit / QMessageBox, which is what makes digits come out grey.
+        // QLabel is given a transparent background so labels sitting on the
+        // #3a3a3a card do not paint the page colour behind themselves.
+        // -------------------------------------------------
+        QPalette pal = palette();
+        pal.setColor(QPalette::WindowText, Qt::white);
+        pal.setColor(QPalette::Text, Qt::white);
+        pal.setColor(QPalette::ButtonText, Qt::white);
+        pal.setColor(QPalette::Base, QColor("#3a3a3a"));
+        setPalette(pal);
+
+        setStyleSheet(
+            "QWidget { background:#282828; }"
+            "QScrollArea { background:#282828; border:none; }"
+            "QLabel { color:white; background:transparent; }"
+            "QMessageBox QLabel { color:white; background:transparent; }"
+        );
 
         QVBoxLayout *root = new QVBoxLayout(this);
         root->setContentsMargins(40, 40, 40, 40);
@@ -940,6 +1150,7 @@ public:
         infoLayout->addWidget(vlabel);
 
         visibleTowerContainer = new QWidget(infoCard);
+        visibleTowerContainer->setStyleSheet("background:transparent;");
         visibleTowerLayout = new QVBoxLayout(visibleTowerContainer);
         visibleTowerLayout->setContentsMargins(10, 0, 10, 0);
         visibleTowerLayout->setSpacing(10);
@@ -1003,8 +1214,8 @@ public:
         QHBoxLayout *btnsBottom = new QHBoxLayout();
         btnsBottom->setSpacing(40);
 
-        setupButton = smallBtnBT("Setup && Scan");
-        settingsButton = smallBtnBT("Data Settings");
+        setupButton = twoLineBtnBT("Setup &&\nSIM Setup");
+        settingsButton = twoLineBtnBT("APN\nSettings");
 
         btnsBottom->addWidget(setupButton);
         btnsBottom->addWidget(settingsButton);
@@ -1112,10 +1323,21 @@ private:
         if (busy) return;
         busy = true;
 
-        mobilePowered = !mobilePowered;
-        setMobilePowered(mobilePowered);
+        bool want = !mobilePowered;
 
+        powerButton->setText(want ? "Turning\non..." : "Turning\noff...");
+        powerButton->setEnabled(false);
+        QApplication::processEvents();
+
+        QString err = setMobilePowered(want);
+
+        powerButton->setEnabled(true);
         busy = false;
+
+        if (!err.isEmpty())
+            setError(err);
+
+        // The button now follows the modem's real state, not the click.
         refreshInfo();
     }
 
@@ -1189,7 +1411,7 @@ private:
         }
 
         if (towerList.isEmpty())
-            setTowerList({"Press Setup & Scan to search for towers"});
+            setTowerList({"Press Setup & SIM Setup to search for towers"});
         else
             setTowerList(towerList);
 
