@@ -379,24 +379,76 @@ static QString mobileDevice()
     return QString();
 }
 
-static QString getMobileIP()
+// What the interface has, and what the modem thinks it handed over.
+// These disagreeing is the whole point of the struct: a 169.254.x.x on the
+// interface while the bearer holds a real address is a specific, diagnosable
+// fault, not just "no IP".
+struct MobileIpInfo {
+    QString address;        // address actually on the interface
+    QString bearerAddr;     // address the modem says the carrier assigned
+    QString bearerMethod;   // static / dhcp / ppp
+    QString iface;
+    bool    linkLocal = false;
+};
+
+static bool isLinkLocalV4(const QString &ip)
 {
+    return ip.startsWith("169.254.");
+}
+
+// The bearer is the live data session. `mmcli -m N` lists its path.
+static QString mobileBearerPath(const QString &status)
+{
+    QString paths = mmcliField(status, "paths");
+    if (paths.isEmpty() || paths == "--") return QString();
+    QString first = paths.split(',').value(0).trimmed();
+    return first.contains("/Bearer") ? first : QString();
+}
+
+static MobileIpInfo getMobileIpInfo()
+{
+    MobileIpInfo info;
+
+    QString status = modemStatus();
+    QString bearer = mobileBearerPath(status);
+
+    if (!bearer.isEmpty()) {
+        QString b = runPriv("mmcli", {"-b", bearer}, 15000);
+        info.iface        = mmcliField(b, "interface");
+        info.bearerMethod = mmcliField(b, "method");
+        QString addr      = mmcliField(b, "address");
+        if (!addr.isEmpty() && addr != "--")
+            info.bearerAddr = addr;
+    }
+
+    // What NetworkManager has actually put on the device.
     QString dev = mobileDevice();
     if (!dev.isEmpty()) {
         QString out = runPriv("nmcli", {"-g", "IP4.ADDRESS", "device", "show", dev}, 10000);
         QString ip = out.split('\n').value(0).trimmed();
         if (!ip.isEmpty() && ip != "--") {
-            int slash = ip.indexOf('/');          // strip the /24
-            return slash > 0 ? ip.left(slash) : ip;
+            int slash = ip.indexOf('/');
+            info.address = slash > 0 ? ip.left(slash) : ip;
         }
+        if (info.iface.isEmpty()) info.iface = dev;
     }
 
-    // Fallback: the modem's data interface is usually wwanN / wwpNsM.
-    // Matched by name explicitly - a bare "first non-loopback address"
-    // would happily report the WiFi address as the mobile one.
-    return runCmd("ip -o -4 addr show 2>/dev/null "
-                  "| awk '$2 ~ /^(wwan|wwp|cdc-wdm|mhi)/ {print $4}' "
-                  "| cut -d/ -f1 | head -n1", 8000).trimmed();
+    if (info.address.isEmpty()) {
+        // Fallback: match modem interfaces by name. A bare "first
+        // non-loopback address" would report the WiFi address as the
+        // mobile one.
+        info.address = runCmd("ip -o -4 addr show 2>/dev/null "
+                              "| awk '$2 ~ /^(wwan|wwp|cdc-wdm|mhi)/ {print $4}' "
+                              "| cut -d/ -f1 | head -n1", 8000).trimmed();
+    }
+
+    info.linkLocal = isLinkLocalV4(info.address);
+    return info;
+}
+
+static QString getMobileIP()
+{
+    return getMobileIpInfo().address;
 }
 
 // ---------------------------------------------------------
@@ -1777,9 +1829,9 @@ public:
         title1->setAlignment(Qt::AlignCenter);
         infoLayout->addWidget(title1);
 
-        QLabel *vlabel = new QLabel("Visible towers:", this);
-        vlabel->setStyleSheet("font-size:26px; color:white;");
-        infoLayout->addWidget(vlabel);
+        towersHeading = new QLabel("Visible towers:", this);
+        towersHeading->setStyleSheet("font-size:26px; color:white;");
+        infoLayout->addWidget(towersHeading);
 
         visibleTowerContainer = new QWidget(infoCard);
         visibleTowerContainer->setStyleSheet("background:transparent;");
@@ -1911,6 +1963,7 @@ private:
     QWidget *visibleTowerContainer = nullptr;
     QVBoxLayout *visibleTowerLayout = nullptr;
 
+    QLabel *towersHeading = nullptr;
     QLabel *simLabel = nullptr;
     QLabel *carrierLabel = nullptr;
     QLabel *timeLabel = nullptr;
@@ -2091,6 +2144,62 @@ private:
         }
     }
 
+    void clearInfoPanel()
+    {
+        towersHeading->setVisible(false);
+        setTowerList({});
+        simLabel->setText("");
+        carrierLabel->setText("");
+        timeLabel->setText("");
+        ipLabel->setText("");
+        towerList.clear();   // a scan from a previous session is stale
+    }
+
+    // A 169.254.x.x address is not a working connection. NetworkManager
+    // falls back to link-local when nothing assigns an address, so showing
+    // it as though it were the mobile IP would be a lie. When the modem's
+    // bearer holds a real address and the interface does not, that gap is
+    // the actual fault and is reported as such.
+    void updateIpLabel(const MobileIpInfo &info)
+    {
+        if (!info.address.isEmpty() && !info.linkLocal) {
+            ipLabel->setText("IP address: " + info.address);
+            return;
+        }
+
+        if (info.linkLocal) {
+            ipLabel->setText("IP address: " + info.address + "   (link-local, not usable)");
+        } else if (!info.bearerAddr.isEmpty()) {
+            ipLabel->setText("IP address: " + info.bearerAddr + "   (from modem, not applied)");
+        } else {
+            ipLabel->setText("IP address: -");
+            return;
+        }
+
+        QString msg = "The data session is up but the interface has no usable address.";
+
+        if (!info.bearerAddr.isEmpty()) {
+            msg += " The modem was assigned " + info.bearerAddr;
+            if (!info.bearerMethod.isEmpty() && info.bearerMethod != "--")
+                msg += " with method '" + info.bearerMethod + "'";
+            if (!info.iface.isEmpty())
+                msg += " on " + info.iface;
+            msg += ", but that address never reached the interface.";
+
+            if (info.bearerMethod.startsWith("static"))
+                msg += " The bearer is static, so nothing will arrive over DHCP - "
+                       "the modem hands the address over directly. On these cards "
+                       "that usually means the interface is in 802.3 mode when the "
+                       "modem is sending raw IP.";
+        } else {
+            msg += " The modem did not report an address for the bearer either, "
+                   "which points at the APN being wrong or not authorised for "
+                   "this SIM.";
+        }
+
+        setError(msg);
+    }
+
     void refreshInfo()
     {
         if (busy) return;
@@ -2113,6 +2222,15 @@ private:
             return;
         }
 
+        // Mobile data off: nothing in the panel is meaningful, so show
+        // nothing rather than stale values from the last session.
+        if (!mobilePowered) {
+            clearInfoPanel();
+            busy = false;
+            return;
+        }
+
+        towersHeading->setVisible(true);
         if (towerList.isEmpty())
             setTowerList({"Press Setup to search for towers"});
         else
@@ -2122,11 +2240,10 @@ private:
         carrierLabel->setText(getCurrentCarrier(status));
         timeLabel->setText(getConnectionTime(status));
 
-        // Only query the address when there is a data session: getMobileIP()
-        // costs two nmcli calls and this runs every two seconds.
+        // Only query the address when there is a data session: the lookup
+        // costs several calls and this runs every two seconds.
         if (mmcliField(status, "state").startsWith("connected")) {
-            QString ip = getMobileIP();
-            ipLabel->setText("IP address: " + (ip.isEmpty() ? QString("-") : ip));
+            updateIpLabel(getMobileIpInfo());
         } else {
             ipLabel->setText("IP address: -");
         }
