@@ -913,9 +913,9 @@ private:
             QString qsrc = "'" + QString(src).replace("'", "'\\''") + "'";
             QString qdst = "'" + QString(dest + "/" + name).replace("'", "'\\''") + "'";
 
-            // cp -a, not a Qt copy loop: cursor themes are mostly
-            // symlinks (150 aliases per Oreo theme) and QFile::copy
-            // would dereference every one of them.
+            // cp -a, not a Qt copy loop: cursor themes are largely
+            // symlinks (87 of the 148 entries in an Oreo theme) and
+            // QFile::copy would dereference every one of them.
             QProcess cp;
             cp.start("sh", QStringList() << "-c"
                 << QString("rm -rf %1 && mkdir -p %1 && cp -a %2/. %1/").arg(qdst, qsrc));

@@ -29,7 +29,7 @@ echo "[Config] Updating Grub Entry.."
 sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 sudo update-grub
 
-sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info -y
+sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info ruby inkscape x11-apps -y
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
