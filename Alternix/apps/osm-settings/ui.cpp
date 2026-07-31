@@ -17,6 +17,14 @@
 #include <QFont>
 #include <QScreen>
 #include <QGuiApplication>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QTemporaryDir>
+#include <QImage>
+#include <QPixmap>
+#include <QMap>
+#include <QPair>
+#include <algorithm>
 
 // -----------------------------------------------------
 // Config path (shared with other settings modules)
@@ -152,6 +160,123 @@ static QString soundsSubDir(const QString &sub)
 }
 
 // -----------------------------------------------------
+// Cursor themes
+// -----------------------------------------------------
+// The same folders libXcursor itself searches, in the same order, so
+// what the picker lists is exactly what the system can actually use.
+// ~/.icons comes first: a user-installed theme shadows a system one
+// of the same name, which is also how libXcursor resolves it.
+static QStringList cursorSearchDirs()
+{
+    return QStringList()
+        << QDir::homePath() + "/.icons"
+        << "/usr/local/share/icons"
+        << "/usr/share/icons";
+}
+
+// A folder is a cursor theme if it holds a non-empty cursors/ subfolder.
+// index.theme alone is not enough — plain icon themes have one too.
+static bool isCursorTheme(const QString &dir)
+{
+    QDir c(dir + "/cursors");
+    return c.exists() &&
+           !c.entryList(QDir::Files | QDir::System | QDir::NoDotAndDotDot).isEmpty();
+}
+
+// Absolute path of an installed theme, or empty if it isn't installed.
+static QString cursorThemeDir(const QString &name)
+{
+    if (name.isEmpty()) return QString();
+    for (const QString &base : cursorSearchDirs()) {
+        QString full = base + "/" + name;
+        if (isCursorTheme(full)) return full;
+    }
+    return QString();
+}
+
+// Human-readable name out of index.theme ("Oreo Blue Cursors"), falling
+// back to the folder name. 19 folders called oreo_*_cursors are useless
+// to pick between otherwise.
+static QString cursorThemeLabel(const QString &dir)
+{
+    QFile f(dir + "/index.theme");
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!f.atEnd()) {
+            QString line = QString::fromUtf8(f.readLine()).trimmed();
+            if (line.startsWith("Name=", Qt::CaseInsensitive))
+                return line.mid(5).trimmed();
+        }
+    }
+    return QFileInfo(dir).fileName();
+}
+
+static inline quint32 xcursorU32(const QByteArray &b, int off)
+{
+    if (off < 0 || off + 4 > b.size()) return 0;
+    const uchar *p = reinterpret_cast<const uchar *>(b.constData()) + off;
+    return quint32(p[0])        | (quint32(p[1]) << 8)
+         | (quint32(p[2]) << 16) | (quint32(p[3]) << 24);
+}
+
+// Minimal Xcursor reader — just enough to pull the largest still frame
+// out of a theme's left_ptr for the preview swatch.
+//
+// Xcursor layout: "Xcur" magic, then a table of chunks; image chunks
+// (type 0xfffd0002) carry a 36-byte header followed by raw
+// premultiplied ARGB32 little-endian pixels — which is bit-for-bit
+// QImage::Format_ARGB32_Premultiplied, so no conversion is needed.
+static QPixmap cursorThemePreview(const QString &themeDir, int px)
+{
+    static const char *candidates[] = { "left_ptr", "default", "arrow", nullptr };
+
+    QString path;
+    for (int i = 0; candidates[i]; ++i) {
+        QString p = themeDir + "/cursors/" + QString::fromLatin1(candidates[i]);
+        if (QFile::exists(p)) { path = p; break; }
+    }
+    if (path.isEmpty()) return QPixmap();
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QPixmap();
+    QByteArray b = f.read(8 * 1024 * 1024);     // cursors are ~50 KB; cap anyway
+    f.close();
+
+    if (b.size() < 16 || xcursorU32(b, 0) != 0x72756358u) return QPixmap();  // "Xcur"
+    quint32 ntoc = xcursorU32(b, 12);
+    if (ntoc == 0 || ntoc > 4096) return QPixmap();
+
+    // Pick the biggest nominal size available — sharpest swatch.
+    quint32 bestPos = 0, bestSize = 0;
+    for (quint32 i = 0; i < ntoc; ++i) {
+        int e = 16 + int(i) * 12;
+        if (e + 12 > b.size()) return QPixmap();
+        if (xcursorU32(b, e) != 0xfffd0002u) continue;      // not an image chunk
+        quint32 nominal = xcursorU32(b, e + 4);
+        if (nominal >= bestSize) { bestSize = nominal; bestPos = xcursorU32(b, e + 8); }
+    }
+    if (bestPos == 0 || int(bestPos) + 36 > b.size()) return QPixmap();
+
+    quint32 w = xcursorU32(b, int(bestPos) + 16);
+    quint32 h = xcursorU32(b, int(bestPos) + 20);
+    if (w == 0 || h == 0 || w > 512 || h > 512) return QPixmap();
+
+    int need = int(w) * int(h) * 4;
+    // mid() hands back a fresh, correctly aligned buffer — QImage needs
+    // 32-bit alignment and the chunk offset gives no such guarantee.
+    QByteArray pix = b.mid(int(bestPos) + 36, need);
+    if (pix.size() != need) return QPixmap();
+
+    QImage img(reinterpret_cast<const uchar *>(pix.constData()),
+               int(w), int(h), int(w) * 4,
+               QImage::Format_ARGB32_Premultiplied);
+    if (img.isNull()) return QPixmap();
+
+    // copy() before pix goes out of scope — QImage does not own the data.
+    return QPixmap::fromImage(img.copy())
+               .scaled(px, px, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+}
+
+// -----------------------------------------------------
 // UIPage
 // -----------------------------------------------------
 class UIPage : public QWidget
@@ -202,6 +327,9 @@ public:
         // ── Wallpaper shortcut ──────────────────────────
         outerLay->addWidget(makeWallpaperCard());
 
+        // ── Mouse cursor ────────────────────────────────
+        outerLay->addWidget(makeCursorCard());
+
         // ── Login sound (was "Boot Sound", moved from Sound page) ──
         outerLay->addWidget(makeLoginSoundCard());
 
@@ -232,6 +360,11 @@ private:
     QLabel  *m_launcherFontPreview  = nullptr;
     QSlider *m_settingsFontSlider   = nullptr;
     QSlider *m_launcherFontSlider   = nullptr;
+
+    QComboBox *m_cursorCombo    = nullptr;
+    QLabel    *m_cursorPreview  = nullptr;
+    QLabel    *m_cursorStatus   = nullptr;
+    bool       m_cursorLoading  = false;   // suppress apply while populating
 
     // Font size range: 14pt–36pt, stored as integer point size
     static constexpr int FONT_MIN = 14;
@@ -504,6 +637,317 @@ private:
             "Notification Sound", "Sound/NotificationSound", "notifications", "notify",
             "Used for notifications that don't set their own sound. "
             "Files are read from ~/.config/Alternix/sounds/notifications/");
+    }
+
+    // ── Mouse cursor card ───────────────────────────────
+    // Lists "Default" plus every cursor theme actually installed
+    // (the Oreo set the installer unpacks into /usr/share/icons, and
+    // anything the user imports into ~/.icons), and can import more
+    // from a .tar.*/.zip archive.
+    QWidget *makeCursorCard()
+    {
+        QFrame *card = new QFrame;
+        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+
+        QVBoxLayout *lay = new QVBoxLayout(card);
+        lay->setContentsMargins(30, 24, 30, 24);
+        lay->setSpacing(16);
+
+        QLabel *lbl = new QLabel("Mouse Cursor", card);
+        lbl->setStyleSheet("font-size:30px; font-weight:bold;");
+        lbl->setAlignment(Qt::AlignCenter);
+        lay->addWidget(lbl);
+
+        QHBoxLayout *row = new QHBoxLayout();
+        row->setSpacing(16);
+
+        m_cursorPreview = new QLabel(card);
+        m_cursorPreview->setFixedSize(60, 60);
+        m_cursorPreview->setAlignment(Qt::AlignCenter);
+        m_cursorPreview->setStyleSheet(
+            "background:#3a3a3a; color:#888888; font-size:22px;"
+            " border:1px solid #222222; border-radius:16px;");
+
+        m_cursorCombo = new QComboBox(card);
+        m_cursorCombo->setStyleSheet(comboStyle());
+        m_cursorCombo->setFixedHeight(60);
+        m_cursorCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        row->addWidget(m_cursorPreview);
+        row->addWidget(m_cursorCombo, 1);
+        lay->addLayout(row);
+
+        populateCursorCombo();
+
+        QPushButton *importBtn = new QPushButton("Install from Archive…", card);
+        importBtn->setStyleSheet(uiBtnBright());
+        importBtn->setMinimumHeight(54);
+        lay->addWidget(importBtn);
+
+        QLabel *note = new QLabel(
+            "Themes are read from ~/.icons and /usr/share/icons. Imported "
+            "archives are installed to ~/.icons. Apps that are already open "
+            "keep their old cursor until they are restarted.", card);
+        note->setStyleSheet("font-size:18px; color:#aaaaaa;");
+        note->setWordWrap(true);
+        lay->addWidget(note);
+
+        m_cursorStatus = new QLabel(QString(), card);
+        m_cursorStatus->setStyleSheet("font-size:18px; color:#ff6b6b;");
+        m_cursorStatus->setWordWrap(true);
+        m_cursorStatus->setVisible(false);
+        lay->addWidget(m_cursorStatus);
+
+        connect(m_cursorCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) {
+                if (m_cursorLoading) return;
+                applyCursorTheme(m_cursorCombo->currentData().toString());
+            });
+
+        connect(importBtn, &QPushButton::clicked, this, [this]() {
+            importCursorArchive();
+        });
+
+        return card;
+    }
+
+    // Errors stay on screen once shown — a cursor that silently failed
+    // to apply is exactly the kind of thing that must not be cleared.
+    void cursorError(const QString &msg)
+    {
+        if (!m_cursorStatus) return;
+        QString existing = m_cursorStatus->text();
+        m_cursorStatus->setText(existing.isEmpty() ? msg : existing + "\n" + msg);
+        m_cursorStatus->setVisible(true);
+    }
+
+    void populateCursorCombo()
+    {
+        if (!m_cursorCombo) return;
+
+        m_cursorLoading = true;
+        m_cursorCombo->clear();
+        m_cursorCombo->addItem("Default (system cursor)", QString());
+
+        QMap<QString, QString> found;   // folder name -> absolute path
+        for (const QString &base : cursorSearchDirs()) {
+            QDir d(base);
+            if (!d.exists()) continue;
+            const QStringList subs =
+                d.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+            for (const QString &sub : subs) {
+                // "default" is our own redirect stub, not a real theme
+                if (sub == "default") continue;
+                if (found.contains(sub)) continue;      // earlier dir wins
+                QString full = d.absoluteFilePath(sub);
+                if (isCursorTheme(full)) found.insert(sub, full);
+            }
+        }
+
+        // Sort on the display label so the Oreo colours group together
+        QList<QPair<QString, QString> > items;   // label, folder name
+        for (QMap<QString, QString>::const_iterator it = found.constBegin();
+             it != found.constEnd(); ++it)
+            items.append(qMakePair(cursorThemeLabel(it.value()), it.key()));
+
+        std::sort(items.begin(), items.end(),
+                  [](const QPair<QString, QString> &a,
+                     const QPair<QString, QString> &b) {
+                      return a.first.localeAwareCompare(b.first) < 0;
+                  });
+
+        for (int i = 0; i < items.size(); ++i)
+            m_cursorCombo->addItem(items.at(i).first, items.at(i).second);
+
+        QString saved = m_settings->value("UI/CursorTheme").toString();
+        if (!saved.isEmpty()) {
+            int idx = m_cursorCombo->findData(saved);
+            if (idx >= 0) m_cursorCombo->setCurrentIndex(idx);
+        }
+
+        m_cursorLoading = false;
+        updateCursorPreview();
+    }
+
+    void updateCursorPreview()
+    {
+        if (!m_cursorPreview || !m_cursorCombo) return;
+
+        QString dir = cursorThemeDir(m_cursorCombo->currentData().toString());
+        QPixmap pm  = dir.isEmpty() ? QPixmap() : cursorThemePreview(dir, 40);
+
+        if (pm.isNull()) {
+            m_cursorPreview->setPixmap(QPixmap());
+            m_cursorPreview->setText("—");
+        } else {
+            m_cursorPreview->setText(QString());
+            m_cursorPreview->setPixmap(pm);
+        }
+    }
+
+    void applyCursorTheme(const QString &name)
+    {
+        m_settings->setValue("UI/CursorTheme", name);
+        m_settings->sync();
+
+        // ~/.icons/default/index.theme is the file libXcursor actually
+        // reads. Every toolkit resolves the theme named "default"
+        // through it, so this one file covers Qt, GTK and plain X11
+        // apps with no environment variable and no session restart.
+        QString defDir = QDir::homePath() + "/.icons/default";
+        QString idx    = defDir + "/index.theme";
+
+        if (name.isEmpty()) {
+            // Back to whatever the system would have used on its own
+            QFile::remove(idx);
+            QDir().rmdir(defDir);          // only succeeds if now empty
+            updateCursorPreview();
+            return;
+        }
+
+        if (!QDir().mkpath(defDir)) {
+            cursorError("Could not create " + defDir + " — cursor not changed.");
+            return;
+        }
+
+        QFile f(idx);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            cursorError("Could not write " + idx + " — " + f.errorString());
+            return;
+        }
+        f.write(QString("[Icon Theme]\n"
+                        "Name=Default\n"
+                        "Comment=Alternix cursor selection\n"
+                        "Inherits=%1\n").arg(name).toUtf8());
+        f.close();
+
+        // Repaint the root window immediately so the change is visible
+        // straight away rather than only after the next login.
+        QString dir = cursorThemeDir(name);
+        if (!dir.isEmpty()) {
+            QString ptr = dir + "/cursors/left_ptr";
+            if (QFile::exists(ptr)) {
+                QString q = "'" + ptr.replace("'", "'\\''") + "'";
+                QProcess::startDetached("sh", QStringList() << "-c"
+                    << QString("xsetroot -xcf %1 24 2>/dev/null").arg(q));
+            }
+        }
+
+        updateCursorPreview();
+    }
+
+    // ── Import a theme from .tar.gz / .tar.xz / .tar.bz2 / .tar / .zip ──
+    // Everything lands in ~/.icons, so this needs no root and no
+    // polkit prompt.
+    void importCursorArchive()
+    {
+        QString file = QFileDialog::getOpenFileName(
+            this, "Select a cursor theme archive", QDir::homePath(),
+            "Cursor themes (*.tar.gz *.tgz *.tar.xz *.tar.bz2 *.tar *.zip)"
+            ";;All files (*)");
+        if (file.isEmpty()) return;
+
+        QTemporaryDir tmp;
+        if (!tmp.isValid()) {
+            cursorError("Could not create a temporary folder to unpack into.");
+            return;
+        }
+
+        QString qf = "'" + QString(file).replace("'", "'\\''") + "'";
+        QString qd = "'" + QString(tmp.path()).replace("'", "'\\''") + "'";
+
+        // Unpack into the temp folder first: nothing touches ~/.icons
+        // until we have confirmed the archive really holds a cursor theme.
+        QString cmd = file.endsWith(".zip", Qt::CaseInsensitive)
+            ? QString("unzip -q -o %1 -d %2").arg(qf, qd)
+            : QString("tar -xf %1 -C %2").arg(qf, qd);
+
+        QProcess p;
+        p.start("sh", QStringList() << "-c" << cmd);
+        if (!p.waitForFinished(180000) || p.exitStatus() != QProcess::NormalExit
+            || p.exitCode() != 0) {
+            QString detail = QString::fromUtf8(p.readAllStandardError()).trimmed();
+            cursorError("Could not unpack " + QFileInfo(file).fileName() +
+                        (detail.isEmpty() ? QString() : " — " + detail));
+            return;
+        }
+
+        QStringList themes;
+        if (isCursorTheme(tmp.path())) {
+            // Archive had cursors/ at the top level with no theme folder
+            // around it — name it after the archive.
+            themes << tmp.path();
+        } else {
+            collectCursorThemes(tmp.path(), themes, 0);
+        }
+
+        if (themes.isEmpty()) {
+            cursorError("No cursor theme in " + QFileInfo(file).fileName() +
+                        " — the archive must contain a folder with a "
+                        "cursors/ subfolder inside it.");
+            return;
+        }
+
+        QString dest = QDir::homePath() + "/.icons";
+        if (!QDir().mkpath(dest)) {
+            cursorError("Could not create " + dest);
+            return;
+        }
+
+        QString firstInstalled;
+        int installed = 0;
+        for (int i = 0; i < themes.size(); ++i) {
+            QString src  = themes.at(i);
+            QString name = (src == tmp.path())
+                ? QFileInfo(file).completeBaseName()
+                : QFileInfo(src).fileName();
+
+            // Paranoia before an rm -rf: fileName()/completeBaseName()
+            // already strip any path, but an empty name here would
+            // expand to "rm -rf ~/.icons/".
+            if (name.isEmpty() || name == "." || name == "..") {
+                cursorError("Skipped a theme with an unusable folder name.");
+                continue;
+            }
+
+            QString qsrc = "'" + QString(src).replace("'", "'\\''") + "'";
+            QString qdst = "'" + QString(dest + "/" + name).replace("'", "'\\''") + "'";
+
+            // cp -a, not a Qt copy loop: cursor themes are mostly
+            // symlinks (150 aliases per Oreo theme) and QFile::copy
+            // would dereference every one of them.
+            QProcess cp;
+            cp.start("sh", QStringList() << "-c"
+                << QString("rm -rf %1 && mkdir -p %1 && cp -a %2/. %1/").arg(qdst, qsrc));
+            if (cp.waitForFinished(180000) && cp.exitCode() == 0) {
+                if (firstInstalled.isEmpty()) firstInstalled = name;
+                ++installed;
+            } else {
+                cursorError("Could not install theme '" + name + "' into " + dest);
+            }
+        }
+
+        if (installed == 0) return;
+
+        populateCursorCombo();
+        int idx = m_cursorCombo->findData(firstInstalled);
+        if (idx >= 0) m_cursorCombo->setCurrentIndex(idx);   // applies it
+    }
+
+    // Themes usually sit one level down (archive/<theme>/cursors), but
+    // some archives nest deeper. Bounded depth so a pathological archive
+    // cannot spin here.
+    static void collectCursorThemes(const QString &dir, QStringList &out, int depth)
+    {
+        if (depth > 3) return;
+        QDir d(dir);
+        const QStringList subs =
+            d.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QString &sub : subs) {
+            QString full = d.absoluteFilePath(sub);
+            if (isCursorTheme(full)) out << full;
+            else collectCursorThemes(full, out, depth + 1);
+        }
     }
 
     // ── Wallpaper shortcut card ─────────────────────────
