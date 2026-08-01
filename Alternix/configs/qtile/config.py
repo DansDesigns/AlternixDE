@@ -69,6 +69,7 @@ def autostart():
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['touchegg'])
+    subprocess.Popen(['osm-widgets'])
 
 
     # Function to update the time
