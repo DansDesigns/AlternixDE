@@ -12,6 +12,7 @@
 #include <QSettings>
 #include <QDir>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QFile>
 #include <QApplication>
 #include <QFont>
@@ -124,6 +125,42 @@ static QString sliderStyle()
         "}"
         "QSlider::handle:horizontal:pressed {"
         "   background:#e0e0e0;"
+        "}"
+        // Disabled state has to be explicit too — without these the
+        // stylesheet keeps painting an enabled-looking slider.
+        "QSlider::sub-page:horizontal:disabled {"
+        "   background:#555555;"
+        "}"
+        "QSlider::handle:horizontal:disabled {"
+        "   background:#999999;"
+        "}";
+}
+
+// -----------------------------------------------------
+// Check box style (touch-sized indicator)
+// -----------------------------------------------------
+static QString checkStyle()
+{
+    return
+        "QCheckBox {"
+        "   color:white;"
+        "   font-size:24px;"
+        "   spacing:16px;"
+        "   background:transparent;"
+        "}"
+        "QCheckBox::indicator {"
+        "   width:34px;"
+        "   height:34px;"
+        "   border-radius:8px;"
+        "   border:2px solid #888888;"
+        "   background:#3a3a3a;"
+        "}"
+        "QCheckBox::indicator:checked {"
+        "   background:#4aa3ff;"
+        "   border:2px solid #4aa3ff;"
+        "}"
+        "QCheckBox::indicator:pressed {"
+        "   background:#2e7fd0;"
         "}";
 }
 
@@ -386,6 +423,8 @@ private:
     QLabel    *m_cursorStatus   = nullptr;
     QSlider   *m_cursorSizeSlider  = nullptr;
     QLabel    *m_cursorSizeValue   = nullptr;
+    QCheckBox   *m_cursorSizeEnable  = nullptr;
+    QPushButton *m_cursorSizeDefault = nullptr;
     bool       m_cursorLoading  = false;   // suppress apply while populating
 
     // Font size range: 14pt–36pt, stored as integer point size
@@ -405,6 +444,11 @@ private:
     static constexpr int CURSOR_MIN = 16;
     static constexpr int CURSOR_MAX = 96;
     static constexpr int CURSOR_DEF = 32;   // X default is 24; 32 suits tablets
+
+    // What libXcursor falls back to when no Xcursor.size resource exists.
+    // Used for the preview and for xsetroot while resizing is switched off,
+    // so the UI reports the size that is actually in effect.
+    static constexpr int CURSOR_X_DEFAULT = 24;
 
     // Slider position -> pixel size
     static int cursorSizeAt(int index)
@@ -736,6 +780,16 @@ private:
         populateCursorCombo();
 
         // ── Size ────────────────────────────────────────
+        // Resizing is toggleable so the cost of a non-default cursor size
+        // can be compared against the system default without a rebuild.
+        // Unchecked removes the Xcursor.size resource entirely rather than
+        // writing a smaller number, so the "off" case is genuinely off.
+        m_cursorSizeEnable = new QCheckBox("Enable cursor resizing", card);
+        m_cursorSizeEnable->setStyleSheet(checkStyle());
+        m_cursorSizeEnable->setChecked(
+            m_settings->value("UI/CursorSizeEnabled", true).toBool());
+        lay->addWidget(m_cursorSizeEnable);
+
         QHBoxLayout *sizeHdr = new QHBoxLayout();
         QLabel *sizeLbl = new QLabel("Cursor Size", card);
         sizeLbl->setStyleSheet("font-size:24px;");
@@ -776,6 +830,18 @@ private:
         sizeEnds->addStretch();
         sizeEnds->addWidget(sMax);
         lay->addLayout(sizeEnds);
+
+        // Reset to the shipped default size. Styled with its own disabled
+        // rule because uiBtnStyle() paints an unconditional background,
+        // which would leave the button looking live while it is gated off.
+        m_cursorSizeDefault = new QPushButton("Default", card);
+        m_cursorSizeDefault->setStyleSheet(uiBtnStyle() +
+            "QPushButton:disabled { background:#555555; color:#999999; }");
+        m_cursorSizeDefault->setFixedSize(120, 44);
+        QHBoxLayout *sizeBtnRow = new QHBoxLayout();
+        sizeBtnRow->addStretch();
+        sizeBtnRow->addWidget(m_cursorSizeDefault);
+        lay->addLayout(sizeBtnRow);
 
         QPushButton *importBtn = new QPushButton("Install from Archive…", card);
         importBtn->setStyleSheet(uiBtnBright());
@@ -821,6 +887,26 @@ private:
             if (m_cursorLoading) return;
             applyCursorSize(cursorSizeAt(m_cursorSizeSlider->value()));
         });
+
+        connect(m_cursorSizeDefault, &QPushButton::clicked, this, [this]() {
+            // m_cursorLoading suppresses the slider's own apply so the
+            // explicit one below runs once, and still fires when the
+            // slider is already sitting on the default.
+            m_cursorLoading = true;
+            m_cursorSizeSlider->setValue(cursorIndexFor(CURSOR_DEF));
+            m_cursorLoading = false;
+            applyCursorSize(CURSOR_DEF);
+        });
+
+        connect(m_cursorSizeEnable, &QCheckBox::toggled, this, [this](bool on) {
+            m_settings->setValue("UI/CursorSizeEnabled", on);
+            m_settings->sync();
+            updateCursorSizeEnabled();
+            if (m_cursorLoading) return;
+            applyCursorSize(cursorSizeAt(m_cursorSizeSlider->value()));
+        });
+
+        updateCursorSizeEnabled();
 
         connect(importBtn, &QPushButton::clicked, this, [this]() {
             importCursorArchive();
@@ -907,8 +993,33 @@ private:
         }
     }
 
+    bool cursorSizeEnabled() const
+    {
+        if (m_cursorSizeEnable) return m_cursorSizeEnable->isChecked();
+        return m_settings->value("UI/CursorSizeEnabled", true).toBool();
+    }
+
+    // Gate the size controls and report the size that is really in effect,
+    // so the readout never claims 96 px while the pointer is at the X
+    // default.
+    void updateCursorSizeEnabled()
+    {
+        const bool on = cursorSizeEnabled();
+        if (m_cursorSizeSlider)  m_cursorSizeSlider->setEnabled(on);
+        if (m_cursorSizeDefault) m_cursorSizeDefault->setEnabled(on);
+        if (m_cursorSizeValue) {
+            if (on && m_cursorSizeSlider)
+                m_cursorSizeValue->setText(QString("%1 px")
+                    .arg(cursorSizeAt(m_cursorSizeSlider->value())));
+            else
+                m_cursorSizeValue->setText(QString("%1 px (system default)")
+                    .arg(CURSOR_X_DEFAULT));
+        }
+    }
+
     int currentCursorSize() const
     {
+        if (!cursorSizeEnabled()) return CURSOR_X_DEFAULT;
         if (m_cursorSizeSlider) return cursorSizeAt(m_cursorSizeSlider->value());
         return qBound(CURSOR_MIN,
                       m_settings->value("UI/CursorSize", CURSOR_DEF).toInt(),
@@ -946,7 +1057,9 @@ private:
         while (!keep.isEmpty() && keep.last().trimmed().isEmpty())
             keep.removeLast();
 
-        keep << QString("Xcursor.size: %1").arg(size);
+        const bool sizeOn = cursorSizeEnabled();
+        if (sizeOn)
+            keep << QString("Xcursor.size: %1").arg(size);
         // Empty theme means "system default" — write no theme resource at
         // all so the system's own choice applies.
         if (!theme.isEmpty())
@@ -973,9 +1086,18 @@ private:
 
         // Load it into the running server so apps started from now on
         // pick the new size up without a re-login.
+        //
+        // -merge only ever adds resources. When Xcursor.size has just been
+        // dropped from the file, a merge would leave the old value sitting
+        // in the running server and the toggle would do nothing visible —
+        // so removal uses -load, which replaces the database from this file.
+        // Every non-Xcursor line was preserved above, so nothing that came
+        // from ~/.Xresources is lost; resources merged in from elsewhere
+        // during the session are.
+        const QString mode = sizeOn ? "-merge" : "-load";
         QProcess::startDetached("sh", QStringList() << "-c"
-            << QString("xrdb -merge '%1' 2>/dev/null")
-                   .arg(QString(path).replace("'", "'\\''")));
+            << QString("xrdb %1 '%2' 2>/dev/null")
+                   .arg(mode, QString(path).replace("'", "'\\''")));
     }
 
     void applyCursorSize(int size)
