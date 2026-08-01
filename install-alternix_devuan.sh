@@ -320,6 +320,7 @@ fi
 # ────────────────────────────────────────────────
 echo " "
 echo "[Config] Installing Extras..."
+mkdir "$HOME/extras"
 
 if [ -d "$ALT_ROOT/Alternix/extras" ]; then
     sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$HOME/extras/"

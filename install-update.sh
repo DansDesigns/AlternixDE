@@ -107,6 +107,7 @@ echo " "
 echo "[Config] Installing Extras..."
 
 if [ -d "$ALT_ROOT/Alternix/extras" ]; then
+    mkdir "$HOME/extras"
     sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$HOME/extras/"
 
     echo "• Extras installed successfully."
