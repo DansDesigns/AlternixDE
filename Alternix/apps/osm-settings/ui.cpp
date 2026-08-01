@@ -364,11 +364,20 @@ private:
     QComboBox *m_cursorCombo    = nullptr;
     QLabel    *m_cursorPreview  = nullptr;
     QLabel    *m_cursorStatus   = nullptr;
+    QSlider   *m_cursorSizeSlider  = nullptr;
+    QLabel    *m_cursorSizeValue   = nullptr;
     bool       m_cursorLoading  = false;   // suppress apply while populating
 
     // Font size range: 14pt–36pt, stored as integer point size
     static constexpr int FONT_MIN = 14;
     static constexpr int FONT_MAX = 36;
+
+    // Cursor sizes. Themes rarely ship every size — Oreo has 32 and 64,
+    // Adwaita has 24/32/48/64/96 — and libXcursor picks the nearest and
+    // scales, so the slider is free-range rather than snapped.
+    static constexpr int CURSOR_MIN = 16;
+    static constexpr int CURSOR_MAX = 96;
+    static constexpr int CURSOR_DEF = 32;   // X default is 24; 32 suits tablets
 
     // ── Settings font card ──────────────────────────────
     QWidget *makeSettingsFontCard()
@@ -679,6 +688,44 @@ private:
 
         populateCursorCombo();
 
+        // ── Size ────────────────────────────────────────
+        QHBoxLayout *sizeHdr = new QHBoxLayout();
+        QLabel *sizeLbl = new QLabel("Cursor Size", card);
+        sizeLbl->setStyleSheet("font-size:24px;");
+        sizeHdr->addWidget(sizeLbl);
+        sizeHdr->addStretch();
+
+        m_cursorSizeValue = new QLabel(card);
+        m_cursorSizeValue->setStyleSheet("font-size:22px; color:#aaaaaa;");
+        sizeHdr->addWidget(m_cursorSizeValue);
+        lay->addLayout(sizeHdr);
+
+        m_cursorSizeSlider = new QSlider(Qt::Horizontal, card);
+        m_cursorSizeSlider->setRange(CURSOR_MIN, CURSOR_MAX);
+        m_cursorSizeSlider->setSingleStep(1);
+        m_cursorSizeSlider->setPageStep(8);
+        m_cursorSizeSlider->setStyleSheet(sliderStyle());
+        m_cursorSizeSlider->setFixedHeight(40);
+
+        int savedSize = m_settings->value("UI/CursorSize", CURSOR_DEF).toInt();
+        savedSize = qBound(CURSOR_MIN, savedSize, CURSOR_MAX);
+        m_cursorLoading = true;              // restoring, not a user change
+        m_cursorSizeSlider->setValue(savedSize);
+        m_cursorLoading = false;
+        m_cursorSizeValue->setText(QString("%1 px").arg(savedSize));
+
+        lay->addWidget(m_cursorSizeSlider);
+
+        QHBoxLayout *sizeEnds = new QHBoxLayout();
+        QLabel *sMin = new QLabel(QString("%1 px").arg(CURSOR_MIN), card);
+        sMin->setStyleSheet("font-size:18px; color:#888;");
+        QLabel *sMax = new QLabel(QString("%1 px").arg(CURSOR_MAX), card);
+        sMax->setStyleSheet("font-size:18px; color:#888;");
+        sizeEnds->addWidget(sMin);
+        sizeEnds->addStretch();
+        sizeEnds->addWidget(sMax);
+        lay->addLayout(sizeEnds);
+
         QPushButton *importBtn = new QPushButton("Install from Archive…", card);
         importBtn->setStyleSheet(uiBtnBright());
         importBtn->setMinimumHeight(54);
@@ -686,8 +733,9 @@ private:
 
         QLabel *note = new QLabel(
             "Themes are read from ~/.icons and /usr/share/icons. Imported "
-            "archives are installed to ~/.icons. Apps that are already open "
-            "keep their old cursor until they are restarted.", card);
+            "archives are installed to ~/.icons. Size is saved to "
+            "~/.Xresources. Apps that are already open keep their old cursor "
+            "and size until they are restarted.", card);
         note->setStyleSheet("font-size:18px; color:#aaaaaa;");
         note->setWordWrap(true);
         lay->addWidget(note);
@@ -703,6 +751,24 @@ private:
                 if (m_cursorLoading) return;
                 applyCursorTheme(m_cursorCombo->currentData().toString());
             });
+
+        // Label tracks the drag continuously, but applying is deferred until
+        // the handle is released: each apply spawns xrdb and xsetroot, and
+        // doing that per pixel of travel would crawl on an Atom tablet.
+        // isSliderDown() is false for taps, keyboard and page-steps, so
+        // those still apply immediately.
+        connect(m_cursorSizeSlider, &QSlider::valueChanged, this, [this](int v) {
+            if (m_cursorSizeValue)
+                m_cursorSizeValue->setText(QString("%1 px").arg(v));
+            if (m_cursorLoading) return;
+            if (!m_cursorSizeSlider->isSliderDown())
+                applyCursorSize(v);
+        });
+
+        connect(m_cursorSizeSlider, &QSlider::sliderReleased, this, [this]() {
+            if (m_cursorLoading) return;
+            applyCursorSize(m_cursorSizeSlider->value());
+        });
 
         connect(importBtn, &QPushButton::clicked, this, [this]() {
             importCursorArchive();
@@ -774,7 +840,11 @@ private:
         if (!m_cursorPreview || !m_cursorCombo) return;
 
         QString dir = cursorThemeDir(m_cursorCombo->currentData().toString());
-        QPixmap pm  = dir.isEmpty() ? QPixmap() : cursorThemePreview(dir, 40);
+
+        // Draw the swatch at the chosen size so the slider gives visible
+        // feedback, capped to fit inside the 60x60 preview box.
+        int px = qBound(CURSOR_MIN, currentCursorSize(), 56);
+        QPixmap pm  = dir.isEmpty() ? QPixmap() : cursorThemePreview(dir, px);
 
         if (pm.isNull()) {
             m_cursorPreview->setPixmap(QPixmap());
@@ -783,6 +853,105 @@ private:
             m_cursorPreview->setText(QString());
             m_cursorPreview->setPixmap(pm);
         }
+    }
+
+    int currentCursorSize() const
+    {
+        if (m_cursorSizeSlider) return m_cursorSizeSlider->value();
+        return qBound(CURSOR_MIN,
+                      m_settings->value("UI/CursorSize", CURSOR_DEF).toInt(),
+                      CURSOR_MAX);
+    }
+
+    // Size lives in ~/.Xresources, not in index.theme — the theme file has
+    // no size field. libXcursor resolves size from XCURSOR_SIZE first, then
+    // the Xcursor.size X resource, so writing it here covers Qt, GTK and
+    // plain X11 apps started afterwards without touching any env file.
+    void writeCursorXresources(const QString &theme, int size)
+    {
+        QString path = QDir::homePath() + "/.Xresources";
+
+        // Keep every line that isn't ours — this is the user's file and may
+        // hold Xft settings, terminal colours and anything else.
+        //
+        // Xcursor.theme is stripped as well as Xcursor.size: libXcursor
+        // reads that resource BEFORE falling back to ~/.icons/default, so a
+        // stale entry left by another tool would silently override whatever
+        // is picked here and make the selection look broken.
+        QStringList keep;
+        QFile in(path);
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!in.atEnd()) {
+                QString line = QString::fromUtf8(in.readLine());
+                while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
+                QString t = line.trimmed();
+                if (t.startsWith("Xcursor.size",  Qt::CaseInsensitive)) continue;
+                if (t.startsWith("Xcursor.theme", Qt::CaseInsensitive)) continue;
+                keep << line;
+            }
+            in.close();
+        }
+        while (!keep.isEmpty() && keep.last().trimmed().isEmpty())
+            keep.removeLast();
+
+        keep << QString("Xcursor.size: %1").arg(size);
+        // Empty theme means "system default" — write no theme resource at
+        // all so the system's own choice applies.
+        if (!theme.isEmpty())
+            keep << QString("Xcursor.theme: %1").arg(theme);
+
+        // Write to a temp file and rename over the target, so an
+        // interrupted write cannot leave the user with a truncated
+        // ~/.Xresources.
+        QString tmpPath = path + ".osm-tmp";
+        QFile out(tmpPath);
+        if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            cursorError("Could not write " + tmpPath + " — " + out.errorString());
+            return;
+        }
+        out.write((keep.join("\n") + "\n").toUtf8());
+        out.close();
+
+        QFile::remove(path);            // rename won't overwrite on Qt
+        if (!QFile::rename(tmpPath, path)) {
+            QFile::remove(tmpPath);
+            cursorError("Could not update " + path + " — cursor size not saved.");
+            return;
+        }
+
+        // Load it into the running server so apps started from now on
+        // pick the new size up without a re-login.
+        QProcess::startDetached("sh", QStringList() << "-c"
+            << QString("xrdb -merge '%1' 2>/dev/null")
+                   .arg(QString(path).replace("'", "'\\''")));
+    }
+
+    void applyCursorSize(int size)
+    {
+        size = qBound(CURSOR_MIN, size, CURSOR_MAX);
+        m_settings->setValue("UI/CursorSize", size);
+        m_settings->sync();
+
+        QString theme = m_cursorCombo ? m_cursorCombo->currentData().toString()
+                                      : QString();
+        writeCursorXresources(theme, size);
+        repaintRootCursor(theme);
+        updateCursorPreview();
+    }
+
+    // Repaint the root window pointer immediately so a change is visible
+    // straight away rather than only after the next login.
+    void repaintRootCursor(const QString &themeName)
+    {
+        QString dir = cursorThemeDir(themeName);
+        if (dir.isEmpty()) return;
+        QString ptr = dir + "/cursors/left_ptr";
+        if (!QFile::exists(ptr)) return;
+
+        QString q = "'" + QString(ptr).replace("'", "'\\''") + "'";
+        QProcess::startDetached("sh", QStringList() << "-c"
+            << QString("xsetroot -xcf %1 %2 2>/dev/null")
+                   .arg(q).arg(currentCursorSize()));
     }
 
     void applyCursorTheme(const QString &name)
@@ -798,9 +967,12 @@ private:
         QString idx    = defDir + "/index.theme";
 
         if (name.isEmpty()) {
-            // Back to whatever the system would have used on its own
+            // Back to whatever the system would have used on its own —
+            // the theme resource has to go too, or it would keep forcing
+            // the previous choice.
             QFile::remove(idx);
             QDir().rmdir(defDir);          // only succeeds if now empty
+            writeCursorXresources(QString(), currentCursorSize());
             updateCursorPreview();
             return;
         }
@@ -821,18 +993,11 @@ private:
                         "Inherits=%1\n").arg(name).toUtf8());
         f.close();
 
-        // Repaint the root window immediately so the change is visible
-        // straight away rather than only after the next login.
-        QString dir = cursorThemeDir(name);
-        if (!dir.isEmpty()) {
-            QString ptr = dir + "/cursors/left_ptr";
-            if (QFile::exists(ptr)) {
-                QString q = "'" + ptr.replace("'", "'\\''") + "'";
-                QProcess::startDetached("sh", QStringList() << "-c"
-                    << QString("xsetroot -xcf %1 24 2>/dev/null").arg(q));
-            }
-        }
+        // Keep the X resource in agreement with index.theme, otherwise a
+        // leftover Xcursor.theme would win over the selection made here.
+        writeCursorXresources(name, currentCursorSize());
 
+        repaintRootCursor(name);
         updateCursorPreview();
     }
 
