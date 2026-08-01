@@ -85,18 +85,38 @@ static QPushButton* makeBtn(const QString &txt, const QString &color = "white")
 static QString sliderStyle()
 {
     return
+        // Every subcontrol must be given a rule. Qt falls back to the
+        // native style for any subcontrol left unstyled, and the native
+        // one draws square corners over a rounded groove — which is where
+        // the black square-ended blocks came from: add-page had no rule.
+        "QSlider {"
+        "   background:transparent;"
+        "   border:0px;"
+        "}"
         "QSlider::groove:horizontal {"
         "   background:#666666;"
+        "   border:0px;"
         "   height:14px;"
         "   border-radius:7px;"
         "   margin:0px;"
         "}"
         "QSlider::sub-page:horizontal {"
         "   background:#4aa3ff;"
+        "   border:0px;"
+        "   height:14px;"
         "   border-radius:7px;"
+        "   margin:0px;"
+        "}"
+        "QSlider::add-page:horizontal {"
+        "   background:#666666;"
+        "   border:0px;"
+        "   height:14px;"
+        "   border-radius:7px;"
+        "   margin:0px;"
         "}"
         "QSlider::handle:horizontal {"
         "   background:white;"
+        "   border:0px;"
         "   border-radius:16px;"
         "   width:32px;"
         "   height:32px;"
@@ -372,12 +392,39 @@ private:
     static constexpr int FONT_MIN = 14;
     static constexpr int FONT_MAX = 36;
 
-    // Cursor sizes. Themes rarely ship every size — Oreo has 32 and 64,
-    // Adwaita has 24/32/48/64/96 — and libXcursor picks the nearest and
-    // scales, so the slider is free-range rather than snapped.
+    // Cursor sizes. Themes ship a fixed set of sizes and libXcursor loads
+    // the nearest one it has rather than scaling to an arbitrary request,
+    // so a free-range slider lies: it reports 47 px while the pointer on
+    // screen is still 48 px. The slider is therefore indexed over the
+    // ladder below, which is the set of sizes themes actually ship, so
+    // every value written to Xcursor.size is one a theme can honour.
+    static constexpr int CURSOR_SIZES[] = { 16, 24, 32, 48, 64, 96 };
+    static constexpr int CURSOR_SIZE_COUNT =
+        int(sizeof(CURSOR_SIZES) / sizeof(CURSOR_SIZES[0]));
+
     static constexpr int CURSOR_MIN = 16;
     static constexpr int CURSOR_MAX = 96;
     static constexpr int CURSOR_DEF = 32;   // X default is 24; 32 suits tablets
+
+    // Slider position -> pixel size
+    static int cursorSizeAt(int index)
+    {
+        return CURSOR_SIZES[qBound(0, index, CURSOR_SIZE_COUNT - 1)];
+    }
+
+    // Pixel size -> slider position. Nearest rather than exact, so a value
+    // saved by an older free-range build still restores to a sane rung
+    // instead of dropping to the bottom of the slider.
+    static int cursorIndexFor(int size)
+    {
+        int best = 0;
+        int bestDelta = qAbs(CURSOR_SIZES[0] - size);
+        for (int i = 1; i < CURSOR_SIZE_COUNT; ++i) {
+            const int d = qAbs(CURSOR_SIZES[i] - size);
+            if (d < bestDelta) { bestDelta = d; best = i; }
+        }
+        return best;
+    }
 
     // ── Settings font card ──────────────────────────────
     QWidget *makeSettingsFontCard()
@@ -701,18 +748,22 @@ private:
         lay->addLayout(sizeHdr);
 
         m_cursorSizeSlider = new QSlider(Qt::Horizontal, card);
-        m_cursorSizeSlider->setRange(CURSOR_MIN, CURSOR_MAX);
+        // The slider runs over ladder indices, not pixels, so the handle
+        // can only ever come to rest on a size a theme actually ships.
+        m_cursorSizeSlider->setRange(0, CURSOR_SIZE_COUNT - 1);
         m_cursorSizeSlider->setSingleStep(1);
-        m_cursorSizeSlider->setPageStep(8);
+        m_cursorSizeSlider->setPageStep(1);
+        m_cursorSizeSlider->setTracking(true);
         m_cursorSizeSlider->setStyleSheet(sliderStyle());
         m_cursorSizeSlider->setFixedHeight(40);
 
         int savedSize = m_settings->value("UI/CursorSize", CURSOR_DEF).toInt();
         savedSize = qBound(CURSOR_MIN, savedSize, CURSOR_MAX);
         m_cursorLoading = true;              // restoring, not a user change
-        m_cursorSizeSlider->setValue(savedSize);
+        m_cursorSizeSlider->setValue(cursorIndexFor(savedSize));
         m_cursorLoading = false;
-        m_cursorSizeValue->setText(QString("%1 px").arg(savedSize));
+        m_cursorSizeValue->setText(
+            QString("%1 px").arg(cursorSizeAt(m_cursorSizeSlider->value())));
 
         lay->addWidget(m_cursorSizeSlider);
 
@@ -758,16 +809,17 @@ private:
         // isSliderDown() is false for taps, keyboard and page-steps, so
         // those still apply immediately.
         connect(m_cursorSizeSlider, &QSlider::valueChanged, this, [this](int v) {
+            const int px = cursorSizeAt(v);
             if (m_cursorSizeValue)
-                m_cursorSizeValue->setText(QString("%1 px").arg(v));
+                m_cursorSizeValue->setText(QString("%1 px").arg(px));
             if (m_cursorLoading) return;
             if (!m_cursorSizeSlider->isSliderDown())
-                applyCursorSize(v);
+                applyCursorSize(px);
         });
 
         connect(m_cursorSizeSlider, &QSlider::sliderReleased, this, [this]() {
             if (m_cursorLoading) return;
-            applyCursorSize(m_cursorSizeSlider->value());
+            applyCursorSize(cursorSizeAt(m_cursorSizeSlider->value()));
         });
 
         connect(importBtn, &QPushButton::clicked, this, [this]() {
@@ -857,7 +909,7 @@ private:
 
     int currentCursorSize() const
     {
-        if (m_cursorSizeSlider) return m_cursorSizeSlider->value();
+        if (m_cursorSizeSlider) return cursorSizeAt(m_cursorSizeSlider->value());
         return qBound(CURSOR_MIN,
                       m_settings->value("UI/CursorSize", CURSOR_DEF).toInt(),
                       CURSOR_MAX);
@@ -928,7 +980,10 @@ private:
 
     void applyCursorSize(int size)
     {
-        size = qBound(CURSOR_MIN, size, CURSOR_MAX);
+        // Snap as well as clamp: this is the last gate before the value
+        // reaches Xcursor.size, and an off-ladder size is one no theme
+        // can honour.
+        size = cursorSizeAt(cursorIndexFor(qBound(CURSOR_MIN, size, CURSOR_MAX)));
         m_settings->setValue("UI/CursorSize", size);
         m_settings->sync();
 
