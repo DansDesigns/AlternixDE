@@ -741,32 +741,6 @@ Terminal=true
 Categories=System;
 EOF
 
-echo "• Creating Ranger shortcut..."
-cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
-[Desktop Entry]
-Type=Application
-Name=Ranger
-Comment=Terminal File Manager
-Exec=alacritty -e ranger
-Icon=ranger
-Terminal=false
-Categories=System;FileTools;FileManager;
-StartupNotify=false
-EOF
-
-
-echo "• Creating Volume Control shortcut..."
-cat <<EOF > "$HOME/.local/share/applications/pavucontrol.desktop"
-[Desktop Entry]
-Type=Application
-Name=Volume Control
-Comment=Audio Mixer for Alternix / OSM-Phone
-Exec=pavucontrol
-Icon=pavucontrol
-Terminal=false
-Categories=AudioVideo;Audio;Mixer;Settings;
-StartupNotify=true
-EOF
 
 
 # ────────────────────────────────────────────────

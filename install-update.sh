@@ -35,33 +35,6 @@ echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
 
-echo "• Creating Ranger shortcut..."
-cat <<EOF > "$HOME/.local/share/applications/ranger.desktop"
-[Desktop Entry]
-Type=Application
-Name=ranger
-Comment=Terminal File Manager for Alternix / OSM-Phone
-Exec=alacritty -e ranger
-Icon=ranger
-Terminal=false
-Categories=System;FileTools;FileManager;
-StartupNotify=false
-EOF
-
-
-echo "• Creating Volume Control shortcut..."
-cat <<EOF > "$HOME/.local/share/applications/pavucontrol.desktop"
-[Desktop Entry]
-Type=Application
-Name=Volume-Control
-Comment=Audio Mixer for Alternix / OSM-Phone
-Exec=pavucontrol
-Icon=pavucontrol
-Terminal=false
-Categories=AudioVideo;Audio;Mixer;Settings;
-StartupNotify=true
-EOF
-
 echo ""
 #===========================================================
 # Apps to be updated (compilation commands & icons):
