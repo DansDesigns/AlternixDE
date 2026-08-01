@@ -41,6 +41,12 @@ static const int ICON_COLUMN_WIDTH = 54;
 static const int ICON_TEXT_SPACING = 18;
 static const int CARD_WIDTH        = 620;
 
+// Space left for text once the card's padding, the icon column and the
+// gap after it are taken out. The card layout is left-aligned, so the
+// text labels must state a width or the column collapses to nothing.
+static const int TEXT_COLUMN_WIDTH =
+    CARD_WIDTH - (2 * CARD_PADDING) - ICON_COLUMN_WIDTH - ICON_TEXT_SPACING;
+
 typedef const OsmWidgetInfo *(*InfoFn)();
 typedef QWidget *(*ConfigFn)(const char *, QWidget *);
 
@@ -73,8 +79,6 @@ public:
         : QLabel(parent), m_full(text)
     {
         setWordWrap(false);
-        // Never let the untruncated string dictate the card's width.
-        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         QLabel::setText(text);
     }
 
@@ -87,7 +91,11 @@ protected:
 private:
     void updateElide() {
         if (width() <= 0) return;
-        QLabel::setText(fontMetrics().elidedText(m_full, Qt::ElideRight, width()));
+        QString e = fontMetrics().elidedText(m_full, Qt::ElideRight, width());
+        // elidedText returns an empty string when the width cannot even
+        // fit the ellipsis. Showing the full text and letting it clip at
+        // the edge is far better than showing nothing at all.
+        QLabel::setText(e.isEmpty() ? m_full : e);
     }
     QString m_full;
 };
@@ -527,9 +535,11 @@ private:
         textCol->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
         ElideLabel *ttl = new ElideLabel(title);
+        ttl->setFixedWidth(TEXT_COLUMN_WIDTH);
         ttl->setStyleSheet("font-size:30px; font-weight:bold; color:white;");
 
         ElideLabel *subt = new ElideLabel(sub);
+        subt->setFixedWidth(TEXT_COLUMN_WIDTH);
         subt->setStyleSheet("font-size:22px; color:#bbbbbb;");
 
         textCol->addWidget(ttl);
