@@ -700,7 +700,7 @@ public:
 
             //-----------Left Button ---------------
             // auto *wall = new ClickIcon(imgBase + "osm-power.png", "osm-power", 60, this);
-            auto *wall = new ClickIcon(imgBase + "osm-widgets.png", "osm-widgets", 60, this);
+            auto *wall = new ClickIcon(imgBase + "osm-widgets.png", "osm-widgets-settings", 60, this);
 
             //-----------Right Button ---------------
             auto *set  = new ClickIcon(imgBase + "osm-settings.png", "osm-settings", 60, this);
