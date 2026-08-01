@@ -16,6 +16,8 @@
 #include <QTimer>
 #include <QDateTime>
 #include <QPainter>
+#include <QProcess>
+#include <QMouseEvent>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QSlider>
@@ -43,6 +45,8 @@ public:
         : QWidget(parent), m_id(instanceId)
     {
         setAttribute(Qt::WA_TranslucentBackground);
+        if (!arrangeMode())
+            setCursor(Qt::PointingHandCursor);
 
         m_timeFmt  = osmWidgetGet(m_id, "TimeFormat", "HH:mm").toString();
         m_dateFmt  = osmWidgetGet(m_id, "DateFormat", "dddd d MMMM").toString();
@@ -79,6 +83,30 @@ public:
     }
 
 protected:
+    // Tap opens the full clock app. In arrange mode the events are
+    // ignored instead, so they propagate up to the WidgetFrame and the
+    // widget can still be dragged and resized.
+    void mousePressEvent(QMouseEvent *e) override {
+        if (arrangeMode() || e->button() != Qt::LeftButton) {
+            e->ignore();
+            return;
+        }
+        m_pressed  = true;
+        m_pressPos = e->globalPos();
+        e->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        if (!m_pressed) { e->ignore(); return; }
+        m_pressed = false;
+
+        // Tap, not a stray drag.
+        if ((e->globalPos() - m_pressPos).manhattanLength() < 12)
+            QProcess::startDetached("osm-clock", QStringList());
+
+        e->accept();
+    }
+
     // Rounded translucent slab behind the text so it stays readable
     // on top of any wallpaper.
     void paintEvent(QPaintEvent *) override {
@@ -91,6 +119,13 @@ protected:
     }
 
 private:
+    // Read live rather than cached: the daemon rebuilds this widget on
+    // config change, but the tap must never fight the drag handler.
+    static bool arrangeMode() {
+        QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+        return cfg.value("General/EditMode", false).toBool();
+    }
+
     void tick() {
         QDateTime now = QDateTime::currentDateTime();
         m_time->setText(now.toString(m_timeFmt));
@@ -102,6 +137,8 @@ private:
     int     m_bgAlpha, m_timePt, m_datePt;
     QLabel *m_time;
     QLabel *m_date;
+    bool    m_pressed = false;
+    QPoint  m_pressPos;
 };
 
 // ─────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@
 #include <QScreen>
 #include <QScroller>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QKeyEvent>
 #include <QLibrary>
 #include <QMessageBox>
@@ -59,6 +60,36 @@ public:
         );
         QScroller::grabGesture(this, QScroller::LeftMouseButtonGesture);
     }
+};
+
+// ─────────────────────────────────────────────────────────────
+//  Single-line label that shortens with an ellipsis instead of
+//  wrapping. A wrapped label inside a fixed-height card asks the
+//  layout for more height than exists, and the layout answers by
+//  squeezing every label until the glyphs are clipped top and bottom.
+class ElideLabel : public QLabel {
+public:
+    explicit ElideLabel(const QString &text, QWidget *parent = nullptr)
+        : QLabel(parent), m_full(text)
+    {
+        setWordWrap(false);
+        // Never let the untruncated string dictate the card's width.
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        QLabel::setText(text);
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *e) override {
+        QLabel::resizeEvent(e);
+        updateElide();
+    }
+
+private:
+    void updateElide() {
+        if (width() <= 0) return;
+        QLabel::setText(fontMetrics().elidedText(m_full, Qt::ElideRight, width()));
+    }
+    QString m_full;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -248,8 +279,8 @@ private:
         {
             ClickableCard *card = makeCard(edit ? "✋" : "🔒",
                                            "Arrange Mode",
-                                           edit ? "On — drag to move, corner to resize"
-                                                : "Off — widgets are pinned in place");
+                                           edit ? "On — drag to move or resize"
+                                                : "Off — widgets are pinned");
             card->onClick = [this, edit]() {
                 QSettings s(osmWidgetConfigPath(), QSettings::IniFormat);
                 s.setValue("General/EditMode", !edit);
@@ -262,7 +293,7 @@ private:
         // Add
         {
             ClickableCard *card = makeCard("➕", "Add Widget",
-                                           "Place a new widget on the desktop");
+                                           "Put a new widget on the desktop");
             card->onClick = [this]() { showPage(makePickerPage()); };
             mainCol->addWidget(card, 0, Qt::AlignHCenter);
         }
@@ -286,9 +317,8 @@ private:
 
             QString icon = wi ? QString::fromUtf8(wi->icon) : "❓";
             QString name = wi ? QString::fromUtf8(wi->name) : plugin;
-            QString sub  = wi
-                ? QString("%1 · %2").arg(id, QString::fromUtf8(wi->description))
-                : QString("%1 · plugin missing from %2").arg(id, WIDGET_DIR);
+            QString sub  = wi ? id
+                              : QString("%1 · plugin missing").arg(id);
 
             ClickableCard *card = makeCard(icon, name, sub);
             card->onClick = [this, id, plugin]() {
@@ -496,11 +526,10 @@ private:
         textCol->setSpacing(0);
         textCol->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
-        QLabel *ttl = new QLabel(title);
+        ElideLabel *ttl = new ElideLabel(title);
         ttl->setStyleSheet("font-size:30px; font-weight:bold; color:white;");
 
-        QLabel *subt = new QLabel(sub);
-        subt->setWordWrap(true);
+        ElideLabel *subt = new ElideLabel(sub);
         subt->setStyleSheet("font-size:22px; color:#bbbbbb;");
 
         textCol->addWidget(ttl);
