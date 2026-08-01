@@ -29,7 +29,7 @@ echo "[Config] Updating Grub Entry.."
 sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 sudo update-grub
 
-sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps iio-sensor-proxy -y
+sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps iio-sensor-proxy libxext-dev -y
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
@@ -206,6 +206,47 @@ cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
+
+
+# ────────────────────────────────────────────────
+# 6b. Build OSM Widgets (desktop widget overlay)
+# ────────────────────────────────────────────────
+echo " "
+echo "[8/10] Building osm-widgets..."
+
+cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
+
+sudo mkdir -p /usr/local/lib/alternix/widgets
+
+g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext
+chmod +x osm-widgets && sudo mv osm-widgets /usr/local/bin/
+
+echo "• Building osm-widgets-settings..."
+g++ osm-widgets-settings.cpp -o osm-widgets-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
+chmod +x osm-widgets-settings && sudo mv osm-widgets-settings /usr/local/bin/
+
+echo "• Building clock.so widget..."
+g++ -I. -fPIC -shared widgets/clock.cpp -o clock.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo mv clock.so /usr/local/lib/alternix/widgets/
+
+
+
+if [ -f "$ALT_ROOT/Alternix/icons/osm-widgets.png" ]; then
+    sudo cp "$ALT_ROOT/Alternix/icons/osm-widgets.png" /usr/share/icons/hicolor/64x64/apps/osm-widgets.png
+fi
+
+cat <<EOF > "$HOME/.local/share/applications/osm-widgets.desktop"
+[Desktop Entry]
+Type=Application
+Name=Widgets
+Comment=Add and arrange widgets on the Alternix desktop
+Exec=/usr/local/bin/osm-widgets-settings
+Icon=osm-widgets
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+chmod +x "$HOME/.local/share/applications/osm-widgets.desktop"
 
 
 echo "• App Update & Install Complete."

@@ -148,7 +148,7 @@ sudo nala install -y \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
-    sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount
+    sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
 
 echo ""
 echo "[System] Installing Qtile, Qtile-Extras & mypy"
@@ -649,6 +649,46 @@ echo "• Building ui.so..."
 g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv ui.so /usr/local/bin/
 
+
+# ────────────────────────────────────────────────
+# 6b. Build OSM Widgets (desktop widget overlay)
+# ────────────────────────────────────────────────
+echo " "
+echo "[8/10] Building osm-widgets..."
+
+cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
+
+sudo mkdir -p /usr/local/lib/alternix/widgets
+
+g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext
+chmod +x osm-widgets && sudo mv osm-widgets /usr/local/bin/
+
+echo "• Building osm-widgets-settings..."
+g++ osm-widgets-settings.cpp -o osm-widgets-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
+chmod +x osm-widgets-settings && sudo mv osm-widgets-settings /usr/local/bin/
+
+echo "• Building clock.so widget..."
+g++ -I. -fPIC -shared widgets/clock.cpp -o clock.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo mv clock.so /usr/local/lib/alternix/widgets/
+
+
+
+if [ -f "$ALT_ROOT/Alternix/icons/osm-widgets.png" ]; then
+    sudo cp "$ALT_ROOT/Alternix/icons/osm-widgets.png" /usr/share/icons/hicolor/64x64/apps/osm-widgets.png
+fi
+
+cat <<EOF > "$HOME/.local/share/applications/osm-widgets.desktop"
+[Desktop Entry]
+Type=Application
+Name=Widgets
+Comment=Add and arrange widgets on the Alternix desktop
+Exec=/usr/local/bin/osm-widgets-settings
+Icon=osm-widgets
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+chmod +x "$HOME/.local/share/applications/osm-widgets.desktop"
 
 # ────────────────────────────────────────────────
 #            Custom App Shortcuts & Icons
