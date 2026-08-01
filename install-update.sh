@@ -29,7 +29,7 @@ echo "[Config] Updating Grub Entry.."
 sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
 sudo update-grub
 
-sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info ruby inkscape x11-apps -y
+sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps -y
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
@@ -101,6 +101,21 @@ if [ -d "$INSTALLER_DIR" ]; then
 else
     echo "• No installers folder found, skipping."
 fi
+
+
+echo " "
+echo "[Config] Installing Extras..."
+
+if [ -d "$ALT_ROOT/Alternix/extras" ]; then
+    sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$HOME/extras/"
+
+    echo "• Extras installed successfully."
+else
+    echo "--------------------------------"
+    echo "• [ERROR] Installing Extras..."
+    echo "--------------------------------"
+fi
+
 
 cd "$ALT_ROOT/Alternix/apps/osm-settings"
 

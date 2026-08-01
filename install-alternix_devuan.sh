@@ -144,7 +144,7 @@ sudo nala install -y \
     samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh mobile-broadband-provider-info \
-    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 ranger ruby inkscape x11-apps \
+    xprintidle libx11-dev libxtst-dev ntfs-3g aria2 ranger x11-apps zip \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
@@ -309,8 +309,28 @@ if [ -d "$ALT_ROOT/Alternix/wallpapers" ]; then
     cp -r "$ALT_ROOT/Alternix/wallpapers/"* "$WALL_DST/"
     echo "• Wallpapers installed to $WALL_DST"
 else
+    echo "---------------------------------------"
     echo "• No wallpapers folder found, skipping."
+    echo "---------------------------------------"
 fi
+
+
+# ────────────────────────────────────────────────
+# Install Extras
+# ────────────────────────────────────────────────
+echo " "
+echo "[Config] Installing Extras..."
+
+if [ -d "$ALT_ROOT/Alternix/extras" ]; then
+    sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$HOME/extras/"
+
+    echo "• Extras installed successfully."
+else
+    echo "--------------------------------"
+    echo "• [ERROR] Installing Extras..."
+    echo "--------------------------------"
+fi
+
 
 # ────────────────────────────────────────────────
 # 2. Create & activate Qtile venv

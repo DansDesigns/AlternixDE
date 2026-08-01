@@ -1,0 +1,27 @@
+boot_default:
+https://pixabay.com/sound-effects/musical-startup-sound-variation-fast-315898/
+
+boot_xpish:
+https://pixabay.com/sound-effects/musical-startup-sound-variation-6-316850/
+
+boot_box:
+https://pixabay.com/sound-effects/film-special-effects-gadget-activation-250072/
+
+boot_gentle:
+https://pixabay.com/sound-effects/musical-lovelyboot1-103697/
+
+
+notification sounds:
+https://pixabay.com/sound-effects/film-special-effects-notification-sound-effect-372475/
+https://pixabay.com/sound-effects/film-special-effects-new-notification-09-352705/
+https://pixabay.com/sound-effects/film-special-effects-new-notification-3-398649/
+https://pixabay.com/sound-effects/technology-new-notification-051-494246/
+https://pixabay.com/sound-effects/film-special-effects-quick-ping-notification-tone-430436/
+https://pixabay.com/sound-effects/technology-new-notification-048-494235/
+https://pixabay.com/sound-effects/technology-new-notification-053-494247/
+https://pixabay.com/sound-effects/film-special-effects-new-notification-018-363746/
+
+
+
+ui:
+https://pixabay.com/sound-effects/technology-new-notification-040-493469/
