@@ -57,6 +57,9 @@ protected:
     }
 };
 
+// App label colour, read in main() from the UI settings config
+static QString g_labelColor = "#ffffff";
+
 // ──────────────────────────────  Clean exec fields (unchanged)
 static QString cleanExec(const QString &exec) {
     QString s = exec;
@@ -144,6 +147,7 @@ public:
         v->addWidget(iconLabel);
 
         QLabel *lbl = new QLabel(e.name, hoverBox);
+        lbl->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
         lbl->setWordWrap(true);
         lbl->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
         lbl->setMinimumHeight(60);
@@ -246,6 +250,9 @@ int main(int argc, char **argv) {
         QSettings cfg(cfgPath, QSettings::IniFormat);
         int pt = cfg.value("UI/LauncherFontSize", 15).toInt();
         pt = qBound(14, pt, 36);
+        QString col = cfg.value("UI/LauncherFontColor", "#ffffff").toString().trimmed();
+        if (QColor(col).isValid())
+            g_labelColor = col;
         QFont f = a.font();
         f.setPointSize(pt);
         a.setFont(f);
