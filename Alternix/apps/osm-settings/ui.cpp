@@ -365,11 +365,17 @@ public:
     {
         setStyleSheet("background:#282828; color:white; font-family:Sans;");
 
+        // Design width. wifi.cpp holds ~720px through its fixed 180x60 button
+        // row; nothing on this page is fixed-width enough to do the same, so
+        // it collapses when floated in qtile. 720 is the osm-phone screen
+        // width, which is the narrowest target either page has to survive.
+        setMinimumWidth(720);
+
         m_settings = new QSettings(uiCfgPath(), QSettings::IniFormat, this);
 
         QVBoxLayout *root = new QVBoxLayout(this);
         root->setContentsMargins(40, 40, 40, 40);
-        root->setSpacing(10);
+        root->setSpacing(20);
 
         QLabel *title = new QLabel("UI");
         title->setAlignment(Qt::AlignCenter);
@@ -386,15 +392,16 @@ public:
 
         QWidget *wrap = new QWidget(scroll);
         QVBoxLayout *wrapLay = new QVBoxLayout(wrap);
-        wrapLay->setSpacing(10);
+        wrapLay->setSpacing(20);
         wrapLay->setContentsMargins(0, 0, 0, 0);
 
         // Outer card
         QFrame *outer = new QFrame(wrap);
         outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:40px; }");
         QVBoxLayout *outerLay = new QVBoxLayout(outer);
-        outerLay->setContentsMargins(50, 30, 50, 30);
-        outerLay->setSpacing(30);
+        // 25px all round + 20px spacing — same as wifi.cpp's ssidFrame.
+        outerLay->setContentsMargins(25, 25, 25, 25);
+        outerLay->setSpacing(20);
 
         // ── App launcher font size ──────────────────────
         outerLay->addWidget(makeLauncherFontCard());
@@ -508,7 +515,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 24, 30, 24);
+        v->setContentsMargins(25, 25, 25, 25);
         v->setSpacing(16);
 
         QHBoxLayout *hdr = new QHBoxLayout();
@@ -563,9 +570,10 @@ private:
         QGridLayout *swatchGrid = new QGridLayout();
         swatchGrid->setHorizontalSpacing(14);
         swatchGrid->setVerticalSpacing(14);
-        // Spare width goes into a trailing empty column, so the block stays
-        // left-aligned instead of the cells spreading across the card.
-        swatchGrid->setColumnStretch(LAUNCHER_COLOR_COLS, 1);
+        // Even columns, each swatch centred in its cell, so the block spans
+        // the full card width rather than clumping at the left edge.
+        for (int c = 0; c < LAUNCHER_COLOR_COLS; ++c)
+            swatchGrid->setColumnStretch(c, 1);
 
         for (int i = 0; i < LAUNCHER_COLOR_COUNT; ++i) {
             const QString hex = QString(LAUNCHER_COLORS[i]);
@@ -575,7 +583,8 @@ private:
             sw->setProperty("swatchHex", hex);
             sw->setCursor(Qt::PointingHandCursor);
             swatchGrid->addWidget(sw, i / LAUNCHER_COLOR_COLS,
-                                      i % LAUNCHER_COLOR_COLS);
+                                      i % LAUNCHER_COLOR_COLS,
+                                      Qt::AlignCenter);
             m_launcherColorSwatches.append(sw);
 
             connect(sw, &QPushButton::clicked, this, [this, hex]() {
@@ -598,7 +607,7 @@ private:
 
         QPushButton *reset = new QPushButton("Reset");
         reset->setStyleSheet(uiBtnStyle());
-        reset->setFixedSize(120, 44);
+        reset->setFixedSize(180, 60);
         QHBoxLayout *btnRow = new QHBoxLayout();
         btnRow->addStretch();
         btnRow->addWidget(reset);
@@ -638,7 +647,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *lay = new QVBoxLayout(card);
-        lay->setContentsMargins(30, 24, 30, 24);
+        lay->setContentsMargins(25, 25, 25, 25);
         lay->setSpacing(16);
 
         QLabel *lbl = new QLabel(title, card);
@@ -760,7 +769,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *lay = new QVBoxLayout(card);
-        lay->setContentsMargins(30, 24, 30, 24);
+        lay->setContentsMargins(25, 25, 25, 25);
         lay->setSpacing(16);
 
         QLabel *lbl = new QLabel("Mouse Cursor", card);
@@ -847,7 +856,7 @@ private:
         m_cursorSizeDefault = new QPushButton("Default", card);
         m_cursorSizeDefault->setStyleSheet(uiBtnStyle() +
             "QPushButton:disabled { background:#555555; color:#999999; }");
-        m_cursorSizeDefault->setFixedSize(120, 44);
+        m_cursorSizeDefault->setFixedSize(180, 60);
         QHBoxLayout *sizeBtnRow = new QHBoxLayout();
         sizeBtnRow->addStretch();
         sizeBtnRow->addWidget(m_cursorSizeDefault);
@@ -855,7 +864,7 @@ private:
 
         QPushButton *importBtn = new QPushButton("Install from Archive…", card);
         importBtn->setStyleSheet(uiBtnBright());
-        importBtn->setMinimumHeight(54);
+        importBtn->setMinimumHeight(60);
         lay->addWidget(importBtn);
 
         QLabel *note = new QLabel(
@@ -1309,7 +1318,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        lay->setContentsMargins(25, 25, 25, 25);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Wallpaper");
