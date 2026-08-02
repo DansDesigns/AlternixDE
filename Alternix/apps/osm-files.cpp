@@ -45,6 +45,9 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <unistd.h>
+#include <QCheckBox>
+#include <QRegularExpression>
+#include <algorithm>
 #include <sys/socket.h>
 #include <sys/select.h>
 #include <netinet/in.h>
@@ -55,6 +58,101 @@
 
 class FileBrowser : public QWidget {
 public:
+
+    // ================= THEME =================
+    //
+    // Every widget here sets its own stylesheet with literal colours, so a
+    // global palette would simply be overridden. Instead each stylesheet is
+    // written once in the dark palette and passed through themed(), which
+    // swaps the colours when light mode is on. One table, no duplicated
+    // stylesheets, and nothing to keep in step by hand.
+    //
+    // The two palettes deliberately share no colour values, so the swap is
+    // reversible and can be applied to a string more than once without damage.
+    // If a colour is ever added to this table, keep that true: a light value
+    // that also appears as a dark value would be translated twice.
+
+    static bool &themeIsLight() { static bool light = false; return light; }
+
+    static QString themed(QString css) {
+        if (css.isEmpty()) return css;
+
+        static const char *pal[][2] = {
+            // dark          light
+            { "white",   "#1a1a1a" },   // button and label text
+            { "#ffffff", "#101010" },   // checked-button border
+            { "#DDDDDD", "#2b2b2b" },   // entry text
+            { "#CCCCCC", "#4d4d4d" },   // secondary label text
+
+            { "#282828", "#f5f5f5" },   // window background
+            { "#2a2a2a", "#f2f2f2" },
+            { "#333333", "#ececec" },
+            { "#333",    "#ececec" },   // list and entry background
+            { "#3a3a3a", "#e6e6e6" },
+            { "#222",    "#fbfbfb" },   // disabled / pressed background
+            { "#4a4a4a", "#d6d6d6" },
+            { "#444",    "#dcdcdc" },   // list item face / pressed
+            { "#5a5a5a", "#c8c8c8" },
+            { "#555",    "#cdcdcd" },   // button face
+            { "#6a6a6a", "#bababa" },
+            { "#666",    "#bebebe" },   // hover
+            { "#7a7a7a", "#a9a9a9" },
+            { "#777",    "#adadad" },   // selected item
+            { "#888",    "#9b9b9b" },
+
+            { "#2a82da", "#90caf9" },   // accent
+            { "#3a92ea", "#a6d4fb" },
+            { "#1a72ca", "#64b5f6" },
+
+            { "#cc0000", "#ef9a9a" },   // delete / danger
+            { "#dd3333", "#ffb3b3" },
+            { "#aa0000", "#e57373" },
+            { "#cc3333", "#eb8f8f" },
+            { "#aa2222", "#e07070" },
+            { "#881818", "#d05555" },
+        };
+        const int n = (int)(sizeof(pal) / sizeof(pal[0]));
+
+        static QHash<QString, QString> toLight, toDark;
+        if (toLight.isEmpty()) {
+            for (int i = 0; i < n; ++i) {
+                toLight.insert(QString(pal[i][0]).toLower(), QString(pal[i][1]));
+                toDark.insert(QString(pal[i][1]).toLower(), QString(pal[i][0]));
+            }
+        }
+        const QHash<QString, QString> &map = themeIsLight() ? toLight : toDark;
+
+        // Rewrite colour by colour so a short token such as "#333" can never
+        // corrupt a longer one such as "#333333".
+        static const QRegularExpression re(
+            "(#[0-9a-fA-F]{6}\\b|#[0-9a-fA-F]{3}\\b|\\bwhite\\b)");
+
+        QString out;
+        int last = 0;
+        QRegularExpressionMatchIterator it = re.globalMatch(css);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            out += css.mid(last, m.capturedStart() - last);
+            const QString token = m.captured(1);
+            out += map.value(token.toLower(), token);
+            last = m.capturedEnd();
+        }
+        out += css.mid(last);
+        return out;
+    }
+
+    // Re-colour a window that has already been built. Widgets created after a
+    // switch are correct from the start because every stylesheet goes through
+    // themed(), so this is only needed for the live toggle.
+    static void themeTree(QWidget *root) {
+        if (!root) return;
+        root->setStyleSheet(themed(root->styleSheet()));
+        const QList<QWidget *> kids = root->findChildren<QWidget *>();
+        for (QWidget *w : kids) {
+            const QString css = w->styleSheet();
+            if (!css.isEmpty()) w->setStyleSheet(themed(css));
+        }
+    }
     explicit FileBrowser(const QString &startPath, QWidget *parent = nullptr)
         : QWidget(parent),
           currentPath(startPath),
@@ -102,11 +200,15 @@ public:
           shortcutsAnim(nullptr),
           shortcutsTargetVisible(false)
     {
-        setStyleSheet("background:#282828; color:white;");
-
         // SETTINGS (store in ~/.config/Alternix/osm-files.conf)
+        // Read first: every stylesheet below is written for the dark palette
+        // and translated by themed(), so the choice has to be known already.
         settings = new QSettings(QDir::homePath() + "/.config/Alternix/osm-files.conf",
                                  QSettings::IniFormat);
+        themeIsLight() = settings->value("ui/lightMode", false).toBool();
+
+        setStyleSheet(themed("background:#282828; color:white;"));
+
         loadShortcuts();
 
         // Card-style list (wide)
@@ -178,31 +280,31 @@ public:
         // Back button
         backBtn = new QPushButton("⇑");
         backBtn->setFixedSize(50, 50);
-        backBtn->setStyleSheet(
+        backBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; font-weight:bold; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(backBtn, 0);
 
         // Refresh button
         refreshBtn = new QPushButton("⟳");
         refreshBtn->setFixedSize(50, 50);
-        refreshBtn->setStyleSheet(
+        refreshBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(refreshBtn, 0);
 
         // Home button
         homeBtn = new QPushButton("🏡");
         homeBtn->setFixedSize(50, 50);
-        homeBtn->setStyleSheet(
+        homeBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(homeBtn, 0);
 
         connect(homeBtn, &QPushButton::clicked, this, [this]() {
@@ -212,11 +314,11 @@ public:
         // Network button
         networkBtn = new QPushButton("🌐");
         networkBtn->setFixedSize(50, 50);
-        networkBtn->setStyleSheet(
+        networkBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(networkBtn, 0);
 
         connect(networkBtn, &QPushButton::clicked, this, &FileBrowser::showNetworkDialog);
@@ -224,11 +326,11 @@ public:
         // USB button
         usbBtn = new QPushButton("🖴");
         usbBtn->setFixedSize(50, 50);
-        usbBtn->setStyleSheet(
+        usbBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(usbBtn, 0);
 
         connect(usbBtn, &QPushButton::clicked, this, &FileBrowser::showUsbDialog);
@@ -247,7 +349,7 @@ public:
             "padding:10px; font-size:15px; text-align:left; }"
             "QPushButton:hover { background:#444; }"
             "QPushButton:pressed { background:#222; }";
-        pathBtn->setStyleSheet(pathBtnNormalStyle);
+        pathBtn->setStyleSheet(themed(pathBtnNormalStyle));
         pathBtn->setMinimumHeight(50);
         pathBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         pathRow->addWidget(pathBtn, 1);
@@ -256,24 +358,44 @@ public:
         viewToggleBtn = new QPushButton("☴");
         viewToggleBtn->setFixedSize(50, 50);
         viewToggleBtn->setCheckable(true);
-        viewToggleBtn->setStyleSheet(
+        viewToggleBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
             "QPushButton:checked { background:#2a82da; }"
-        );
+        ));
         pathRow->addWidget(viewToggleBtn, 0);
 
         // Shortcuts button
         shortcutsBtn = new QPushButton("⭐");
         shortcutsBtn->setFixedSize(50, 50);
-        shortcutsBtn->setStyleSheet(
+        shortcutsBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; "
             "border-radius:10px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         pathRow->addWidget(shortcutsBtn, 0);
+        // Light / dark toggle
+        themeBtn = new QPushButton(themeIsLight() ? "\u2600" : "\U0001F319");
+        themeBtn->setFixedSize(50, 50);
+        themeBtn->setStyleSheet(themed(
+            "QPushButton { background:#555; color:white; border:none; "
+            "border-radius:10px; font-size:18px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#444; }"
+        ));
+        pathRow->addWidget(themeBtn, 0);
+
+        connect(themeBtn, &QPushButton::clicked, this, [this]() {
+            themeIsLight() = !themeIsLight();
+            if (settings) {
+                settings->setValue("ui/lightMode", themeIsLight());
+                settings->sync();
+            }
+            themeTree(this);
+            themeBtn->setText(themeIsLight() ? "\u2600" : "\U0001F319");
+        });
 
         root->addLayout(pathRow);
 
@@ -285,13 +407,13 @@ public:
             QPushButton *b = new QPushButton(text);
             b->setFixedHeight(40);
             b->setMinimumWidth(60);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:14px; }"
                 "QPushButton:hover:enabled { background:#666; }"
                 "QPushButton:pressed:enabled { background:#444; }"
                 "QPushButton:disabled { background:#222; color:#555; }"
                 "QPushButton:checked { background:#2a82da; color:white; border:3px solid #ffffff; }"
-            );
+            ));
             return b;
         };
 
@@ -308,14 +430,15 @@ public:
         deleteBtn = new QPushButton("Delete");
         deleteBtn->setFixedHeight(40);
         deleteBtn->setMinimumWidth(60);
-        deleteBtn->setStyleSheet(
+        deleteBtn->setStyleSheet(themed(
             "QPushButton { background:#222; color:#555; border:none; border-radius:10px; font-size:14px; }"
             "QPushButton:pressed:enabled { background:#aa0000; }"
             "QPushButton:hover:enabled { background:#dd3333; }"
-        );
+        ));
 
         extractBtn     = makeTopButton("Extract");
         openWithBtn    = makeTopButton("OpenWith");
+        defaultsBtn    = makeTopButton("Defaults");
         propsBtn       = makeTopButton("Details");
         multiSelectBtn = makeTopButton("Select");
         unselectBtn    = makeTopButton("Unselect");
@@ -334,13 +457,14 @@ public:
         bar->addWidget(deleteBtn, 0);
         bar->addWidget(extractBtn, 0);
         bar->addWidget(openWithBtn, 0);
+        bar->addWidget(defaultsBtn, 0);
         bar->addWidget(propsBtn, 0);
         bar->addWidget(multiSelectBtn, 0);
         bar->addWidget(unselectBtn, 0);
 
         QWidget *btnContainer = new QWidget;
         btnContainer->setFixedHeight(60);
-        btnContainer->setStyleSheet("background:transparent;");
+        btnContainer->setStyleSheet(themed("background:transparent;"));
         btnContainer->setLayout(bar);
 
         QScrollArea *btnScroll = new QScrollArea;
@@ -349,10 +473,10 @@ public:
         btnScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         btnScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         btnScroll->setFrameShape(QFrame::NoFrame);
-        btnScroll->setStyleSheet("background:transparent;");
+        btnScroll->setStyleSheet(themed("background:transparent;"));
         btnScroll->setWidget(btnContainer);
 
-        btnScroll->setStyleSheet("QScrollArea { padding:0; margin:0; border:0; }");
+        btnScroll->setStyleSheet(themed("QScrollArea { padding:0; margin:0; border:0; }"));
         btnScroll->widget()->setContentsMargins(0,0,0,0);
         btnScroll->viewport()->setContentsMargins(0,0,0,0);
         bar->setContentsMargins(0,0,0,0);
@@ -363,7 +487,7 @@ public:
         // --- File list scroll area ---
         scroll = new QScrollArea;
         scroll->setWidgetResizable(true);
-        scroll->setStyleSheet("background:#282828; border:none;");
+        scroll->setStyleSheet(themed("background:#282828; border:none;"));
         scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         QScroller::grabGesture(scroll, QScroller::LeftMouseButtonGesture);
@@ -380,7 +504,7 @@ public:
         QHBoxLayout *statusRow = new QHBoxLayout;
         statusRow->setSpacing(5);
         statusLabel = new QLabel("0 items");
-        statusLabel->setStyleSheet("QLabel { color:#CCCCCC; font-size:12px; }");
+        statusLabel->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:12px; }"));
         statusRow->addWidget(statusLabel, 1);
         root->addLayout(statusRow);
 
@@ -391,7 +515,7 @@ public:
 
         // Path Menu
         pathMenu = new QWidget(this, Qt::Popup);
-        pathMenu->setStyleSheet("background:#222; border:2px solid #555; border-radius:14px;");
+        pathMenu->setStyleSheet(themed("background:#222; border:2px solid #555; border-radius:14px;"));
         pathMenuLayout = new QVBoxLayout(pathMenu);
         pathMenuLayout->setContentsMargins(10,10,10,10);
         pathMenuLayout->setSpacing(6);
@@ -399,9 +523,9 @@ public:
         // SHORTCUTS PANEL (floating overlay)
         shortcutsPanel = new QWidget(this, Qt::FramelessWindowHint | Qt::Tool | Qt::WindowStaysOnTopHint);
         shortcutsPanel->setFixedWidth(320);
-        shortcutsPanel->setStyleSheet(
+        shortcutsPanel->setStyleSheet(themed(
             "background:rgba(30,30,30,0.92); border-left:3px solid #444;"
-        );
+        ));
         shortcutsPanel->hide();
 
         shortcutsLayout = new QVBoxLayout(shortcutsPanel);
@@ -415,22 +539,22 @@ public:
         QHBoxLayout *bottomBtns = new QHBoxLayout;
         addShortcutBtn = new QPushButton("+");
         addShortcutBtn->setFixedHeight(60);
-        addShortcutBtn->setStyleSheet(
+        addShortcutBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border-radius:12px; "
             "font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
 
         removeShortcutBtn = new QPushButton("🗑️");
         removeShortcutBtn->setFixedHeight(60);
         removeShortcutBtn->setCheckable(true);
-        removeShortcutBtn->setStyleSheet(
+        removeShortcutBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border-radius:12px; "
             "font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:checked { background:#aa0000; }"
-        );
+        ));
 
         bottomBtns->addWidget(addShortcutBtn);
         bottomBtns->addWidget(removeShortcutBtn);
@@ -507,6 +631,7 @@ public:
         connect(deleteBtn,    &QPushButton::clicked, this, &FileBrowser::deleteSelection);
         connect(propsBtn,     &QPushButton::clicked, this, &FileBrowser::showPropertiesDialog);
         connect(openWithBtn,  &QPushButton::clicked, this, &FileBrowser::openWithSelection);
+        connect(defaultsBtn,  &QPushButton::clicked, this, &FileBrowser::showDefaultAppsDialog);
         connect(mkdirBtn,     &QPushButton::clicked, this, &FileBrowser::createDirectory);
         connect(newFileBtn,   &QPushButton::clicked, this, &FileBrowser::createNewFile);
         connect(extractBtn,   &QPushButton::clicked, this, &FileBrowser::extractSelection);
@@ -639,6 +764,8 @@ private:
     QPushButton *deleteBtn;
     QPushButton *extractBtn;
     QPushButton *openWithBtn;
+    QPushButton *defaultsBtn = nullptr;
+    QPushButton *themeBtn = nullptr;
     QPushButton *propsBtn;
     QPushButton *multiSelectBtn;
     QPushButton *unselectBtn;
@@ -848,12 +975,12 @@ private:
             else                                  labelText = "📁 " + base;
 
             QPushButton *b = new QPushButton(labelText, shortcutsPanel);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#333; color:white; border:none; "
                 "border-radius:14px; padding:10px; font-size:15px; text-align:left; }"
                 "QPushButton:hover { background:#444; }"
                 "QPushButton:pressed { background:#222; }"
-            );
+            ));
             b->setProperty("shortcutPath", path);
 
             connect(b, &QPushButton::clicked, this, [this, path]() {
@@ -955,7 +1082,7 @@ private:
 
         QPushButton *btn = new QPushButton;
         btn->setFont(entryFont);
-        btn->setStyleSheet(currentNormalStyle);
+        btn->setStyleSheet(themed(currentNormalStyle));
 
         if (gridMode) {
             btn->setMinimumHeight(220);
@@ -968,12 +1095,12 @@ private:
             QLabel *thumb = new QLabel(btn);
             thumb->setAlignment(Qt::AlignCenter);
             thumb->setMinimumHeight(140);
-            thumb->setStyleSheet("background:transparent;");
+            thumb->setStyleSheet(themed("background:transparent;"));
 
             QLabel *nameLbl = new QLabel(name, btn);
             nameLbl->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
             nameLbl->setWordWrap(true);
-            nameLbl->setStyleSheet("background:transparent; font-size:20px;");
+            nameLbl->setStyleSheet(themed("background:transparent; font-size:20px;"));
             nameLbl->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 
             v->addWidget(thumb);
@@ -1030,7 +1157,7 @@ private:
                 toggleSelection(p);
             } else {
                 if (isDir) listDirectory(p);
-                else QProcess::startDetached("osm-viewer", QStringList() << p);
+                else openFilePath(p);
             }
         });
 
@@ -1053,12 +1180,12 @@ private:
 
         auto makeEntry = [this](const QString &label, const QString &path) {
             QPushButton *b = new QPushButton(label, pathMenu);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#444; color:white; border:none; border-radius:10px; "
                 "padding:16px; font-size:15px; text-align:left;}"
                 "QPushButton:hover { background:#555; }"
                 "QPushButton:pressed { background:#333; }"
-            );
+            ));
             connect(b, &QPushButton::clicked, this, [this, path]() {
                 pathMenu->hide();
                 listDirectory(path);
@@ -1158,7 +1285,7 @@ private:
     void applySelectionStyle(const QString &p, bool sel) {
         if (pathToButton.contains(p)) {
             QPushButton *b = pathToButton[p];
-            b->setStyleSheet(sel ? currentSelectedStyle : currentNormalStyle);
+            b->setStyleSheet(themed(sel ? currentSelectedStyle : currentNormalStyle));
         }
     }
 
@@ -1196,18 +1323,18 @@ private:
     void updateDeleteButton(bool enabled) {
         if (enabled) {
             deleteBtn->setEnabled(true);
-            deleteBtn->setStyleSheet(
+            deleteBtn->setStyleSheet(themed(
                 "QPushButton { background:#cc0000; color:white; border:none; "
                 "border-radius:10px; font-size:18px; }"
                 "QPushButton:hover { background:#dd3333; }"
                 "QPushButton:pressed { background:#aa0000; }"
-            );
+            ));
         } else {
             deleteBtn->setEnabled(false);
-            deleteBtn->setStyleSheet(
+            deleteBtn->setStyleSheet(themed(
                 "QPushButton { background:#222; color:#555; border:none; "
                 "border-radius:10px; font-size:18px; }"
-            );
+            ));
         }
     }
 
@@ -1314,16 +1441,16 @@ private:
         frac = qBound(0.0, frac, 1.0);
         QString stop = QString::number(frac, 'f', 4);
         pathBtn->setText(QString("%1  (%2%)").arg(label).arg(int(frac * 100)));
-        pathBtn->setStyleSheet(QString(
+        pathBtn->setStyleSheet(themed(QString(
             "QPushButton { "
             "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
             "stop:0 #2a82da, stop:%1 #2a82da, stop:%1 #333333, stop:1 #333333); "
             "color:white; border-radius:8px; padding:10px; font-size:15px; text-align:left; }"
-        ).arg(stop));
+        ).arg(stop)));
     }
 
     void resetPathBar() {
-        pathBtn->setStyleSheet(pathBtnNormalStyle);
+        pathBtn->setStyleSheet(themed(pathBtnNormalStyle));
         pathBtn->setText(currentPath);
         pathBtn->setEnabled(true);
     }
@@ -1500,22 +1627,22 @@ private:
         confirm.setIcon(QMessageBox::Warning);
         confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
         confirm.setDefaultButton(QMessageBox::Cancel);
-        confirm.setStyleSheet(
+        confirm.setStyleSheet(themed(
             "QMessageBox { background:#282828; }"
             "QMessageBox QLabel { color:white; font-size:18px; }"
             "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
             "padding:8px 24px; font-size:16px; min-width:80px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         if (QPushButton *yes = qobject_cast<QPushButton*>(confirm.button(QMessageBox::Yes))) {
             yes->setText("Delete");
-            yes->setStyleSheet(
+            yes->setStyleSheet(themed(
                 "QPushButton { background:#aa2222; color:white; border:none; border-radius:8px; "
                 "padding:8px 24px; font-size:16px; min-width:80px; }"
                 "QPushButton:hover { background:#cc3333; }"
                 "QPushButton:pressed { background:#881818; }"
-            );
+            ));
         }
 
         if (confirm.exec() != QMessageBox::Yes) return;
@@ -1631,7 +1758,7 @@ private:
 
         QDialog dlg(this);
         dlg.setWindowTitle("Properties");
-        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
         QVBoxLayout *layout = new QVBoxLayout(&dlg);
 
         if (sel.size() == 1) {
@@ -1667,7 +1794,7 @@ private:
                 "Modified: " + mod
             }) {
                 QLabel *L = new QLabel(s);
-                L->setStyleSheet("QLabel { color:white; font-size:20px; }");
+                L->setStyleSheet(themed("QLabel { color:white; font-size:20px; }"));
                 L->setWordWrap(true);
                 layout->addWidget(L);
             }
@@ -1686,17 +1813,17 @@ private:
                 QString("Selected: %1\nFiles: %2\nFolders: %3\nTotal size: %4 bytes")
                     .arg(sel.size()).arg(files).arg(dirs).arg(total)
             );
-            sum->setStyleSheet("QLabel { color:white; font-size:20px; }");
+            sum->setStyleSheet(themed("QLabel { color:white; font-size:20px; }"));
             sum->setWordWrap(true);
             layout->addWidget(sum);
         }
 
         QDialogButtonBox *bb = new QDialogButtonBox(QDialogButtonBox::Ok);
-        bb->setStyleSheet(
+        bb->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:8px; padding:8px 20px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
         connect(bb,&QDialogButtonBox::accepted,&dlg,&QDialog::accept);
         layout->addWidget(bb);
 
@@ -1705,29 +1832,227 @@ private:
         updateActionButtons();
     }
 
+    // ================= DEFAULT APPLICATIONS =================
+
+    // Extension key used for remembering default applications ("txt", "png").
+    // Files with no extension get an empty key and are never remembered.
+    static QString extensionKeyFor(const QString &filePath) {
+        return QFileInfo(filePath).suffix().toLower();
+    }
+
+    QString defaultExecFor(const QString &ext) {
+        if (!settings || ext.isEmpty()) return QString();
+        settings->beginGroup("DefaultApps");
+        const QString tmpl = settings->value(ext).toString();
+        settings->endGroup();
+        return tmpl;
+    }
+
+    QString defaultNameFor(const QString &ext) {
+        if (!settings || ext.isEmpty()) return QString();
+        settings->beginGroup("DefaultAppNames");
+        const QString name = settings->value(ext).toString();
+        settings->endGroup();
+        return name;
+    }
+
+    void setDefaultAppFor(const QString &ext, const QString &name, const QString &execTemplate) {
+        if (!settings || ext.isEmpty() || execTemplate.isEmpty()) return;
+        settings->beginGroup("DefaultApps");
+        settings->setValue(ext, execTemplate);
+        settings->endGroup();
+        settings->beginGroup("DefaultAppNames");
+        settings->setValue(ext, name.isEmpty() ? execTemplate : name);
+        settings->endGroup();
+        settings->sync();
+    }
+
+    void clearDefaultAppFor(const QString &ext) {
+        if (!settings || ext.isEmpty()) return;
+        settings->beginGroup("DefaultApps");
+        settings->remove(ext);
+        settings->endGroup();
+        settings->beginGroup("DefaultAppNames");
+        settings->remove(ext);
+        settings->endGroup();
+        settings->sync();
+    }
+
+    // Open a file with the application remembered for its type, falling back
+    // to osm-viewer when nothing has been chosen.
+    void openFilePath(const QString &filePath) {
+        const QString tmpl = defaultExecFor(extensionKeyFor(filePath));
+        if (!tmpl.isEmpty()) {
+            QProcess::startDetached("sh", QStringList()
+                                    << "-c" << buildExecCommand(tmpl, filePath));
+            return;
+        }
+        QProcess::startDetached("osm-viewer", QStringList() << filePath);
+    }
+
+    // Manage the remembered file-type -> application choices.
+    void showDefaultAppsDialog() {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Default applications");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+        dlg.setMinimumSize(560, 640);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(12);
+
+        QLabel *info = new QLabel("File types that always open in a chosen application.");
+        info->setWordWrap(true);
+        info->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:18px; }"));
+        lay->addWidget(info);
+
+        QListWidget *list = new QListWidget;
+        list->setStyleSheet(themed(
+            "QListWidget { background:#333; color:white; font-size:22px; border:none; border-radius:8px; }"
+            "QListWidget::item { padding:16px; }"
+            "QListWidget::item:selected { background:#2a82da; }"
+        ));
+        list->setMinimumHeight(420);
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        QScroller::ungrabGesture(list);
+        lay->addWidget(list, 1);
+
+        std::function<void()> reload = [&]() {
+            list->clear();
+            if (!settings) return;
+
+            settings->beginGroup("DefaultApps");
+            QStringList exts = settings->childKeys();
+            settings->endGroup();
+            exts.sort();
+
+            if (exts.isEmpty()) {
+                QListWidgetItem *empty = new QListWidgetItem(
+                    "Nothing set yet - use OpenWith on a file and tick "
+                    "\"Always open ... with this\".");
+                empty->setData(Qt::UserRole, "");
+                list->addItem(empty);
+                return;
+            }
+
+            for (const QString &ext : exts) {
+                const QString name = defaultNameFor(ext);
+                const QString tmpl = defaultExecFor(ext);
+                QListWidgetItem *it = new QListWidgetItem(
+                    "." + ext + "      " + (name.isEmpty() ? tmpl : name));
+                it->setData(Qt::UserRole, ext);
+                list->addItem(it);
+            }
+        };
+        reload();
+
+        auto bigBtn = [](const QString &text) {
+            QPushButton *b = new QPushButton(text);
+            b->setMinimumHeight(64);
+            b->setStyleSheet(themed(
+                "QPushButton { background:#555; color:white; border:none; border-radius:12px; "
+                "padding:10px 20px; font-size:20px; }"
+                "QPushButton:hover { background:#666; }"
+                "QPushButton:pressed { background:#444; }"
+            ));
+            return b;
+        };
+
+        QPushButton *removeBtn = bigBtn("Remove");
+        QPushButton *clearBtn  = bigBtn("Remove all");
+        QPushButton *closeBtn  = bigBtn("Close");
+
+        QHBoxLayout *row = new QHBoxLayout;
+        row->setSpacing(12);
+        row->addWidget(removeBtn);
+        row->addWidget(clearBtn);
+        row->addStretch(1);
+        row->addWidget(closeBtn);
+        lay->addLayout(row);
+
+        connect(removeBtn, &QPushButton::clicked, &dlg, [&]() {
+            QListWidgetItem *cur = list->currentItem();
+            if (!cur) return;
+            const QString ext = cur->data(Qt::UserRole).toString();
+            if (ext.isEmpty()) return;
+            clearDefaultAppFor(ext);
+            reload();
+        });
+
+        connect(clearBtn, &QPushButton::clicked, &dlg, [&]() {
+            QMessageBox confirm(&dlg);
+            confirm.setWindowTitle("Default applications");
+            confirm.setText("Forget every remembered file type?");
+            confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::No);
+            confirm.setDefaultButton(QMessageBox::No);
+            if (confirm.exec() != QMessageBox::Yes) return;
+
+            if (settings) {
+                settings->beginGroup("DefaultApps");
+                settings->remove("");
+                settings->endGroup();
+                settings->beginGroup("DefaultAppNames");
+                settings->remove("");
+                settings->endGroup();
+                settings->sync();
+            }
+            reload();
+        });
+
+        connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+        dlg.exec();
+    }
+
     void openWithSelection() {
         if (selectedPaths.size() != 1) return;
 
         QString filePath = *selectedPaths.begin();
         if (!QFileInfo(filePath).isFile()) return;
 
+        const QString ext = extensionKeyFor(filePath);
+
         QDialog dlg(this);
         dlg.setWindowTitle("Open with");
-        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+        dlg.setMinimumSize(560, 760);
+
         QVBoxLayout *layout = new QVBoxLayout(&dlg);
+        layout->setSpacing(12);
+
+        QLabel *heading = new QLabel(QFileInfo(filePath).fileName());
+        heading->setWordWrap(true);
+        heading->setStyleSheet(themed("QLabel { color:#DDDDDD; font-size:20px; }"));
+        layout->addWidget(heading);
+
+        const QString currentDefault = defaultNameFor(ext);
+        if (!currentDefault.isEmpty()) {
+            QLabel *cur = new QLabel(
+                QString(".%1 files currently open in %2").arg(ext, currentDefault));
+            cur->setWordWrap(true);
+            cur->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:16px; }"));
+            layout->addWidget(cur);
+        }
 
         QListWidget *list = new QListWidget;
-        list->setStyleSheet(
-            "QListWidget { background:#333; color:white; font-size:18px; border:none; }"
-            "QListWidget::item { padding:6px; }"
-            "QListWidget::item:selected { background:#555; }"
-        );
-        layout->addWidget(list);
+        list->setStyleSheet(themed(
+            "QListWidget { background:#333; color:white; font-size:22px; border:none; border-radius:8px; }"
+            "QListWidget::item { padding:16px; }"
+            "QListWidget::item:selected { background:#2a82da; }"
+        ));
+        list->setMinimumHeight(460);
+        list->setIconSize(QSize(44, 44));
+        layout->addWidget(list, 1);
 
         QScroller::ungrabGesture(list);
         list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
         QVector<DesktopApp> apps = loadDesktopApps();
+        std::sort(apps.begin(), apps.end(),
+                  [](const DesktopApp &a, const DesktopApp &b) {
+                      return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+                  });
+
+        const QString currentExec = defaultExecFor(ext);
         for (const DesktopApp &app : apps) {
             QListWidgetItem *item = new QListWidgetItem(app.name, list);
             item->setData(Qt::UserRole, app.exec);
@@ -1735,43 +2060,97 @@ private:
                 QIcon ic = QIcon::fromTheme(app.icon);
                 if (!ic.isNull()) item->setIcon(ic);
             }
+            if (!currentExec.isEmpty() && app.exec == currentExec)
+                list->setCurrentItem(item);   // preselect the remembered app
         }
 
         QLineEdit *cmdEdit = new QLineEdit;
         cmdEdit->setPlaceholderText("Custom command (e.g. gimp %f)");
-        cmdEdit->setStyleSheet(
-            "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:6px; font-size:18px; }"
-        );
+        cmdEdit->setMinimumHeight(56);
+        cmdEdit->setStyleSheet(themed(
+            "QLineEdit { background:#333; color:#DDDDDD; border-radius:8px; padding:10px; font-size:20px; }"
+        ));
         layout->addWidget(cmdEdit);
 
-        QDialogButtonBox *bb = new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
-        bb->setStyleSheet(
-            "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
-            "padding:8px 20px; font-size:18px; }"
-            "QPushButton:hover { background:#666; }"
-            "QPushButton:pressed { background:#444; }"
-        );
-        connect(bb,&QDialogButtonBox::accepted,&dlg,&QDialog::accept);
-        connect(bb,&QDialogButtonBox::rejected,&dlg,&QDialog::reject);
-        layout->addWidget(bb);
+        QCheckBox *always = new QCheckBox(
+            ext.isEmpty() ? QString("Always use this application")
+                          : QString("Always open .%1 files with this").arg(ext));
+        always->setEnabled(!ext.isEmpty());
+        always->setStyleSheet(themed(
+            "QCheckBox { color:white; font-size:20px; spacing:14px; padding:6px; }"
+            "QCheckBox::indicator { width:34px; height:34px; }"
+            "QCheckBox::indicator:unchecked { background:#333; border:2px solid #666; border-radius:6px; }"
+            "QCheckBox::indicator:checked { background:#2a82da; border:2px solid #2a82da; border-radius:6px; }"
+            "QCheckBox:disabled { color:#666; }"
+        ));
+        layout->addWidget(always);
+
+        auto bigBtn = [](const QString &text, bool accent = false) {
+            QPushButton *b = new QPushButton(text);
+            b->setMinimumHeight(72);
+            b->setMinimumWidth(150);
+            if (accent) {
+                b->setStyleSheet(themed(
+                    "QPushButton { background:#2a82da; color:white; border:none; border-radius:12px; "
+                    "padding:10px 24px; font-size:24px; }"
+                    "QPushButton:hover { background:#3a92ea; }"
+                    "QPushButton:pressed { background:#1a72ca; }"
+                ));
+            } else {
+                b->setStyleSheet(themed(
+                    "QPushButton { background:#555; color:white; border:none; border-radius:12px; "
+                    "padding:10px 24px; font-size:24px; }"
+                    "QPushButton:hover { background:#666; }"
+                    "QPushButton:pressed { background:#444; }"
+                ));
+            }
+            return b;
+        };
+
+        QPushButton *manageBtn = bigBtn("Defaults");
+        QPushButton *cancelBtn = bigBtn("Cancel");
+        QPushButton *openBtn   = bigBtn("Open", true);
+
+        QHBoxLayout *btnRow = new QHBoxLayout;
+        btnRow->setSpacing(12);
+        btnRow->addWidget(manageBtn);
+        btnRow->addStretch(1);
+        btnRow->addWidget(cancelBtn);
+        btnRow->addWidget(openBtn);
+        layout->addLayout(btnRow);
+
+        connect(manageBtn, &QPushButton::clicked, &dlg, [this]() {
+            showDefaultAppsDialog();
+        });
+        connect(openBtn,   &QPushButton::clicked, &dlg, &QDialog::accept);
+        connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+        connect(list, &QListWidget::itemDoubleClicked, &dlg,
+                [&dlg](QListWidgetItem *) { dlg.accept(); });
 
         if (dlg.exec() != QDialog::Accepted) return;
 
         QString cmd;
+        QString chosenTemplate;
+        QString chosenName;
+
         QListWidgetItem *cur = list->currentItem();
         QString custom = cmdEdit->text().trimmed();
 
-        if (cur) {
-            QString execTemplate = cur->data(Qt::UserRole).toString();
-            cmd = buildExecCommand(execTemplate, filePath);
-        } else if (!custom.isEmpty()) {
-            if (custom.contains("%f"))
-                cmd = buildExecCommand(custom, filePath);
-            else
-                cmd = custom + " " + quoteFilePath(filePath);
+        if (!custom.isEmpty()) {
+            // a typed command wins over the highlighted list entry
+            chosenTemplate = custom.contains('%') ? custom : custom + " %f";
+            chosenName     = custom.section(' ', 0, 0);
+            cmd            = buildExecCommand(chosenTemplate, filePath);
+        } else if (cur) {
+            chosenTemplate = cur->data(Qt::UserRole).toString();
+            chosenName     = cur->text();
+            cmd            = buildExecCommand(chosenTemplate, filePath);
         } else {
             return;
         }
+
+        if (always->isChecked() && !ext.isEmpty())
+            setDefaultAppFor(ext, chosenName, chosenTemplate);
 
         QProcess::startDetached("sh", QStringList() << "-c" << cmd);
         clearSelection(true);
@@ -1921,21 +2300,21 @@ private:
 
         if (added) {
             // highlight the USB button and mention it in the status bar
-            usbBtn->setStyleSheet(
+            usbBtn->setStyleSheet(themed(
                 "QPushButton { background:#2a82da; color:white; border:none; border-radius:10px; font-size:18px; }"
                 "QPushButton:hover { background:#3a92ea; }"
                 "QPushButton:pressed { background:#1a72ca; }"
-            );
+            ));
             if (statusLabel) statusLabel->setText("USB device attached");
         }
     }
 
     void resetUsbButtonStyle() {
-        usbBtn->setStyleSheet(
+        usbBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
-        );
+        ));
     }
 
     void showUsbDialog() {
@@ -1945,7 +2324,7 @@ private:
 
         QDialog dlg(this);
         dlg.setWindowTitle("Removable Drives");
-        dlg.setStyleSheet("background:#282828; color:white;");
+        dlg.setStyleSheet(themed("background:#282828; color:white;"));
         dlg.setMinimumWidth(460);
 
         QVBoxLayout *lay = new QVBoxLayout(&dlg);
@@ -1953,7 +2332,7 @@ private:
 
         if (parts.isEmpty()) {
             QLabel *none = new QLabel("No USB drives or SD cards detected.");
-            none->setStyleSheet("font-size:15px; padding:20px;");
+            none->setStyleSheet(themed("font-size:15px; padding:20px;"));
             lay->addWidget(none);
         }
 
@@ -1971,12 +2350,12 @@ private:
             QPushButton *b = new QPushButton(text);
             b->setMinimumHeight(64);
             b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#444; color:white; border:none; border-radius:10px;"
                 " padding:10px; font-size:14px; text-align:left; }"
                 "QPushButton:hover { background:#555; }"
                 "QPushButton:pressed { background:#333; }"
-            );
+            ));
             row->addWidget(b, 1);
 
             // Eject button (only useful when mounted, but always shown;
@@ -1984,12 +2363,12 @@ private:
             QPushButton *eject = new QPushButton("⏏");
             eject->setFixedSize(64, 64);
             eject->setEnabled(!p.mountPoint.isEmpty());
-            eject->setStyleSheet(
+            eject->setStyleSheet(themed(
                 "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:22px; }"
                 "QPushButton:hover:enabled { background:#dd3333; }"
                 "QPushButton:pressed:enabled { background:#aa0000; }"
                 "QPushButton:disabled { background:#222; color:#555; }"
-            );
+            ));
             row->addWidget(eject, 0);
 
             lay->addLayout(row);
@@ -2012,11 +2391,11 @@ private:
         QPushButton *close  = new QPushButton("Close");
         for (QPushButton *b : { rescan, close }) {
             b->setFixedHeight(44);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:14px; }"
                 "QPushButton:hover { background:#666; }"
                 "QPushButton:pressed { background:#444; }"
-            );
+            ));
         }
         btnRow->addWidget(rescan);
         btnRow->addWidget(close);
@@ -2159,21 +2538,21 @@ private:
 
         QDialog dlg(this);
         dlg.setWindowTitle("Network");
-        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
         dlg.setMinimumWidth(420);
         QVBoxLayout *layout = new QVBoxLayout(&dlg);
         layout->setSpacing(10);
 
         QLabel *title = new QLabel("Saved servers");
-        title->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        title->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:14px; }"));
         layout->addWidget(title);
 
         QListWidget *list = new QListWidget;
-        list->setStyleSheet(
+        list->setStyleSheet(themed(
             "QListWidget { background:#333; color:white; font-size:16px; border:none; border-radius:8px; }"
             "QListWidget::item { padding:8px; }"
             "QListWidget::item:selected { background:#555; }"
-        );
+        ));
         QScroller::grabGesture(list, QScroller::LeftMouseButtonGesture);
         list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         for (const QString &s : savedServers)
@@ -2182,25 +2561,25 @@ private:
 
         // Address entry
         QLabel *addrLbl = new QLabel("Server address");
-        addrLbl->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        addrLbl->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:14px; }"));
         layout->addWidget(addrLbl);
 
         QLineEdit *addrEdit = new QLineEdit;
         addrEdit->setPlaceholderText("smb://server/share, sftp://host, ftp://host ...");
-        addrEdit->setStyleSheet(
+        addrEdit->setStyleSheet(themed(
             "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:8px; font-size:16px; }"
-        );
+        ));
         layout->addWidget(addrEdit);
 
         // Find servers on the network instead of typing an address
         QPushButton *scanBtn = new QPushButton("🔍  Scan for NAS");
         scanBtn->setFixedHeight(44);
-        scanBtn->setStyleSheet(
+        scanBtn->setStyleSheet(themed(
             "QPushButton { background:#2a82da; color:white; border:none; border-radius:8px; "
             "padding:8px 20px; font-size:15px; }"
             "QPushButton:hover { background:#3a92ea; }"
             "QPushButton:pressed { background:#1a72ca; }"
-        );
+        ));
         layout->addWidget(scanBtn);
         connect(scanBtn, &QPushButton::clicked, &dlg, [this, addrEdit]() {
             showNasScanDialog(addrEdit);
@@ -2215,8 +2594,8 @@ private:
         passEdit->setEchoMode(QLineEdit::Password);
         QString credStyle =
             "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:8px; font-size:16px; }";
-        userEdit->setStyleSheet(credStyle);
-        passEdit->setStyleSheet(credStyle);
+        userEdit->setStyleSheet(themed(credStyle));
+        passEdit->setStyleSheet(themed(credStyle));
         credRow->addWidget(userEdit);
         credRow->addWidget(passEdit);
         layout->addLayout(credRow);
@@ -2226,12 +2605,12 @@ private:
         auto makeDlgBtn = [](const QString &text) {
             QPushButton *b = new QPushButton(text);
             b->setFixedHeight(44);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
                 "padding:8px 20px; font-size:15px; }"
                 "QPushButton:hover { background:#666; }"
                 "QPushButton:pressed { background:#444; }"
-            );
+            ));
             return b;
         };
         QPushButton *connectBtn = makeDlgBtn("Connect");
@@ -2604,7 +2983,7 @@ private:
     void showNasScanDialog(QLineEdit *addrEdit) {
         QDialog dlg(this);
         dlg.setWindowTitle("Scan for NAS");
-        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
         dlg.setMinimumWidth(420);
         dlg.setMinimumHeight(420);
 
@@ -2613,15 +2992,15 @@ private:
 
         QLabel *status = new QLabel("Ready to scan.");
         status->setWordWrap(true);
-        status->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        status->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:14px; }"));
         lay->addWidget(status);
 
         QListWidget *list = new QListWidget;
-        list->setStyleSheet(
+        list->setStyleSheet(themed(
             "QListWidget { background:#333; color:white; font-size:16px; border:none; border-radius:8px; }"
             "QListWidget::item { padding:10px; }"
             "QListWidget::item:selected { background:#555; }"
-        );
+        ));
         QScroller::grabGesture(list, QScroller::LeftMouseButtonGesture);
         list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         lay->addWidget(list, 1);
@@ -2630,12 +3009,12 @@ private:
         auto mkBtn = [](const QString &text) {
             QPushButton *b = new QPushButton(text);
             b->setFixedHeight(44);
-            b->setStyleSheet(
+            b->setStyleSheet(themed(
                 "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
                 "padding:8px 20px; font-size:15px; }"
                 "QPushButton:hover { background:#666; }"
                 "QPushButton:pressed { background:#444; }"
-            );
+            ));
             return b;
         };
         QPushButton *rescanBtn = mkBtn("Scan again");
