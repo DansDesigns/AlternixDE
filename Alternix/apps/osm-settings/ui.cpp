@@ -1,7 +1,9 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
+#include <QColor>
 #include <QPushButton>
 #include <QSlider>
 #include <QScrollArea>
@@ -25,6 +27,7 @@
 #include <QPixmap>
 #include <QMap>
 #include <QPair>
+#include <QList>
 #include <algorithm>
 
 // -----------------------------------------------------
@@ -203,6 +206,24 @@ static QString comboStyle()
         "}";
 }
 
+// -----------------------------------------------------
+// Colour swatch style (launcher font colour picker)
+// -----------------------------------------------------
+static QString swatchStyle(const QString &hex, bool selected)
+{
+    return QString(
+        "QPushButton {"
+        "   background:%1;"
+        "   border-radius:16px;"
+        "   border:%2;"
+        "}"
+        "QPushButton:pressed {"
+        "   border:4px solid #ffffff;"
+        "}"
+    ).arg(hex, selected ? QString("4px solid #4aa3ff")
+                        : QString("2px solid #222222"));
+}
+
 // Same folder osm-status and sound.cpp read sound files from.
 static QString soundsDir()
 {
@@ -375,9 +396,6 @@ public:
         outerLay->setContentsMargins(50, 30, 50, 30);
         outerLay->setSpacing(30);
 
-        // ── Settings font size ──────────────────────────
-        outerLay->addWidget(makeSettingsFontCard());
-
         // ── App launcher font size ──────────────────────
         outerLay->addWidget(makeLauncherFontCard());
 
@@ -413,10 +431,12 @@ private:
     QStackedWidget *m_stack   = nullptr;
     QSettings      *m_settings = nullptr;
 
-    QLabel  *m_settingsFontPreview  = nullptr;
     QLabel  *m_launcherFontPreview  = nullptr;
-    QSlider *m_settingsFontSlider   = nullptr;
     QSlider *m_launcherFontSlider   = nullptr;
+
+    QLabel  *m_launcherColorPreview = nullptr;
+    QString  m_launcherColor;
+    QList<QPushButton*> m_launcherColorSwatches;
 
     QComboBox *m_cursorCombo    = nullptr;
     QLabel    *m_cursorPreview  = nullptr;
@@ -430,6 +450,17 @@ private:
     // Font size range: 14pt–36pt, stored as integer point size
     static constexpr int FONT_MIN = 14;
     static constexpr int FONT_MAX = 36;
+
+    // Launcher font colour, stored as a hex string osm-launcher can feed
+    // straight into a stylesheet. Twelve swatches, laid out four per row.
+    static constexpr const char *LAUNCHER_COLOR_DEF = "#ffffff";
+    static constexpr const char *LAUNCHER_COLORS[] = {
+        "#ffffff", "#cccccc", "#888888", "#000000", "#ff5555", "#ffa53c",
+        "#ffe14a", "#7cfc00", "#4ae0e0", "#4aa3ff", "#b46aff", "#ff7ac6"
+    };
+    static constexpr int LAUNCHER_COLOR_COUNT =
+        int(sizeof(LAUNCHER_COLORS) / sizeof(LAUNCHER_COLORS[0]));
+    static constexpr int LAUNCHER_COLOR_COLS = 4;   // 72px swatches, fits portrait
 
     // Cursor sizes. Themes ship a fixed set of sizes and libXcursor loads
     // the nearest one it has rather than scaling to an arbitrary request,
@@ -468,77 +499,6 @@ private:
             if (d < bestDelta) { bestDelta = d; best = i; }
         }
         return best;
-    }
-
-    // ── Settings font card ──────────────────────────────
-    QWidget *makeSettingsFontCard()
-    {
-        QFrame *card = new QFrame;
-        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-
-        QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 24, 30, 24);
-        v->setSpacing(16);
-
-        // Header row
-        QHBoxLayout *hdr = new QHBoxLayout();
-        QLabel *lbl = new QLabel("Settings Font Size");
-        lbl->setStyleSheet("font-size:30px; font-weight:bold;");
-        hdr->addWidget(lbl);
-        hdr->addStretch();
-
-        m_settingsFontPreview = new QLabel();
-        m_settingsFontPreview->setStyleSheet("font-size:22px; color:#aaaaaa;");
-        hdr->addWidget(m_settingsFontPreview);
-        v->addLayout(hdr);
-
-        // Slider
-        m_settingsFontSlider = new QSlider(Qt::Horizontal, card);
-        m_settingsFontSlider->setRange(FONT_MIN, FONT_MAX);
-        m_settingsFontSlider->setStyleSheet(sliderStyle());
-        m_settingsFontSlider->setFixedHeight(40);
-
-        int saved = m_settings->value("UI/SettingsFontSize", defaultSettingsFont()).toInt();
-        saved = qBound(FONT_MIN, saved, FONT_MAX);
-        m_settingsFontSlider->setValue(saved);
-        updateSettingsFontPreview(saved);
-
-        v->addWidget(m_settingsFontSlider);
-
-        // Endpoint labels
-        QHBoxLayout *endRow = new QHBoxLayout();
-        QLabel *minLbl = new QLabel(QString("%1pt").arg(FONT_MIN));
-        minLbl->setStyleSheet("font-size:18px; color:#888;");
-        QLabel *maxLbl = new QLabel(QString("%1pt").arg(FONT_MAX));
-        maxLbl->setStyleSheet("font-size:18px; color:#888;");
-        endRow->addWidget(minLbl);
-        endRow->addStretch();
-        endRow->addWidget(maxLbl);
-        v->addLayout(endRow);
-
-        // Reset button
-        QPushButton *reset = new QPushButton("Reset");
-        reset->setStyleSheet(uiBtnStyle());
-        reset->setFixedSize(120, 44);
-        QHBoxLayout *btnRow = new QHBoxLayout();
-        btnRow->addStretch();
-        btnRow->addWidget(reset);
-        v->addLayout(btnRow);
-
-        // Connections
-        connect(m_settingsFontSlider, &QSlider::valueChanged, this, [this](int v) {
-            m_settings->setValue("UI/SettingsFontSize", v);
-            m_settings->sync();
-            updateSettingsFontPreview(v);
-            applySettingsFont(v);
-        });
-
-        connect(reset, &QPushButton::clicked, this, [this]() {
-            int def = defaultSettingsFont();
-            m_settingsFontSlider->setValue(def);
-        });
-
-        return card;
     }
 
     // ── Launcher font card ──────────────────────────────
@@ -584,6 +544,52 @@ private:
         endRow->addWidget(maxLbl);
         v->addLayout(endRow);
 
+        // ── Font colour ─────────────────────────────────
+        QHBoxLayout *colHdr = new QHBoxLayout();
+        QLabel *colLbl = new QLabel("Font Colour");
+        colLbl->setStyleSheet("font-size:26px; font-weight:bold;");
+        colHdr->addWidget(colLbl);
+        colHdr->addStretch();
+
+        m_launcherColorPreview = new QLabel("Sample");
+        colHdr->addWidget(m_launcherColorPreview);
+        v->addLayout(colHdr);
+
+        m_launcherColor = m_settings->value("UI/LauncherFontColor",
+                                            LAUNCHER_COLOR_DEF).toString().trimmed();
+        if (!QColor(m_launcherColor).isValid())
+            m_launcherColor = LAUNCHER_COLOR_DEF;
+
+        QGridLayout *swatchGrid = new QGridLayout();
+        swatchGrid->setHorizontalSpacing(14);
+        swatchGrid->setVerticalSpacing(14);
+        // Spare width goes into a trailing empty column, so the block stays
+        // left-aligned instead of the cells spreading across the card.
+        swatchGrid->setColumnStretch(LAUNCHER_COLOR_COLS, 1);
+
+        for (int i = 0; i < LAUNCHER_COLOR_COUNT; ++i) {
+            const QString hex = QString(LAUNCHER_COLORS[i]);
+
+            QPushButton *sw = new QPushButton(card);
+            sw->setFixedSize(72, 72);
+            sw->setProperty("swatchHex", hex);
+            sw->setCursor(Qt::PointingHandCursor);
+            swatchGrid->addWidget(sw, i / LAUNCHER_COLOR_COLS,
+                                      i % LAUNCHER_COLOR_COLS);
+            m_launcherColorSwatches.append(sw);
+
+            connect(sw, &QPushButton::clicked, this, [this, hex]() {
+                m_launcherColor = hex;
+                m_settings->setValue("UI/LauncherFontColor", hex);
+                m_settings->sync();
+                updateLauncherColorPreview();
+                // Written to config; osm-launcher reads it on next launch
+            });
+        }
+        v->addLayout(swatchGrid);
+
+        updateLauncherColorPreview();
+
         // Info note
         QLabel *note = new QLabel("Takes effect next time the launcher is opened.");
         note->setStyleSheet("font-size:18px; color:#888888;");
@@ -607,6 +613,10 @@ private:
 
         connect(reset, &QPushButton::clicked, this, [this]() {
             m_launcherFontSlider->setValue(15);
+            m_launcherColor = LAUNCHER_COLOR_DEF;
+            m_settings->setValue("UI/LauncherFontColor", m_launcherColor);
+            m_settings->sync();
+            updateLauncherColorPreview();
         });
 
         return card;
@@ -1322,32 +1332,27 @@ private:
 
     // ── Helpers ─────────────────────────────────────────
 
-    // Pick a sensible default based on screen width
-    int defaultSettingsFont() const
-    {
-        QScreen *s = QGuiApplication::primaryScreen();
-        if (!s) return 22;
-        return (s->size().width() <= 720) ? 18 : 22;
-    }
-
-    void updateSettingsFontPreview(int pt)
-    {
-        if (m_settingsFontPreview)
-            m_settingsFontPreview->setText(QString("%1pt").arg(pt));
-    }
-
     void updateLauncherFontPreview(int pt)
     {
         if (m_launcherFontPreview)
             m_launcherFontPreview->setText(QString("%1pt").arg(pt));
     }
 
-    // Apply settings font live to the running QApplication
-    void applySettingsFont(int pt)
+    // Repaint the sample text and re-mark the selected swatch.
+    void updateLauncherColorPreview()
     {
-        QFont f = QApplication::font();
-        f.setPointSize(pt);
-        QApplication::setFont(f);
+        if (m_launcherColorPreview) {
+            m_launcherColorPreview->setStyleSheet(
+                QString("font-size:24px; font-weight:bold; color:%1;")
+                    .arg(m_launcherColor));
+        }
+
+        for (QPushButton *b : m_launcherColorSwatches) {
+            const QString hex = b->property("swatchHex").toString();
+            b->setStyleSheet(
+                swatchStyle(hex, hex.compare(m_launcherColor,
+                                             Qt::CaseInsensitive) == 0));
+        }
     }
 };
 
