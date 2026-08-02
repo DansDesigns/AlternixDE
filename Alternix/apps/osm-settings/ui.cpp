@@ -365,12 +365,6 @@ public:
     {
         setStyleSheet("background:#282828; color:white; font-family:Sans;");
 
-        // Design width. wifi.cpp holds ~720px through its fixed 180x60 button
-        // row; nothing on this page is fixed-width enough to do the same, so
-        // it collapses when floated in qtile. 720 is the osm-phone screen
-        // width, which is the narrowest target either page has to survive.
-        setMinimumWidth(720);
-
         m_settings = new QSettings(uiCfgPath(), QSettings::IniFormat, this);
 
         QVBoxLayout *root = new QVBoxLayout(this);
@@ -662,6 +656,11 @@ private:
         combo->setStyleSheet(comboStyle());
         combo->setFixedHeight(60);
         combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // Default policy measures every item and reports the widest as the
+        // minimum width, so one long filename stops the page collapsing.
+        // Cap the floor; Expanding still fills whatever width is available.
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(8);
 
         // populate from this card's subfolder (boot/ or notifications/)
         QDir d(soundsSubDir(subDir));
@@ -791,6 +790,10 @@ private:
         m_cursorCombo->setStyleSheet(comboStyle());
         m_cursorCombo->setFixedHeight(60);
         m_cursorCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // See the sound picker: keeps a long theme name from pinning the
+        // page's minimum width open.
+        m_cursorCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        m_cursorCombo->setMinimumContentsLength(8);
 
         row->addWidget(m_cursorPreview);
         row->addWidget(m_cursorCombo, 1);
