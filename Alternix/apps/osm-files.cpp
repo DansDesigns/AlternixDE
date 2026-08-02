@@ -45,6 +45,13 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
 
 class FileBrowser : public QWidget {
 public:
@@ -1814,10 +1821,29 @@ private:
         QString mountPoint;  // empty if not mounted
     };
 
-    // True if the disk (e.g. "sdb") is USB-attached or removable.
+    // True if the disk (e.g. "sdb" or "mmcblk1") is storage the user can
+    // remove: USB-attached, flagged removable, or an SD/TF card in a slot.
     // Uses /sys/block, which works regardless of lsblk version.
     static bool isUsbOrRemovableDisk(const QString &diskName) {
         QString sysPath = "/sys/block/" + diskName;
+
+        // eMMC boot and rpmb areas are never user storage
+        if (diskName.contains("boot") || diskName.contains("rpmb")) return false;
+
+        // SD/TF cards sit behind an MMC host controller, so they report
+        // removable=0 (exactly like soldered eMMC) and their device path
+        // contains "/mmc_host", not "/usb". The card type node tells the two
+        // apart: "SD" is a card in a slot, "MMC" is the internal eMMC.
+        if (diskName.startsWith("mmcblk")) {
+            QFile ty(sysPath + "/device/type");
+            if (ty.open(QIODevice::ReadOnly)) {
+                QString t = QString::fromLatin1(ty.readAll()).trimmed();
+                return t.compare("SD", Qt::CaseInsensitive) == 0;
+            }
+            // No type node: the SD Configuration Register only exists on
+            // real SD cards, so its presence is a reliable second opinion.
+            return QFile::exists(sysPath + "/device/scr");
+        }
 
         // removable flag (flash sticks, card readers)
         QFile rm(sysPath + "/removable");
@@ -1918,7 +1944,7 @@ private:
         QVector<UsbPartition> parts = enumerateUsbPartitions();
 
         QDialog dlg(this);
-        dlg.setWindowTitle("USB Drives");
+        dlg.setWindowTitle("Removable Drives");
         dlg.setStyleSheet("background:#282828; color:white;");
         dlg.setMinimumWidth(460);
 
@@ -1926,7 +1952,7 @@ private:
         lay->setSpacing(10);
 
         if (parts.isEmpty()) {
-            QLabel *none = new QLabel("No USB drives detected.");
+            QLabel *none = new QLabel("No USB drives or SD cards detected.");
             none->setStyleSheet("font-size:15px; padding:20px;");
             lay->addWidget(none);
         }
@@ -2095,9 +2121,13 @@ private:
         }
 
         // Power off the whole device so it is safe to pull (best effort)
+        // A whole-disk filesystem (no partition suffix) is already the disk;
+        // stripping digits would turn /dev/mmcblk1 into /dev/mmcblk.
         QString disk = p.devPath;
-        while (!disk.isEmpty() && disk.back().isDigit()) disk.chop(1);
-        if (disk.endsWith('p') && disk.contains("mmcblk")) disk.chop(1);   // mmcblk0p1 -> mmcblk0
+        if (!QFile::exists("/sys/block/" + QFileInfo(disk).fileName())) {
+            while (!disk.isEmpty() && disk.back().isDigit()) disk.chop(1);
+            if (disk.endsWith('p') && disk.contains("mmcblk")) disk.chop(1);   // mmcblk0p1 -> mmcblk0
+        }
         QProcess po;
         po.start("udisksctl", QStringList() << "power-off" << "-b" << disk);
         po.waitForFinished(8000);
@@ -2161,6 +2191,20 @@ private:
             "QLineEdit { background:#333; color:#DDDDDD; border-radius:6px; padding:8px; font-size:16px; }"
         );
         layout->addWidget(addrEdit);
+
+        // Find servers on the network instead of typing an address
+        QPushButton *scanBtn = new QPushButton("🔍  Scan for NAS");
+        scanBtn->setFixedHeight(44);
+        scanBtn->setStyleSheet(
+            "QPushButton { background:#2a82da; color:white; border:none; border-radius:8px; "
+            "padding:8px 20px; font-size:15px; }"
+            "QPushButton:hover { background:#3a92ea; }"
+            "QPushButton:pressed { background:#1a72ca; }"
+        );
+        layout->addWidget(scanBtn);
+        connect(scanBtn, &QPushButton::clicked, &dlg, [this, addrEdit]() {
+            showNasScanDialog(addrEdit);
+        });
 
         // Optional credentials
         QHBoxLayout *credRow = new QHBoxLayout;
@@ -2356,6 +2400,351 @@ private:
                 hostMatch = root.absoluteFilePath(entry);
         }
         return hostMatch;
+    }
+    // ================= NAS DISCOVERY =================
+
+    // Local IPv4 addresses with prefix, e.g. "192.168.1.42/24".
+    // Read from iproute2 so no extra Qt module is needed.
+    static QStringList localIPv4Cidrs() {
+        QStringList out;
+        QProcess p;
+        p.start("ip", QStringList() << "-o" << "-4" << "addr" << "show");
+        if (!p.waitForStarted(2000) || !p.waitForFinished(4000)) { p.kill(); return out; }
+        const QStringList lines =
+            QString::fromUtf8(p.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+        for (const QString &line : lines) {
+            const QStringList f = line.split(' ', Qt::SkipEmptyParts);
+            int i = f.indexOf("inet");
+            if (i < 0 || i + 1 >= f.size()) continue;
+            const QString cidr = f.at(i + 1);
+            if (cidr.startsWith("127.")) continue;
+            if (!out.contains(cidr)) out << cidr;
+        }
+        return out;
+    }
+
+    // Non-blocking TCP connect sweep across the local /24.
+    // Returns the addresses that accepted a connection on 'port'.
+    static QStringList sweepPort(const QString &localIp, quint16 port, int timeoutMs) {
+        QStringList found;
+        const QStringList o = localIp.split('.');
+        if (o.size() != 4) return found;
+        const QString prefix = o[0] + "." + o[1] + "." + o[2] + ".";
+
+        QVector<int> fds;
+        QVector<QString> addrs;
+
+        for (int host = 1; host <= 254; ++host) {
+            const QString ip = prefix + QString::number(host);
+            if (ip == localIp) continue;
+
+            int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) continue;
+            if (fd >= FD_SETSIZE) { ::close(fd); continue; }   // select() cannot watch it
+
+            int fl = ::fcntl(fd, F_GETFL, 0);
+            ::fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+            struct sockaddr_in sa;
+            ::memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port   = htons(port);
+            if (::inet_pton(AF_INET, ip.toLatin1().constData(), &sa.sin_addr) != 1) {
+                ::close(fd);
+                continue;
+            }
+
+            int rc = ::connect(fd, (struct sockaddr *)&sa, sizeof(sa));
+            if (rc == 0) {                       // accepted immediately
+                found << ip;
+                ::close(fd);
+                continue;
+            }
+            if (rc < 0 && errno != EINPROGRESS) { ::close(fd); continue; }
+
+            fds.append(fd);
+            addrs.append(ip);
+        }
+
+        QElapsedTimer timer;
+        timer.start();
+        while (!fds.isEmpty() && timer.elapsed() < timeoutMs) {
+            fd_set wfds;
+            FD_ZERO(&wfds);
+            int maxFd = -1;
+            for (int fd : fds) { FD_SET(fd, &wfds); if (fd > maxFd) maxFd = fd; }
+
+            int remain = timeoutMs - (int)timer.elapsed();
+            if (remain < 0) remain = 0;
+            int slice = qMin(remain, 100);
+            struct timeval tv;
+            tv.tv_sec  = slice / 1000;
+            tv.tv_usec = (slice % 1000) * 1000;
+
+            int n = ::select(maxFd + 1, nullptr, &wfds, nullptr, &tv);
+            if (n > 0) {
+                QVector<int> stillFds;
+                QVector<QString> stillAddrs;
+                for (int i = 0; i < fds.size(); ++i) {
+                    int fd = fds[i];
+                    if (!FD_ISSET(fd, &wfds)) {
+                        stillFds.append(fd);
+                        stillAddrs.append(addrs[i]);
+                        continue;
+                    }
+                    int err = 0;
+                    socklen_t len = sizeof(err);
+                    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0)
+                        found << addrs[i];
+                    ::close(fd);
+                }
+                fds   = stillFds;
+                addrs = stillAddrs;
+            }
+            QCoreApplication::processEvents();
+        }
+
+        for (int fd : fds) ::close(fd);
+
+        // return them in address order, not in the order select() woke up
+        QStringList ordered;
+        for (int host = 1; host <= 254; ++host) {
+            const QString ip = prefix + QString::number(host);
+            if (found.contains(ip)) ordered << ip;
+        }
+        return ordered;
+    }
+
+    // Best-effort friendly name for a discovered server (NetBIOS, then DNS).
+    // Every lookup is bounded so a silent host cannot stall the scan.
+    static QString nasHostName(const QString &ip) {
+        QProcess nb;
+        nb.start("nmblookup", QStringList() << "-A" << ip);
+        if (nb.waitForStarted(1000) && nb.waitForFinished(2500)) {
+            const QStringList lines =
+                QString::fromUtf8(nb.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+            for (const QString &l : lines) {
+                const QString t = l.trimmed();
+                if (!t.contains("<20>") && !t.contains("<00>")) continue;
+                if (t.contains("GROUP", Qt::CaseInsensitive)) continue;
+                const QString n = t.section('<', 0, 0).trimmed();
+                if (!n.isEmpty()) return n;
+            }
+        } else {
+            nb.kill();
+        }
+
+        QProcess ge;
+        ge.start("getent", QStringList() << "hosts" << ip);
+        if (ge.waitForStarted(1000) && ge.waitForFinished(1500) && ge.exitCode() == 0) {
+            const QStringList f =
+                QString::fromUtf8(ge.readAllStandardOutput()).trimmed()
+                    .split(' ', Qt::SkipEmptyParts);
+            if (f.size() > 1) {
+                const QString n = f.at(1).section('.', 0, 0);
+                if (!n.isEmpty()) return n;
+            }
+        } else {
+            ge.kill();
+        }
+
+        return QString();
+    }
+
+    // Shares exported by an SMB host. Uses smbclient when it is installed and
+    // falls back to gvfs, which osm-files already needs for network browsing.
+    static QStringList listSmbShares(const QString &host) {
+        QStringList shares;
+
+        QProcess sc;
+        sc.setProcessChannelMode(QProcess::MergedChannels);
+        sc.start("smbclient", QStringList() << "-L" << host << "-N" << "-g");
+        if (sc.waitForStarted(1500) && sc.waitForFinished(8000)) {
+            const QStringList lines =
+                QString::fromUtf8(sc.readAll()).split('\n', Qt::SkipEmptyParts);
+            for (const QString &l : lines) {
+                if (!l.startsWith("Disk|")) continue;      // grepable output
+                const QString n = l.section('|', 1, 1).trimmed();
+                if (n.isEmpty() || n.endsWith('$')) continue;   // hide admin shares
+                if (!shares.contains(n)) shares << n;
+            }
+        } else {
+            sc.kill();
+        }
+        if (!shares.isEmpty()) return shares;
+
+        QProcess gm;
+        gm.setProcessChannelMode(QProcess::MergedChannels);
+        gm.start("gio", QStringList() << "mount" << ("smb://" + host));
+        if (gm.waitForStarted(1500)) {
+            gm.write("\n\n\n");                             // try anonymous
+            gm.closeWriteChannel();
+            if (!gm.waitForFinished(10000)) gm.kill();
+        }
+
+        QProcess gl;
+        gl.start("gio", QStringList() << "list" << ("smb://" + host));
+        if (gl.waitForStarted(1500) && gl.waitForFinished(8000)) {
+            const QStringList lines =
+                QString::fromUtf8(gl.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+            for (const QString &l : lines) {
+                QString n = l.trimmed();
+                while (n.endsWith('/')) n.chop(1);
+                if (n.isEmpty() || n.endsWith('$')) continue;
+                if (!shares.contains(n)) shares << n;
+            }
+        } else {
+            gl.kill();
+        }
+        return shares;
+    }
+
+    // Scan the local network for SMB file servers and let the user pick one.
+    // The chosen address is written into the Network dialog's address box.
+    void showNasScanDialog(QLineEdit *addrEdit) {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Scan for NAS");
+        dlg.setStyleSheet("QDialog { background:#282828; color:white; }");
+        dlg.setMinimumWidth(420);
+        dlg.setMinimumHeight(420);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(10);
+
+        QLabel *status = new QLabel("Ready to scan.");
+        status->setWordWrap(true);
+        status->setStyleSheet("QLabel { color:#CCCCCC; font-size:14px; }");
+        lay->addWidget(status);
+
+        QListWidget *list = new QListWidget;
+        list->setStyleSheet(
+            "QListWidget { background:#333; color:white; font-size:16px; border:none; border-radius:8px; }"
+            "QListWidget::item { padding:10px; }"
+            "QListWidget::item:selected { background:#555; }"
+        );
+        QScroller::grabGesture(list, QScroller::LeftMouseButtonGesture);
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        lay->addWidget(list, 1);
+
+        QHBoxLayout *btnRow = new QHBoxLayout;
+        auto mkBtn = [](const QString &text) {
+            QPushButton *b = new QPushButton(text);
+            b->setFixedHeight(44);
+            b->setStyleSheet(
+                "QPushButton { background:#555; color:white; border:none; border-radius:8px; "
+                "padding:8px 20px; font-size:15px; }"
+                "QPushButton:hover { background:#666; }"
+                "QPushButton:pressed { background:#444; }"
+            );
+            return b;
+        };
+        QPushButton *rescanBtn = mkBtn("Scan again");
+        QPushButton *closeBtn  = mkBtn("Close");
+        btnRow->addWidget(rescanBtn);
+        btnRow->addStretch(1);
+        btnRow->addWidget(closeBtn);
+        lay->addLayout(btnRow);
+
+        std::function<void()> runScan = [&]() {
+            list->clear();
+            rescanBtn->setEnabled(false);
+            status->setText("Scanning your network for file servers ...");
+            QCoreApplication::processEvents();
+
+            const QStringList cidrs = localIPv4Cidrs();
+            if (cidrs.isEmpty()) {
+                status->setText("No network connection found.\n"
+                                "Connect to Wi-Fi or Ethernet, then scan again.");
+                rescanBtn->setEnabled(true);
+                return;
+            }
+
+            QStringList hosts;
+            for (const QString &cidr : cidrs) {
+                const QString ip = cidr.section('/', 0, 0);
+                for (const QString &h : sweepPort(ip, 445, 1500))
+                    if (!hosts.contains(h)) hosts << h;
+            }
+            if (hosts.isEmpty()) {
+                // older servers that still only listen on the NetBIOS port
+                for (const QString &cidr : cidrs) {
+                    const QString ip = cidr.section('/', 0, 0);
+                    for (const QString &h : sweepPort(ip, 139, 1500))
+                        if (!hosts.contains(h)) hosts << h;
+                }
+            }
+
+            if (hosts.isEmpty()) {
+                status->setText("No file servers found on this network.\n"
+                                "If your NAS is switched on, you can still type its "
+                                "address into the Network window.");
+                rescanBtn->setEnabled(true);
+                return;
+            }
+
+            status->setText(QString("Found %1 server(s). Tap one to see its shared folders.")
+                                .arg(hosts.size()));
+            QCoreApplication::processEvents();
+
+            for (const QString &ip : hosts) {
+                const QString name = nasHostName(ip);
+                QListWidgetItem *it = new QListWidgetItem(
+                    name.isEmpty() ? ("🖧  " + ip) : ("🖧  " + name + "   (" + ip + ")"));
+                it->setData(Qt::UserRole,     ip);      // host
+                it->setData(Qt::UserRole + 1, "");      // share (none yet)
+                it->setData(Qt::UserRole + 2, false);   // shares already listed?
+                list->addItem(it);
+                QCoreApplication::processEvents();
+            }
+            rescanBtn->setEnabled(true);
+        };
+
+        connect(list, &QListWidget::itemClicked, &dlg, [&](QListWidgetItem *item) {
+            const QString host  = item->data(Qt::UserRole).toString();
+            const QString share = item->data(Qt::UserRole + 1).toString();
+
+            if (!share.isEmpty()) {                      // a share was tapped
+                addrEdit->setText("smb://" + host + "/" + share);
+                dlg.accept();
+                return;
+            }
+            if (host.isEmpty()) return;
+            if (item->data(Qt::UserRole + 2).toBool()) return;   // already expanded
+            item->setData(Qt::UserRole + 2, true);
+
+            status->setText("Reading shared folders from " + host + " ...");
+            QCoreApplication::processEvents();
+
+            const QStringList shares = listSmbShares(host);
+            int at = list->row(item) + 1;
+
+            if (shares.isEmpty()) {
+                QListWidgetItem *none = new QListWidgetItem(
+                    "        no shared folders visible - a username and password "
+                    "may be needed");
+                none->setData(Qt::UserRole,     "");
+                none->setData(Qt::UserRole + 1, "");
+                none->setData(Qt::UserRole + 2, true);
+                list->insertItem(at, none);
+                status->setText("Tap a server to see its shared folders.");
+                return;
+            }
+
+            for (const QString &s : shares) {
+                QListWidgetItem *si = new QListWidgetItem("        📁  " + s);
+                si->setData(Qt::UserRole,     host);
+                si->setData(Qt::UserRole + 1, s);
+                si->setData(Qt::UserRole + 2, true);
+                list->insertItem(at++, si);
+            }
+            status->setText("Tap a shared folder to use it.");
+        });
+
+        connect(rescanBtn, &QPushButton::clicked, &dlg, [&]() { runScan(); });
+        connect(closeBtn,  &QPushButton::clicked, &dlg, &QDialog::reject);
+
+        QTimer::singleShot(0, &dlg, [&]() { runScan(); });
+        dlg.exec();
     }
 
     void processNextThumbnail() {

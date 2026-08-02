@@ -62,6 +62,107 @@ static QString findMount(const QString &dev)
     return "";
 }
 
+// Mount a removable partition the way a desktop session does.
+//
+// Plain "mount" is not permitted for an ordinary user, and "sudo mount" on its
+// own leaves FAT/exFAT volumes owned by root, so the user cannot write to their
+// own SD card or USB stick. Try the privileged helpers first (udisks2 through
+// polkit, then pmount) and only fall back to sudo, passing the ownership
+// options that FAT-family filesystems need.
+//
+// The mount point is always read back from /proc/mounts rather than assumed,
+// because udisks2 and pmount both choose it themselves.
+static bool mountDevice(const QString &dev, QString &mountPoint, QString &output)
+{
+    output.clear();
+    mountPoint.clear();
+
+    QString out;
+
+    // 1) udisks2 + polkit: mounts to /run/media/<user>/<label>
+    runCmdWithOutput(QString("udisksctl mount -b %1").arg(dev), out);
+    output += out;
+    mountPoint = findMount(dev);
+    if (!mountPoint.isEmpty()) return true;
+
+    // 2) pmount: mounts under /media as the calling user
+    runCmdWithOutput(QString("pmount %1").arg(dev), out);
+    output += out;
+    mountPoint = findMount(dev);
+    if (!mountPoint.isEmpty()) return true;
+
+    // 3) sudo: an ordinary user cannot create a directory in /media, so the
+    //    mount point has to be made with sudo as well
+    const QString tgt = "/media/" + QFileInfo(dev).fileName();
+
+    QString fsType;
+    runCmdWithOutput(QString("lsblk -no FSTYPE %1").arg(dev), fsType);
+    fsType = fsType.trimmed();
+
+    QString opts;
+    if (fsType == "vfat" || fsType == "msdos" || fsType == "exfat" ||
+        fsType == "ntfs" || fsType == "ntfs3") {
+        opts = QString("-o uid=%1,gid=%2,umask=0022 ")
+                   .arg((uint)getuid())
+                   .arg((uint)getgid());
+    }
+
+    const QString mountCmd =
+        "mkdir -p '" + tgt + "' && mount " + opts + dev + " '" + tgt + "'";
+
+    // -n first: without a terminal, a missing NOPASSWD rule must fail straight
+    // away instead of blocking on a password prompt nobody can answer
+    runCmdWithOutput("sudo -n sh -c \"" + mountCmd + "\"", out);
+    output += out;
+    mountPoint = findMount(dev);
+    if (!mountPoint.isEmpty()) return true;
+
+    if (qEnvironmentVariableIsSet("SUDO_ASKPASS")) {
+        runCmdWithOutput("sudo -A sh -c \"" + mountCmd + "\"", out);
+        output += out;
+        mountPoint = findMount(dev);
+        if (!mountPoint.isEmpty()) return true;
+    }
+
+    return false;
+}
+
+// Unmount a removable partition, using the same escalation ladder as
+// mountDevice. Success is confirmed against /proc/mounts, not exit codes,
+// because udisksctl reports an error for a volume it did not mount itself.
+static bool unmountDevice(const QString &dev, const QString &mountPoint, QString &output)
+{
+    output.clear();
+
+    QString out;
+
+    runCmdWithOutput(QString("udisksctl unmount -b %1").arg(dev), out);
+    output += out;
+    if (findMount(dev).isEmpty()) return true;
+
+    runCmdWithOutput(QString("pumount %1").arg(dev), out);
+    output += out;
+    if (findMount(dev).isEmpty()) return true;
+
+    const QString target = mountPoint.isEmpty() ? dev : mountPoint;
+
+    runCmdWithOutput("umount '" + target + "'", out);
+    output += out;
+    if (findMount(dev).isEmpty()) return true;
+
+    runCmdWithOutput("sudo -n umount '" + target + "'", out);
+    output += out;
+    if (findMount(dev).isEmpty()) return true;
+
+    if (qEnvironmentVariableIsSet("SUDO_ASKPASS")) {
+        runCmdWithOutput("sudo -A umount '" + target + "'", out);
+        output += out;
+        if (findMount(dev).isEmpty()) return true;
+    }
+
+    return false;
+}
+
 static bool getSpace(const QString &mp, qulonglong &total, qulonglong &free)
 {
     struct statvfs st;
@@ -356,7 +457,9 @@ private:
         while (auto *e = readdir(d)) {
             QString n = e->d_name;
 
-            if (n.startsWith("mmcblk") && !n.contains('p'))
+            // eMMC boot0/boot1/rpmb are not user storage, only mmcblkN is
+            if (n.startsWith("mmcblk") && !n.contains('p')
+                && !n.contains("boot") && !n.contains("rpmb"))
                 devs << "/dev/" + n;
 
             if (n.size() == 3 && n.startsWith("sd"))
@@ -376,6 +479,9 @@ private:
 
         while (auto *e = readdir(d)) {
             QString n = e->d_name;
+            // eMMC boot0/boot1/rpmb areas are not usable partitions
+            if (n.contains("boot") || n.contains("rpmb"))
+                continue;
             if (n != baseName && n.startsWith(baseName))
                 parts << "/dev/" + n;
         }
@@ -575,36 +681,22 @@ private:
                 if (pc->btnMount) {
                     connect(pc->btnMount, &QPushButton::clicked, this, [this, pc]() {
                         if (pc->mountPoint.isEmpty()) {
-                            QString tgt = "/media/" + QFileInfo(pc->dev).fileName();
-                            QDir().mkpath(tgt);
-
-                            QString out;
-                            bool ok = runCmdWithOutput(
-                                QString("mount %1 %2").arg(pc->dev, tgt), out
-                            );
-                            if (!ok)
-                                ok = runCmdWithOutput(
-                                    QString("sudo mount %1 %2").arg(pc->dev, tgt), out
-                                );
-                            if (!ok) {
+                            QString mp, out;
+                            if (!mountDevice(pc->dev, mp, out)) {
                                 QMessageBox::warning(
                                     this, "Mount failed",
-                                    "Could not mount:\n" + pc->dev + "\n\n" + out
+                                    "Could not mount:\n" + pc->dev + "\n\n" + out.trimmed() +
+                                    "\n\nInstall udisks2 or pmount, and make sure this "
+                                    "user is in the 'plugdev' group."
                                 );
                             }
                         } else {
                             QString out;
-                            bool ok = runCmdWithOutput(
-                                QString("umount %1").arg(pc->mountPoint), out
-                            );
-                            if (!ok)
-                                ok = runCmdWithOutput(
-                                    QString("sudo umount %1").arg(pc->mountPoint), out
-                                );
-                            if (!ok) {
+                            if (!unmountDevice(pc->dev, pc->mountPoint, out)) {
                                 QMessageBox::warning(
                                     this, "Unmount failed",
-                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out
+                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out.trimmed() +
+                                    "\n\nMake sure no files on the drive are open."
                                 );
                             }
                         }
@@ -710,35 +802,22 @@ private:
                 if (pc->btnMount) {
                     connect(pc->btnMount, &QPushButton::clicked, this, [this, pc]() {
                         if (pc->mountPoint.isEmpty()) {
-                            QString tgt = "/media/" + QFileInfo(pc->dev).fileName();
-                            QDir().mkpath(tgt);
-                            QString out;
-                            bool ok = runCmdWithOutput(
-                                QString("mount %1 %2").arg(pc->dev, tgt), out
-                            );
-                            if (!ok)
-                                ok = runCmdWithOutput(
-                                    QString("sudo mount %1 %2").arg(pc->dev, tgt), out
-                                );
-                            if (!ok) {
+                            QString mp, out;
+                            if (!mountDevice(pc->dev, mp, out)) {
                                 QMessageBox::warning(
                                     this, "Mount failed",
-                                    "Could not mount:\n" + pc->dev + "\n\n" + out
+                                    "Could not mount:\n" + pc->dev + "\n\n" + out.trimmed() +
+                                    "\n\nInstall udisks2 or pmount, and make sure this "
+                                    "user is in the 'plugdev' group."
                                 );
                             }
                         } else {
                             QString out;
-                            bool ok = runCmdWithOutput(
-                                QString("umount %1").arg(pc->mountPoint), out
-                            );
-                            if (!ok)
-                                ok = runCmdWithOutput(
-                                    QString("sudo umount %1").arg(pc->mountPoint), out
-                                );
-                            if (!ok) {
+                            if (!unmountDevice(pc->dev, pc->mountPoint, out)) {
                                 QMessageBox::warning(
                                     this, "Unmount failed",
-                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out
+                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out.trimmed() +
+                                    "\n\nMake sure no files on the drive are open."
                                 );
                             }
                         }
@@ -761,15 +840,8 @@ private:
                             if (pCard->mountPoint.isEmpty())
                                 continue;
                             QString out;
-                            bool ok = runCmdWithOutput(
-                                QString("umount %1").arg(pCard->mountPoint), out
-                            );
-                            if (!ok)
-                                ok = runCmdWithOutput(
-                                    QString("sudo umount %1").arg(pCard->mountPoint), out
-                                );
-                            if (!ok)
-                                errors += out + "\n";
+                            if (!unmountDevice(pCard->dev, pCard->mountPoint, out))
+                                errors += out.trimmed() + "\n";
                         }
                         if (!errors.isEmpty()) {
                             QMessageBox::warning(
