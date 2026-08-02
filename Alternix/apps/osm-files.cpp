@@ -45,6 +45,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <unistd.h>
+#include <QStandardPaths>
 #include <QCheckBox>
 #include <QRegularExpression>
 #include <algorithm>
@@ -827,8 +828,14 @@ private:
     }
 
     static QString quoteFilePath(const QString &path) {
+        // Inside double quotes the shell still expands $, `...` and \, so a
+        // file named $(something).sh would be executed rather than opened.
+        // Escape the backslash first or the later escapes get mangled.
         QString p = path;
+        p.replace("\\", "\\\\");
         p.replace("\"", "\\\"");
+        p.replace("$",  "\\$");
+        p.replace("`",  "\\`");
         return "\"" + p + "\"";
     }
 
@@ -848,10 +855,112 @@ private:
         return cmd;
     }
 
+    // Quote a string so it survives inside single quotes in a shell command.
+    static QString shellSingleQuote(const QString &s) {
+        QString out = s;
+        out.replace("'", "'\\''");
+        return "'" + out + "'";
+    }
+
+    static bool looksLikeShellScript(const QString &filePath) {
+        const QString ext = QFileInfo(filePath).suffix().toLower();
+        if (ext == "sh" || ext == "bash" || ext == "run") return true;
+
+        QFile f(filePath);
+        if (f.open(QIODevice::ReadOnly))
+            return f.read(2) == "#!";
+        return false;
+    }
+
+    // A file worth offering to run: a script, or a program with no extension.
+    // An extension is required to be script-like so that a photo which happens
+    // to carry the execute bit still opens as a photo.
+    static bool isRunnableFile(const QString &filePath) {
+        QFileInfo fi(filePath);
+        if (!fi.isFile()) return false;
+        if (looksLikeShellScript(filePath)) return true;
+        return fi.isExecutable() && fi.suffix().isEmpty();
+    }
+
+    // Terminal emulator used for "run in terminal". x-terminal-emulator is
+    // Devuan's alternatives symlink, so the system's own choice wins; the rest
+    // are fallbacks. Returns an empty string when no terminal is installed.
+    static QString detectTerminal() {
+        static const char *candidates[] = {
+            "osm-terminal", "alternix-terminal",
+            "x-terminal-emulator",
+            "qterminal", "lxterminal", "xfce4-terminal", "mate-terminal",
+            "konsole", "sakura", "urxvt", "rxvt", "st", "xterm"
+        };
+        for (const char *c : candidates) {
+            const QString name = QString::fromLatin1(c);
+            if (!QStandardPaths::findExecutable(name).isEmpty())
+                return name;
+        }
+        return QString();
+    }
+
+    // Wrap a command so it runs in a terminal window that stays open once the
+    // command finishes - otherwise the output disappears before it can be read,
+    // which on a tablet means it may as well never have run.
+    static QString wrapInTerminal(const QString &cmd, const QString &term) {
+        const QString inner =
+            cmd + "; printf '\\n[ Finished - press Enter to close ]'; read _";
+        return term + " -e sh -c " + shellSingleQuote(inner);
+    }
+
+    void launchCommand(const QString &cmd, bool inTerminal) {
+        QString full = cmd;
+        if (inTerminal) {
+            const QString term = detectTerminal();
+            if (term.isEmpty()) {
+                QMessageBox::warning(this, "Run in terminal",
+                    "No terminal emulator is installed, so this cannot be shown "
+                    "in a terminal window.\n\nInstall one - xterm or lxterminal, "
+                    "for example - and try again.");
+                return;
+            }
+            full = wrapInTerminal(cmd, term);
+        }
+        QProcess::startDetached("sh", QStringList() << "-c" << full);
+    }
+
+    // Shared look for the large dialog controls
+    static const char *checkBoxStyle() {
+        return "QCheckBox { color:white; font-size:20px; spacing:14px; padding:6px; }"
+               "QCheckBox::indicator { width:34px; height:34px; }"
+               "QCheckBox::indicator:unchecked { background:#333; border:2px solid #666; border-radius:6px; }"
+               "QCheckBox::indicator:checked { background:#2a82da; border:2px solid #2a82da; border-radius:6px; }"
+               "QCheckBox:disabled { color:#666; }";
+    }
+
+    static QPushButton *bigDialogButton(const QString &text, bool accent = false) {
+        QPushButton *b = new QPushButton(text);
+        b->setMinimumHeight(72);
+        b->setMinimumWidth(150);
+        if (accent) {
+            b->setStyleSheet(themed(
+                "QPushButton { background:#2a82da; color:white; border:none; border-radius:12px; "
+                "padding:10px 24px; font-size:24px; }"
+                "QPushButton:hover { background:#3a92ea; }"
+                "QPushButton:pressed { background:#1a72ca; }"
+            ));
+        } else {
+            b->setStyleSheet(themed(
+                "QPushButton { background:#555; color:white; border:none; border-radius:12px; "
+                "padding:10px 24px; font-size:24px; }"
+                "QPushButton:hover { background:#666; }"
+                "QPushButton:pressed { background:#444; }"
+            ));
+        }
+        return b;
+    }
+
     struct DesktopApp {
         QString name;
         QString exec;
         QString icon;
+        bool    terminal = false;   // Terminal=true in the .desktop file
     };
 
     static QVector<DesktopApp> loadDesktopApps() {
@@ -873,6 +982,7 @@ private:
                 QString name = s.value("Name").toString();
                 QString exec = s.value("Exec").toString();
                 QString icon = s.value("Icon").toString();
+                bool    term = s.value("Terminal", false).toBool();
                 s.endGroup();
 
                 if (name.isEmpty() || exec.isEmpty())
@@ -882,11 +992,42 @@ private:
                 app.name = name;
                 app.exec = exec;
                 app.icon = icon;
+                app.terminal = term;
                 apps.push_back(app);
             }
         }
 
         return apps;
+    }
+
+    // Fill a list with "Run the file itself" followed by every installed
+    // application, sorted by name.
+    //   UserRole     = Exec template
+    //   UserRole + 1 = whether the entry wants a terminal window
+    static void populateAppList(QListWidget *list, const QString &preselectExec) {
+        QListWidgetItem *run = new QListWidgetItem("Run the file itself", list);
+        run->setData(Qt::UserRole, "%f");
+        run->setData(Qt::UserRole + 1, true);   // scripts are worth watching
+        if (preselectExec == "%f" || preselectExec == "sh %f")
+            list->setCurrentItem(run);
+
+        QVector<DesktopApp> apps = loadDesktopApps();
+        std::sort(apps.begin(), apps.end(),
+                  [](const DesktopApp &a, const DesktopApp &b) {
+                      return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+                  });
+
+        for (const DesktopApp &app : apps) {
+            QListWidgetItem *item = new QListWidgetItem(app.name, list);
+            item->setData(Qt::UserRole, app.exec);
+            item->setData(Qt::UserRole + 1, app.terminal);
+            if (!app.icon.isEmpty()) {
+                QIcon ic = QIcon::fromTheme(app.icon);
+                if (!ic.isNull()) item->setIcon(ic);
+            }
+            if (!preselectExec.isEmpty() && app.exec == preselectExec)
+                list->setCurrentItem(item);
+        }
     }
 
     bool selectedSingleIsFile() const {
@@ -1856,7 +1997,16 @@ private:
         return name;
     }
 
-    void setDefaultAppFor(const QString &ext, const QString &name, const QString &execTemplate) {
+    bool defaultTerminalFor(const QString &ext) {
+        if (!settings || ext.isEmpty()) return false;
+        settings->beginGroup("DefaultAppTerminal");
+        const bool inTerm = settings->value(ext, false).toBool();
+        settings->endGroup();
+        return inTerm;
+    }
+
+    void setDefaultAppFor(const QString &ext, const QString &name,
+                          const QString &execTemplate, bool inTerminal) {
         if (!settings || ext.isEmpty() || execTemplate.isEmpty()) return;
         settings->beginGroup("DefaultApps");
         settings->setValue(ext, execTemplate);
@@ -1864,30 +2014,239 @@ private:
         settings->beginGroup("DefaultAppNames");
         settings->setValue(ext, name.isEmpty() ? execTemplate : name);
         settings->endGroup();
+        settings->beginGroup("DefaultAppTerminal");
+        settings->setValue(ext, inTerminal);
+        settings->endGroup();
         settings->sync();
     }
 
     void clearDefaultAppFor(const QString &ext) {
         if (!settings || ext.isEmpty()) return;
-        settings->beginGroup("DefaultApps");
-        settings->remove(ext);
-        settings->endGroup();
-        settings->beginGroup("DefaultAppNames");
-        settings->remove(ext);
-        settings->endGroup();
+        for (const char *group : { "DefaultApps", "DefaultAppNames",
+                                   "DefaultAppTerminal" }) {
+            settings->beginGroup(group);
+            settings->remove(ext);
+            settings->endGroup();
+        }
         settings->sync();
     }
 
-    // Open a file with the application remembered for its type, falling back
-    // to osm-viewer when nothing has been chosen.
+    void warnNotRunnable(const QString &filePath) {
+        QMessageBox::warning(this, "Run",
+            QFileInfo(filePath).fileName() + " could not be made runnable.\n\n"
+            "The execute permission could not be set, which usually means the "
+            "file is on a card or drive that does not store permissions, or it "
+            "belongs to another user.");
+    }
+
+    // Decide how to execute a file directly. Sets the execute bit if it is
+    // missing, and falls back to handing the file to sh when the bit cannot be
+    // set at all - which is the normal case on FAT and exFAT cards.
+    // Returns an empty string when the file cannot be run.
+    QString directRunTemplate(const QString &filePath) {
+        if (QFileInfo(filePath).isExecutable()) return "%f";
+
+        QFile f(filePath);
+        const QFileDevice::Permissions perms = f.permissions();
+        f.setPermissions(perms | QFileDevice::ExeOwner | QFileDevice::ExeUser);
+        if (QFileInfo(filePath).isExecutable()) return "%f";
+
+        if (looksLikeShellScript(filePath)) return "sh %f";
+        return QString();
+    }
+
+    // Open a file with the application remembered for its type, offer to run
+    // scripts and programs, and otherwise fall back to osm-viewer.
     void openFilePath(const QString &filePath) {
-        const QString tmpl = defaultExecFor(extensionKeyFor(filePath));
+        const QString ext  = extensionKeyFor(filePath);
+        const QString tmpl = defaultExecFor(ext);
+
         if (!tmpl.isEmpty()) {
-            QProcess::startDetached("sh", QStringList()
-                                    << "-c" << buildExecCommand(tmpl, filePath));
+            QString runTemplate = tmpl;
+            if (runTemplate == "%f") {
+                runTemplate = directRunTemplate(filePath);
+                if (runTemplate.isEmpty()) { warnNotRunnable(filePath); return; }
+            }
+            launchCommand(buildExecCommand(runTemplate, filePath),
+                          defaultTerminalFor(ext));
             return;
         }
+
+        if (isRunnableFile(filePath)) { showRunFileDialog(filePath); return; }
+
         QProcess::startDetached("osm-viewer", QStringList() << filePath);
+    }
+
+    // Tapping a script or program asks what to do rather than running it
+    // silently, and offers to remember the answer for that file type.
+    void showRunFileDialog(const QString &filePath) {
+        QFileInfo fi(filePath);
+        const QString ext = extensionKeyFor(filePath);
+
+        QDialog dlg(this);
+        dlg.setWindowTitle("Run file");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+        dlg.setMinimumWidth(520);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(14);
+
+        QLabel *heading = new QLabel(fi.fileName());
+        heading->setWordWrap(true);
+        heading->setStyleSheet(themed("QLabel { color:white; font-size:24px; }"));
+        lay->addWidget(heading);
+
+        QLabel *sub = new QLabel(
+            fi.isExecutable()
+                ? QString("This is a program you can run.")
+                : QString("This is a script. Running it will set the execute "
+                          "permission first."));
+        sub->setWordWrap(true);
+        sub->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:17px; }"));
+        lay->addWidget(sub);
+
+        QCheckBox *always = new QCheckBox(
+            ext.isEmpty() ? QString("Always do this for files like this")
+                          : QString("Always do this for .%1 files").arg(ext));
+        always->setEnabled(!ext.isEmpty());
+        always->setStyleSheet(themed(checkBoxStyle()));
+        lay->addWidget(always);
+
+        // Stacked full-width buttons: easier to hit than a row on a tablet
+        QPushButton *termBtn   = bigDialogButton("Run in terminal", true);
+        QPushButton *runBtn    = bigDialogButton("Run");
+        QPushButton *editBtn   = bigDialogButton("Open in editor");
+        QPushButton *cancelBtn = bigDialogButton("Cancel");
+        for (QPushButton *b : { termBtn, runBtn, editBtn, cancelBtn }) {
+            b->setMinimumHeight(76);
+            lay->addWidget(b);
+        }
+
+        connect(termBtn,   &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(11); });
+        connect(runBtn,    &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(12); });
+        connect(editBtn,   &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(13); });
+        connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+        const int choice = dlg.exec();
+        if (choice != 11 && choice != 12 && choice != 13) return;
+
+        QString storedTemplate, runTemplate, name;
+        bool inTerminal = false;
+
+        if (choice == 13) {
+            storedTemplate = runTemplate = "osm-viewer %f";
+            name = "osm-viewer";
+        } else {
+            inTerminal     = (choice == 11);
+            storedTemplate = "%f";
+            name           = "Run the file itself";
+            runTemplate    = directRunTemplate(filePath);
+            if (runTemplate.isEmpty()) { warnNotRunnable(filePath); return; }
+        }
+
+        if (always->isChecked() && !ext.isEmpty())
+            setDefaultAppFor(ext, name, storedTemplate, inTerminal);
+
+        launchCommand(buildExecCommand(runTemplate, filePath), inTerminal);
+    }
+
+    // Manage the remembered file-type -> application choices.
+    // Build a new file-type -> application rule from scratch, without having
+    // to find a file of that type first.
+    bool showAddDefaultDialog() {
+        QDialog dlg(this);
+        dlg.setWindowTitle("Add file type");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+        dlg.setMinimumSize(560, 800);
+
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(12);
+
+        QLabel *info = new QLabel("Which file ending should this apply to?");
+        info->setWordWrap(true);
+        info->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:18px; }"));
+        lay->addWidget(info);
+
+        QLineEdit *extEdit = new QLineEdit;
+        extEdit->setPlaceholderText("sh");
+        extEdit->setMinimumHeight(56);
+        extEdit->setStyleSheet(themed(
+            "QLineEdit { background:#333; color:#DDDDDD; border-radius:8px; padding:10px; font-size:22px; }"
+        ));
+        lay->addWidget(extEdit);
+
+        QListWidget *list = new QListWidget;
+        list->setStyleSheet(themed(
+            "QListWidget { background:#333; color:white; font-size:22px; border:none; border-radius:8px; }"
+            "QListWidget::item { padding:16px; }"
+            "QListWidget::item:selected { background:#2a82da; }"
+        ));
+        list->setMinimumHeight(420);
+        list->setIconSize(QSize(44, 44));
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        QScroller::ungrabGesture(list);
+        lay->addWidget(list, 1);
+
+        populateAppList(list, QString());
+
+        QLineEdit *cmdEdit = new QLineEdit;
+        cmdEdit->setPlaceholderText("Custom command (e.g. gimp %f)");
+        cmdEdit->setMinimumHeight(56);
+        cmdEdit->setStyleSheet(themed(
+            "QLineEdit { background:#333; color:#DDDDDD; border-radius:8px; padding:10px; font-size:20px; }"
+        ));
+        lay->addWidget(cmdEdit);
+
+        QCheckBox *termChk = new QCheckBox("Run in terminal");
+        termChk->setStyleSheet(themed(checkBoxStyle()));
+        lay->addWidget(termChk);
+
+        connect(list, &QListWidget::currentItemChanged, &dlg,
+                [termChk](QListWidgetItem *cur, QListWidgetItem *) {
+                    if (cur) termChk->setChecked(cur->data(Qt::UserRole + 1).toBool());
+                });
+
+        QPushButton *cancelBtn = bigDialogButton("Cancel");
+        QPushButton *saveBtn   = bigDialogButton("Save", true);
+
+        QHBoxLayout *row = new QHBoxLayout;
+        row->setSpacing(12);
+        row->addStretch(1);
+        row->addWidget(cancelBtn);
+        row->addWidget(saveBtn);
+        lay->addLayout(row);
+
+        connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+        connect(saveBtn,   &QPushButton::clicked, &dlg, &QDialog::accept);
+
+        if (dlg.exec() != QDialog::Accepted) return false;
+
+        QString ext = extEdit->text().trimmed().toLower();
+        while (ext.startsWith('.')) ext.remove(0, 1);
+        if (ext.isEmpty()) {
+            QMessageBox::warning(this, "Add file type",
+                "Type the file ending first, for example sh or png.");
+            return false;
+        }
+
+        QString tmpl, name;
+        const QString custom = cmdEdit->text().trimmed();
+        QListWidgetItem *cur = list->currentItem();
+
+        if (!custom.isEmpty()) {
+            tmpl = custom.contains('%') ? custom : custom + " %f";
+            name = custom.section(' ', 0, 0);
+        } else if (cur) {
+            tmpl = cur->data(Qt::UserRole).toString();
+            name = cur->text();
+        } else {
+            QMessageBox::warning(this, "Add file type",
+                "Choose an application from the list, or type a command.");
+            return false;
+        }
+
+        setDefaultAppFor(ext, name, tmpl, termChk->isChecked());
+        return true;
     }
 
     // Manage the remembered file-type -> application choices.
@@ -1927,8 +2286,8 @@ private:
 
             if (exts.isEmpty()) {
                 QListWidgetItem *empty = new QListWidgetItem(
-                    "Nothing set yet - use OpenWith on a file and tick "
-                    "\"Always open ... with this\".");
+                    "Nothing set yet - use Add, or tick "
+                    "\"Always open ... with this\" in OpenWith.");
                 empty->setData(Qt::UserRole, "");
                 list->addItem(empty);
                 return;
@@ -1938,36 +2297,31 @@ private:
                 const QString name = defaultNameFor(ext);
                 const QString tmpl = defaultExecFor(ext);
                 QListWidgetItem *it = new QListWidgetItem(
-                    "." + ext + "      " + (name.isEmpty() ? tmpl : name));
+                    "." + ext + "      " + (name.isEmpty() ? tmpl : name)
+                    + (defaultTerminalFor(ext) ? "   (in a terminal)" : ""));
                 it->setData(Qt::UserRole, ext);
                 list->addItem(it);
             }
         };
         reload();
 
-        auto bigBtn = [](const QString &text) {
-            QPushButton *b = new QPushButton(text);
-            b->setMinimumHeight(64);
-            b->setStyleSheet(themed(
-                "QPushButton { background:#555; color:white; border:none; border-radius:12px; "
-                "padding:10px 20px; font-size:20px; }"
-                "QPushButton:hover { background:#666; }"
-                "QPushButton:pressed { background:#444; }"
-            ));
-            return b;
-        };
-
-        QPushButton *removeBtn = bigBtn("Remove");
-        QPushButton *clearBtn  = bigBtn("Remove all");
-        QPushButton *closeBtn  = bigBtn("Close");
+        QPushButton *addBtn    = bigDialogButton("Add", true);
+        QPushButton *removeBtn = bigDialogButton("Remove");
+        QPushButton *clearBtn  = bigDialogButton("Remove all");
+        QPushButton *closeBtn  = bigDialogButton("Close");
 
         QHBoxLayout *row = new QHBoxLayout;
         row->setSpacing(12);
+        row->addWidget(addBtn);
         row->addWidget(removeBtn);
         row->addWidget(clearBtn);
         row->addStretch(1);
         row->addWidget(closeBtn);
         lay->addLayout(row);
+
+        connect(addBtn, &QPushButton::clicked, &dlg, [&]() {
+            if (showAddDefaultDialog()) reload();
+        });
 
         connect(removeBtn, &QPushButton::clicked, &dlg, [&]() {
             QListWidgetItem *cur = list->currentItem();
@@ -1987,12 +2341,12 @@ private:
             if (confirm.exec() != QMessageBox::Yes) return;
 
             if (settings) {
-                settings->beginGroup("DefaultApps");
-                settings->remove("");
-                settings->endGroup();
-                settings->beginGroup("DefaultAppNames");
-                settings->remove("");
-                settings->endGroup();
+                for (const char *group : { "DefaultApps", "DefaultAppNames",
+                                           "DefaultAppTerminal" }) {
+                    settings->beginGroup(group);
+                    settings->remove("");
+                    settings->endGroup();
+                }
                 settings->sync();
             }
             reload();
@@ -2014,7 +2368,7 @@ private:
         QDialog dlg(this);
         dlg.setWindowTitle("Open with");
         dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
-        dlg.setMinimumSize(560, 760);
+        dlg.setMinimumSize(560, 800);
 
         QVBoxLayout *layout = new QVBoxLayout(&dlg);
         layout->setSpacing(12);
@@ -2027,7 +2381,9 @@ private:
         const QString currentDefault = defaultNameFor(ext);
         if (!currentDefault.isEmpty()) {
             QLabel *cur = new QLabel(
-                QString(".%1 files currently open in %2").arg(ext, currentDefault));
+                QString(".%1 files currently open in %2%3")
+                    .arg(ext, currentDefault,
+                         defaultTerminalFor(ext) ? QString("  (in a terminal)") : QString()));
             cur->setWordWrap(true);
             cur->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:16px; }"));
             layout->addWidget(cur);
@@ -2039,30 +2395,14 @@ private:
             "QListWidget::item { padding:16px; }"
             "QListWidget::item:selected { background:#2a82da; }"
         ));
-        list->setMinimumHeight(460);
+        list->setMinimumHeight(440);
         list->setIconSize(QSize(44, 44));
         layout->addWidget(list, 1);
 
         QScroller::ungrabGesture(list);
         list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-        QVector<DesktopApp> apps = loadDesktopApps();
-        std::sort(apps.begin(), apps.end(),
-                  [](const DesktopApp &a, const DesktopApp &b) {
-                      return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
-                  });
-
-        const QString currentExec = defaultExecFor(ext);
-        for (const DesktopApp &app : apps) {
-            QListWidgetItem *item = new QListWidgetItem(app.name, list);
-            item->setData(Qt::UserRole, app.exec);
-            if (!app.icon.isEmpty()) {
-                QIcon ic = QIcon::fromTheme(app.icon);
-                if (!ic.isNull()) item->setIcon(ic);
-            }
-            if (!currentExec.isEmpty() && app.exec == currentExec)
-                list->setCurrentItem(item);   // preselect the remembered app
-        }
+        populateAppList(list, defaultExecFor(ext));
 
         QLineEdit *cmdEdit = new QLineEdit;
         cmdEdit->setPlaceholderText("Custom command (e.g. gimp %f)");
@@ -2072,44 +2412,28 @@ private:
         ));
         layout->addWidget(cmdEdit);
 
+        QCheckBox *termChk = new QCheckBox("Run in terminal");
+        termChk->setStyleSheet(themed(checkBoxStyle()));
+        termChk->setChecked(defaultTerminalFor(ext));
+        layout->addWidget(termChk);
+
         QCheckBox *always = new QCheckBox(
             ext.isEmpty() ? QString("Always use this application")
                           : QString("Always open .%1 files with this").arg(ext));
         always->setEnabled(!ext.isEmpty());
-        always->setStyleSheet(themed(
-            "QCheckBox { color:white; font-size:20px; spacing:14px; padding:6px; }"
-            "QCheckBox::indicator { width:34px; height:34px; }"
-            "QCheckBox::indicator:unchecked { background:#333; border:2px solid #666; border-radius:6px; }"
-            "QCheckBox::indicator:checked { background:#2a82da; border:2px solid #2a82da; border-radius:6px; }"
-            "QCheckBox:disabled { color:#666; }"
-        ));
+        always->setStyleSheet(themed(checkBoxStyle()));
         layout->addWidget(always);
 
-        auto bigBtn = [](const QString &text, bool accent = false) {
-            QPushButton *b = new QPushButton(text);
-            b->setMinimumHeight(72);
-            b->setMinimumWidth(150);
-            if (accent) {
-                b->setStyleSheet(themed(
-                    "QPushButton { background:#2a82da; color:white; border:none; border-radius:12px; "
-                    "padding:10px 24px; font-size:24px; }"
-                    "QPushButton:hover { background:#3a92ea; }"
-                    "QPushButton:pressed { background:#1a72ca; }"
-                ));
-            } else {
-                b->setStyleSheet(themed(
-                    "QPushButton { background:#555; color:white; border:none; border-radius:12px; "
-                    "padding:10px 24px; font-size:24px; }"
-                    "QPushButton:hover { background:#666; }"
-                    "QPushButton:pressed { background:#444; }"
-                ));
-            }
-            return b;
-        };
+        // Applications that declare Terminal=true in their .desktop file, and
+        // "Run the file itself", need a terminal - follow the highlighted entry
+        connect(list, &QListWidget::currentItemChanged, &dlg,
+                [termChk](QListWidgetItem *cur, QListWidgetItem *) {
+                    if (cur) termChk->setChecked(cur->data(Qt::UserRole + 1).toBool());
+                });
 
-        QPushButton *manageBtn = bigBtn("Defaults");
-        QPushButton *cancelBtn = bigBtn("Cancel");
-        QPushButton *openBtn   = bigBtn("Open", true);
+        QPushButton *manageBtn = bigDialogButton("Defaults");
+        QPushButton *cancelBtn = bigDialogButton("Cancel");
+        QPushButton *openBtn   = bigDialogButton("Open", true);
 
         QHBoxLayout *btnRow = new QHBoxLayout;
         btnRow->setSpacing(12);
@@ -2129,7 +2453,6 @@ private:
 
         if (dlg.exec() != QDialog::Accepted) return;
 
-        QString cmd;
         QString chosenTemplate;
         QString chosenName;
 
@@ -2140,19 +2463,29 @@ private:
             // a typed command wins over the highlighted list entry
             chosenTemplate = custom.contains('%') ? custom : custom + " %f";
             chosenName     = custom.section(' ', 0, 0);
-            cmd            = buildExecCommand(chosenTemplate, filePath);
         } else if (cur) {
             chosenTemplate = cur->data(Qt::UserRole).toString();
             chosenName     = cur->text();
-            cmd            = buildExecCommand(chosenTemplate, filePath);
         } else {
             return;
         }
 
-        if (always->isChecked() && !ext.isEmpty())
-            setDefaultAppFor(ext, chosenName, chosenTemplate);
+        const bool inTerminal = termChk->isChecked();
 
-        QProcess::startDetached("sh", QStringList() << "-c" << cmd);
+        // "Run the file itself" needs the execute bit, or sh as a stand-in
+        QString runTemplate = chosenTemplate;
+        if (runTemplate == "%f") {
+            runTemplate = directRunTemplate(filePath);
+            if (runTemplate.isEmpty()) {
+                warnNotRunnable(filePath);
+                return;
+            }
+        }
+
+        if (always->isChecked() && !ext.isEmpty())
+            setDefaultAppFor(ext, chosenName, chosenTemplate, inTerminal);
+
+        launchCommand(buildExecCommand(runTemplate, filePath), inTerminal);
         clearSelection(true);
         updateActionButtons();
     }
