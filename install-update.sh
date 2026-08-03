@@ -187,10 +187,16 @@ chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 
+echo "• Updating Ponder.."
+cd ~
+sudo rm -rf ~/Ponder
+git clone https://github.com/DansDesigns/Ponder
+cd Ponder
+chmod +x install.sh
+./install.sh
+echo "[✓] Ponder Updated..."
 
-# ────────────────────────────────────────────────
-# 6b. Build OSM Widgets (desktop widget overlay)
-# ────────────────────────────────────────────────
+
 echo " "
 echo "[8/10] Building osm-widgets..."
 

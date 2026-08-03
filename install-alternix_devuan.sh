@@ -1001,7 +1001,7 @@ rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
-# 12. fetch (areofyl/fetch — replaces fastfetch)
+# 12. 3D animated fetch (areofyl/fetch — replaces fastfetch)
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing fetch (areofyl/fetch)..."
@@ -1105,12 +1105,29 @@ fi
 # ────────────────────────────────────────────────
 echo " "
 
-echo "- Installing rounded-corners..."
+echo "• Installing rounded-corners..."
 cd $HOME
 git clone https://github.com/DansDesigns/rounded_corners
 cd rounded_corners
 chmod +x install_corners.sh
 sudo ./install_corners.sh
+echo "[✓] Rounded-Corers Installed..."
+
+
+# ──────────────────────────────────────────────── 
+# install Ponder
+# ────────────────────────────────────────────────
+echo " "
+
+echo "• Installing Ponder..."
+cd ~
+sudo rm -rf ~/Ponder
+git clone https://github.com/DansDesigns/Ponder
+cd Ponder
+chmod +x install.sh
+./install.sh
+echo "[✓] Ponder Installed..."
+
 
 # ────────────────────────────────────────────────
 # Finish + prompt
