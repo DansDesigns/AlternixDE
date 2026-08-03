@@ -1,0 +1,36 @@
+#!/bin/sh
+# osm-launcher-lockclean
+# Remove an osm-launcher single-instance lock left behind by an unclean exit.
+# A lock held by a live osm-launcher is never touched.
+#
+# Run from qtile's startup hook, before any osm-launcher spawn.
+
+set -eu
+
+for LOCK in "$HOME/.cache/Alternix/osm-launcher.lock" \
+            "$HOME/Alternix/.cache/osm-launcher.lock"
+do
+    [ -f "$LOCK" ] || continue
+
+    pid=$(head -n1 "$LOCK" 2>/dev/null || true)
+
+    # Line 1 must be a PID. Anything else means the file is corrupt: clear it.
+    case "$pid" in
+        '' | *[!0-9]*)
+            rm -f "$LOCK" "$LOCK.rmlock"
+            continue
+            ;;
+    esac
+
+    # Live holder? /proc/<pid>/comm guards against the PID having been
+    # recycled by an unrelated process since the lock was written.
+    if [ -d "/proc/$pid" ] &&
+       [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "osm-launcher" ]
+    then
+        continue
+    fi
+
+    rm -f "$LOCK" "$LOCK.rmlock"
+done
+
+exit 0

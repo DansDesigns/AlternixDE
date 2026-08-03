@@ -166,6 +166,8 @@ echo "• Building osm-launcher..."
 g++ -O3 -fPIC osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-launcher && sudo mv osm-launcher /usr/local/bin/
 
+echo "• Building osm-launcher-lock-cleaner..."
+chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/
 
 echo "• Updating osm-notify..."
 g++ -fPIC osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst

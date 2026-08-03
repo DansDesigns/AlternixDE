@@ -48,6 +48,10 @@ bg = '28282899'
 ## AutoStart ##
 ###############
 
+@hook.subscribe.startup
+def _osm_lockclean():
+    subprocess.call(["/usr/local/bin/osm-launcher-lockclean"])
+
 # Lock on DPMS wake (screen turning back on)
 @hook.subscribe.screen_change
 def lock_on_screen_wake(event, screen):
