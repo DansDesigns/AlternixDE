@@ -234,6 +234,29 @@ StartupNotify=false
 EOF
 chmod +x "$HOME/.local/share/applications/osm-widgets.desktop"
 
+cd "$ALT_ROOT/Alternix/extras/games" || { echo "ERROR: extras/games folder missing"; exit 1; }
+
+echo "[Apps] Installing Breakout Game..."
+if [ -f "extras/games/breakout.png" ]; then
+    sudo cp extras/games/breakout.png /usr/share/icons/hicolor/64x64/apps/breakout.png
+fi
+
+cat <<EOF > "$HOME/.local/share/applications/breakout.desktop"
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Breakout
+Comment=Break the block game
+Exec=brave-browser --app=~/extras/games/breakout.html/ --new-window --force-device-scale-factor=1.3
+Icon=breakout
+Terminal=false
+Categories=Games;
+StartupNotify=true
+EOF
+chmod +x "$HOME/.local/share/applications/breakout.desktop"
+echo "• Breakout Game installed."
+
+
 
 echo "• App Update & Install Complete."
 echo ""

@@ -796,6 +796,30 @@ EOF
 chmod +x "$HOME/.local/share/applications/alternitech-forums.desktop"
 echo "• Alternitech Forums WebApp installed."
 
+
+echo "[Apps] Installing Breakout Game..."
+if [ -f "extras/games/breakout.png" ]; then
+    sudo cp extras/games/breakout.png /usr/share/icons/hicolor/64x64/apps/breakout.png
+fi
+
+cat <<EOF > "$HOME/.local/share/applications/breakout.desktop"
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Breakout
+Comment=Break the block game
+Exec=brave-browser --app=~/extras/games/breakout.html/ --new-window --force-device-scale-factor=1.3
+Icon=breakout
+Terminal=false
+Categories=Games;
+StartupNotify=true
+EOF
+chmod +x "$HOME/.local/share/applications/breakout.desktop"
+echo "• Breakout Game installed."
+
+
+
+
 echo "[Apps] Installing OpenStreetMap WebApp..."
 if [ -f "icons/openmap.png" ]; then
     sudo cp icons/openmap.png /usr/share/icons/hicolor/64x64/apps/openmap.png
