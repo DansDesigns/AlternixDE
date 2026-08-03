@@ -39,7 +39,7 @@ CTRL + SPACE: open Ulauncher Application, file & search bar
 Recomended to use NexOS Linux ([here](https://github.com/DansDesigns/NexOS))
 or manually:
 
-start with a fresh install of Debain 13 with NO desktop,
+start with a fresh install of Debain 13 or Devuan (or any distro based on these) with NO desktop,
 
 install git:
 ```
