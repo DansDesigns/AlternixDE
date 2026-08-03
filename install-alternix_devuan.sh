@@ -799,7 +799,7 @@ echo "• Alternitech Forums WebApp installed."
 
 echo "[Apps] Installing Breakout Game..."
 if [ -f "extras/games/breakout.png" ]; then
-    sudo cp extras/games/breakout.png /usr/share/icons/hicolor/64x64/apps/breakout.png
+    sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.png" /usr/share/icons/hicolor/64x64/apps/breakout.png
 fi
 
 cat <<EOF > "$HOME/.local/share/applications/breakout.desktop"
