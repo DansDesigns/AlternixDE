@@ -808,10 +808,10 @@ Version=1.0
 Type=Application
 Name=Breakout
 Comment=Break the block game
-Exec=brave-browser --app=~/extras/games/breakout.html/ --new-window --force-device-scale-factor=1.3
+Exec=brave-browser --app=file://$HOME/extras/games/breakout.html --new-window --force-device-scale-factor=1.3
 Icon=breakout
 Terminal=false
-Categories=Games;
+Categories=Game;
 StartupNotify=true
 EOF
 chmod +x "$HOME/.local/share/applications/breakout.desktop"
