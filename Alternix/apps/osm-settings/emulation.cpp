@@ -110,6 +110,18 @@ static QSettings* cfg()
     return &s;
 }
 
+// Waydroid needs either binderfs (binder-control node) or the three legacy
+// character devices. Debian's 6.12 kernel builds binder as a module but leaves
+// CONFIG_ANDROID_BINDERFS unset, so the legacy path is the working one there.
+// Returns "binderfs", "legacy", or "none".
+static QString binderState()
+{
+    return runCmd(
+        "if [ -e /dev/binderfs/binder-control ]; then echo binderfs; "
+        "elif [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then echo legacy; "
+        "else echo none; fi").trimmed();
+}
+
 static QString protonRoot()   { return QDir::homePath() + "/.local/share/Alternix/proton"; }
 static QString protonPrefix() { return QDir::homePath() + "/.local/share/Alternix/proton-prefix"; }
 static QString protonTmpFile(){ return QDir::homePath() + "/.cache/Alternix/proton-dl.tar.gz"; }
@@ -853,11 +865,10 @@ QString EmulationPage::buildWaydroidInfoHtml()
 
     // /dev/binderfs existing only means binderfs is mounted; Waydroid needs the
     // control node, and some packages name the nodes anbox-* instead.
-    QString binder = runCmd(
-        "if [ -e /dev/binderfs/binder-control ]; then echo ok; "
-        "elif [ -e /dev/binderfs/anbox-binder ]; then echo 'nodes named anbox-*'; "
-        "elif [ -d /dev/binderfs ]; then echo 'mounted, no control node'; "
-        "else echo missing; fi");
+    const QString bstate = binderState();
+    QString binder = (bstate == "binderfs") ? QString("binderfs")
+                   : (bstate == "legacy")   ? QString("binder, hwbinder, vndbinder")
+                                            : QString("missing");
 
     QString wayland = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")
                     ? QString("none (X11 session)")
@@ -867,7 +878,7 @@ QString EmulationPage::buildWaydroidInfoHtml()
 
     QString contColor = (container.trimmed() == "running") ? "#7CFC00" : "#FF5555";
     QString sessColor = (session.trimmed()   == "running") ? "#7CFC00" : "#FF5555";
-    QString bindColor = (binder.trimmed()    == "ok")      ? "#7CFC00" : "#FF5555";
+    QString bindColor = (bstate != "none") ? "#7CFC00" : "#FF5555";
     QString wayColor  = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") ? "#FF5555" : "#7CFC00";
     QString initColor = inited ? "#7CFC00" : "#FF5555";
 
@@ -1079,12 +1090,13 @@ void EmulationPage::startWaydroid()
         return;
     }
 
-    if (!QFile::exists("/dev/binderfs/binder-control")) {
+    if (binderState() == "none") {
         QMessageBox::warning(
             this,
             "Waydroid cannot start",
-            "/dev/binderfs/binder-control is missing.\n\n"
-            "The binder kernel module is not loaded, or binderfs is not mounted.\n\n"
+            "No binder interface is available.\n\n"
+            "The binder kernel module is not loaded, and neither binderfs nor the "
+            "binder device nodes are present.\n\n"
             "Use Install / setup, then 'Set up binder'."
         );
         return;
@@ -1450,49 +1462,64 @@ void EmulationPage::installWaydroid()
     refreshWaydroidPage();
 }
 
-// binder module + binderfs. If the kernel has no binder support at all there
-// is nothing this button can do, so it reports exactly what is missing rather
-// than failing on a bare "unknown filesystem" from mount.
+// Binder setup. Two working configurations, tried in order: binderfs if the
+// kernel registers it, otherwise the legacy device nodes created by the
+// module's devices= parameter. Only errors if neither is reachable.
 void EmulationPage::fixBinder()
 {
     const QString cmd = QString(SUDO_PREAMBLE) +
         "KREL=$(uname -r)\n"
         "echo \"Kernel: $KREL\"\n"
         "\n"
+        "# modprobe/modinfo live in /sbin, which is not on a normal user PATH,\n"
+        "# so every module command goes through $SUDOX.\n"
         "$SUDOX modprobe binder_linux devices=binder,hwbinder,vndbinder 2>&1 "
+        "|| $SUDOX modprobe binder devices=binder,hwbinder,vndbinder 2>&1 "
         "|| $SUDOX modprobe binder_linux 2>&1 || true\n"
         "\n"
-        "if ! grep -qw binder /proc/filesystems; then\n"
-        "  echo \"ERROR: this kernel provides no binderfs, so Waydroid cannot run on it.\"\n"
-        "  CFG=/boot/config-$KREL\n"
-        "  if [ -r \"$CFG\" ]; then\n"
-        "    grep -E 'ANDROID_BINDER' \"$CFG\" || echo \"$CFG has no ANDROID_BINDER options set.\"\n"
-        "  else\n"
-        "    echo \"No readable $CFG to check the kernel options against.\"\n"
+        "if grep -qw binder /proc/filesystems; then\n"
+        "  echo \"Using binderfs.\"\n"
+        "  $SUDOX mkdir -p /dev/binderfs\n"
+        "  mountpoint -q /dev/binderfs || $SUDOX mount -t binder none /dev/binderfs\n"
+        "  if ! grep -q \"/dev/binderfs\" /etc/fstab 2>/dev/null; then\n"
+        "    printf \"none\\t/dev/binderfs\\tbinder\\tnofail\\t0\\t0\\n\" "
+        "| $SUDOX tee -a /etc/fstab >/dev/null\n"
         "  fi\n"
-        "  if modinfo binder_linux >/dev/null 2>&1; then\n"
-        "    echo \"A binder_linux module exists but refused to load - check dmesg.\"\n"
-        "  else\n"
-        "    echo \"No binder_linux module is built for $KREL.\"\n"
+        "  if ! grep -q \"^binder_linux\" /etc/modules 2>/dev/null; then\n"
+        "    echo binder_linux | $SUDOX tee -a /etc/modules >/dev/null\n"
         "  fi\n"
-        "  echo \"Fix: boot a kernel built with CONFIG_ANDROID_BINDERFS, or install the\"\n"
-        "  echo \"anbox-modules-dkms package to build binder_linux for this kernel.\"\n"
-        "  exit 1\n"
+        "  if [ ! -e /dev/binderfs/binder-control ]; then\n"
+        "    echo \"ERROR: binderfs is mounted but binder-control is missing.\"\n"
+        "    exit 1\n"
+        "  fi\n"
+        "  echo \"binderfs ready.\"\n"
+        "  exit 0\n"
         "fi\n"
         "\n"
-        "if modinfo binder_linux >/dev/null 2>&1 && ! grep -q \"^binder_linux\" /etc/modules 2>/dev/null; then\n"
-        "  echo binder_linux | $SUDOX tee -a /etc/modules >/dev/null\n"
+        "if [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then\n"
+        "  echo \"This kernel has no binderfs; using the legacy binder devices.\"\n"
+        "  # Make the devices= parameter stick across reboots.\n"
+        "  printf \"options binder_linux devices=binder,hwbinder,vndbinder\\n\" "
+        "| $SUDOX tee /etc/modprobe.d/waydroid-binder.conf >/dev/null\n"
+        "  if ! grep -q \"^binder_linux\" /etc/modules 2>/dev/null; then\n"
+        "    echo binder_linux | $SUDOX tee -a /etc/modules >/dev/null\n"
+        "  fi\n"
+        "  echo \"binder, hwbinder and vndbinder ready.\"\n"
+        "  exit 0\n"
         "fi\n"
-        "$SUDOX mkdir -p /dev/binderfs\n"
-        "mountpoint -q /dev/binderfs || $SUDOX mount -t binder none /dev/binderfs\n"
-        "if ! grep -q \"/dev/binderfs\" /etc/fstab 2>/dev/null; then\n"
-        "  printf \"none\\t/dev/binderfs\\tbinder\\tnofail\\t0\\t0\\n\" "
-        "| $SUDOX tee -a /etc/fstab >/dev/null\n"
+        "\n"
+        "echo \"ERROR: no usable binder interface.\"\n"
+        "echo \"Nodes present: $(ls /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null | tr '\\n' ' ')\"\n"
+        "CFG=/boot/config-$KREL\n"
+        "if [ -r \"$CFG\" ]; then\n"
+        "  grep -E 'ANDROID_BINDER' \"$CFG\" || echo \"$CFG sets no ANDROID_BINDER options.\"\n"
         "fi\n"
-        "if [ ! -e /dev/binderfs/binder-control ]; then\n"
-        "  echo \"ERROR: binderfs is mounted but binder-control is missing.\"\n"
-        "  exit 1\n"
-        "fi\n";
+        "echo \"Modules in drivers/android:\"\n"
+        "ls /lib/modules/$KREL/kernel/drivers/android/ 2>/dev/null || echo \"  (directory missing)\"\n"
+        "$SUDOX modinfo binder_linux 2>&1 | head -n 3 || true\n"
+        "echo \"Fix: install anbox-modules-dkms, or build the kernel with\"\n"
+        "echo \"CONFIG_ANDROID_BINDER_IPC and CONFIG_ANDROID_BINDERFS.\"\n"
+        "exit 1\n";
 
     QString out;
     const bool ok = runTask(m_wayStatus, "Setting up binder", cmd, out, 3 * 60 * 1000);
