@@ -21,6 +21,7 @@
 #include <QEventLoop>
 #include <QStringList>
 #include <QVector>
+#include <unistd.h>
 
 // -----------------------------------------------------
 // Alternix compact button style (same as Storage page)
@@ -120,6 +121,16 @@ static QString binderState()
         "if [ -e /dev/binderfs/binder-control ]; then echo binderfs; "
         "elif [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then echo legacy; "
         "else echo none; fi").trimmed();
+}
+
+// elogind normally provides /run/user/<uid>. If it is missing, Weston and
+// Waydroid still need somewhere to put their sockets.
+static QString runtimeDir()
+{
+    QString rt = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    if (rt.isEmpty() || !QFileInfo(rt).isDir())
+        rt = QString("/tmp/alternix-runtime-%1").arg(getuid());
+    return rt;
 }
 
 static QString protonRoot()   { return QDir::homePath() + "/.local/share/Alternix/proton"; }
@@ -870,8 +881,9 @@ QString EmulationPage::buildWaydroidInfoHtml()
                    : (bstate == "legacy")   ? QString("binder, hwbinder, vndbinder")
                                             : QString("missing");
 
-    QString wayland = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")
-                    ? QString("none (X11 session)")
+    const bool nested = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY");
+    QString wayland = nested
+                    ? QString("nested Weston (X11 session)")
                     : qEnvironmentVariable("WAYLAND_DISPLAY");
 
     const bool inited = QFile::exists("/var/lib/waydroid/waydroid.cfg");
@@ -879,7 +891,7 @@ QString EmulationPage::buildWaydroidInfoHtml()
     QString contColor = (container.trimmed() == "running") ? "#7CFC00" : "#FF5555";
     QString sessColor = (session.trimmed()   == "running") ? "#7CFC00" : "#FF5555";
     QString bindColor = (bstate != "none") ? "#7CFC00" : "#FF5555";
-    QString wayColor  = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") ? "#FF5555" : "#7CFC00";
+    QString wayColor  = "#7CFC00";
     QString initColor = inited ? "#7CFC00" : "#FF5555";
 
     QString html;
@@ -900,9 +912,10 @@ QString EmulationPage::buildWaydroidInfoHtml()
         html += "<br><span style='color:#FFAA00;'>The Android system image has not "
                 "been downloaded yet. Use Install / setup.</span>";
 
-    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
-        html += "<br><span style='color:#FFAA00;'>Waydroid renders through Wayland "
-                "and cannot start on an X11 session.</span>";
+    if (nested
+        && runCmd("command -v weston >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes")
+        html += "<br><span style='color:#FFAA00;'>Weston is not installed. It is "
+                "needed to run Waydroid inside an X11 session.</span>";
 
     return html;
 }
@@ -1080,16 +1093,6 @@ void EmulationPage::startWaydroid()
         return;
     }
 
-    if (qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY")) {
-        QMessageBox::warning(
-            this,
-            "Waydroid cannot start",
-            "No Wayland compositor is running (WAYLAND_DISPLAY is unset).\n\n"
-            "Waydroid renders through Wayland and cannot run on this X11 session."
-        );
-        return;
-    }
-
     if (binderState() == "none") {
         QMessageBox::warning(
             this,
@@ -1130,15 +1133,91 @@ void EmulationPage::startWaydroid()
         }
     }
 
-    QProcess::startDetached("/bin/sh", QStringList()
-        << "-c" << "waydroid session start >/dev/null 2>&1");
+    // Waydroid only renders to a Wayland compositor. Alternix runs Qtile on X11,
+    // so when there is no compositor of our own, Weston is started nested inside
+    // the X session on a private socket and Waydroid is pointed at that.
+    const QString rt = runtimeDir();
+    QString wl = qEnvironmentVariable("WAYLAND_DISPLAY");
+
+    if (wl.isEmpty()) {
+        if (qEnvironmentVariableIsEmpty("DISPLAY")) {
+            QMessageBox::warning(
+                this,
+                "Waydroid cannot start",
+                "There is no Wayland compositor and no X display to nest one in."
+            );
+            return;
+        }
+
+        if (runCmd("command -v weston >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
+            QMessageBox::warning(
+                this,
+                "Weston not installed",
+                "Waydroid draws through Wayland, so it needs Weston to run inside "
+                "this X11 session.\n\n"
+                "Use Install / setup to install Waydroid again — that installs Weston too."
+            );
+            return;
+        }
+
+        if (!QFile::exists(rt + "/waydroid-0")) {
+            // --backend=x11 on Weston 13+, the older module name as a fallback.
+            const QString westonCmd = QString(
+                "RT=\"%1\"\n"
+                "mkdir -p \"$RT\" && chmod 700 \"$RT\"\n"
+                "export XDG_RUNTIME_DIR=\"$RT\"\n"
+                "LOG=\"$HOME/.cache/Alternix/weston.log\"\n"
+                "mkdir -p \"$(dirname \"$LOG\")\"\n"
+                "weston --socket=waydroid-0 --backend=x11 >\"$LOG\" 2>&1 || "
+                "weston --socket=waydroid-0 --backend=x11-backend.so >>\"$LOG\" 2>&1\n"
+            ).arg(rt);
+
+            QProcess::startDetached("/bin/sh", QStringList() << "-c" << westonCmd);
+
+            QElapsedTimer wt;
+            wt.start();
+            while (wt.elapsed() < 15000 && !QFile::exists(rt + "/waydroid-0"))
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
+
+            if (!QFile::exists(rt + "/waydroid-0")) {
+                QMessageBox::warning(
+                    this,
+                    "Weston did not start",
+                    "Weston was started but its Wayland socket never appeared.\n\n"
+                    "See ~/.cache/Alternix/weston.log for the reason."
+                );
+                return;
+            }
+        }
+
+        wl = "waydroid-0";
+    }
+
+    const QString sessionCmd = QString(
+        "export XDG_RUNTIME_DIR=\"%1\"\n"
+        "export WAYLAND_DISPLAY=\"%2\"\n"
+        "LOG=\"$HOME/.cache/Alternix/waydroid-session.log\"\n"
+        "mkdir -p \"$(dirname \"$LOG\")\"\n"
+        "waydroid session start >\"$LOG\" 2>&1 &\n"
+        "i=0\n"
+        "while [ $i -lt 30 ]; do\n"
+        "  pgrep -f '[w]aydroid session' >/dev/null 2>&1 && break\n"
+        "  sleep 1\n"
+        "  i=$((i+1))\n"
+        "done\n"
+        "waydroid show-full-ui >>\"$LOG\" 2>&1\n"
+    ).arg(rt, wl);
+
+    QProcess::startDetached("/bin/sh", QStringList() << "-c" << sessionCmd);
 }
 
 // Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::stopWaydroid()
 {
     QString out;
-    bool ok = runCmdOk("waydroid session stop", out, 30000);
+    bool ok = runCmdOk("waydroid session stop; "
+                       "pkill -f 'weston.*--socket=waydroid-0' >/dev/null 2>&1; true",
+                       out, 30000);
     if (!ok) {
         QMessageBox::warning(
             this,
@@ -1458,6 +1537,14 @@ void EmulationPage::installWaydroid()
 
     QString out;
     const bool ok = runTask(m_wayStatus, "Installing Waydroid", cmd, out, 30 * 60 * 1000);
+    if (ok) {
+        // Weston is what lets Waydroid draw inside the X11 session.
+        QString wout;
+        const QString wcmd = QString(SUDO_PREAMBLE) +
+            "$SUDOX env DEBIAN_FRONTEND=noninteractive apt-get -y install weston\n";
+        if (!runTask(m_wayStatus, "Installing Weston", wcmd, wout, 15 * 60 * 1000))
+            reportTask(m_wayStatus, "Install Weston", false, wout);
+    }
     reportTask(m_wayStatus, "Install Waydroid", ok, out);
     refreshWaydroidPage();
 }
