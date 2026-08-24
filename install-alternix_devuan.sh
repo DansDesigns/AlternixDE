@@ -146,7 +146,7 @@ sudo nala install -y \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh mobile-broadband-provider-info \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 x11-apps zip iio-sensor-proxy \
-    kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift \
+    kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift tlp \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
