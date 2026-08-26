@@ -15,6 +15,8 @@ class Scroller(Layout):
         ("margin", 0, "Margin inside each column (int or [t, r, b, l])."),
         ("gap", 10, "Horizontal gap between columns, in pixels."),
         ("edge_padding", 10, "Padding kept at the left/right screen edges."),
+        ("bottom_reserve", 0,
+         "Pixels left free at the bottom of the screen for the scrollbar."),
         ("column_widths", [0.34, 0.5, 0.67, 1.0],
          "Selectable column widths, as a fraction of the viewport."),
         ("default_width", 2, "Index into column_widths used for new windows."),
@@ -32,6 +34,10 @@ class Scroller(Layout):
          "Seconds of pointer stillness that ends a drag."),
     ]
 
+    # Callables notified after every layout pass, so an external scrollbar can
+    # redraw without polling. Class level, so every cloned layout shares them.
+    _observers = []
+
     def __init__(self, **config):
         Layout.__init__(self, **config)
         self.add_defaults(Scroller.defaults)
@@ -45,6 +51,25 @@ class Scroller(Layout):
         self._scrolling = False
         self._drag_base = 0
         self._drag_seq = 0
+
+    # ------------------------------------------------------------- observers
+
+    @classmethod
+    def add_observer(cls, fn):
+        if fn not in Scroller._observers:
+            Scroller._observers.append(fn)
+
+    @classmethod
+    def remove_observer(cls, fn):
+        if fn in Scroller._observers:
+            Scroller._observers.remove(fn)
+
+    def _notify(self):
+        for fn in list(Scroller._observers):
+            try:
+                fn(self)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ core
 
@@ -163,6 +188,7 @@ class Scroller(Layout):
         self._clamp(total, screen_rect)
         self._geo = (xs, ws, total)
         Layout.layout(self, windows, screen_rect)
+        self._notify()
 
     def configure(self, client, screen_rect):
         if client not in self.clients:
@@ -177,6 +203,7 @@ class Scroller(Layout):
         bw = self.border_width
         x = screen_rect.x + self.edge_padding + xs[i] - self.offset
         w = ws[i]
+        h = screen_rect.height - self.bottom_reserve
         focused = getattr(client, "has_focus", False) or i == self.current
 
         if self.unmap_offscreen and not self._scrolling and not focused:
@@ -190,7 +217,7 @@ class Scroller(Layout):
             x,
             screen_rect.y,
             max(1, w - 2 * bw),
-            max(1, screen_rect.height - 2 * bw),
+            max(1, h - 2 * bw),
             bw,
             self.border_focus if focused else self.border_normal,
             margin=self.margin,
@@ -226,6 +253,28 @@ class Scroller(Layout):
             self.scroll_settle()
 
     # -------------------------------------------------------------- commands
+
+    @expose_command()
+    def strip_metrics(self):
+        """Geometry of the strip and viewport, for an external scrollbar."""
+        if self._rect is None:
+            return None
+        xs, ws, total = self._geo
+        return {
+            "offset": self.offset,
+            "view": self._viewport(self._rect),
+            "total": total,
+            "current": self.current,
+            "count": len(self.clients),
+            "cols": [[xs[i], ws[i]] for i in range(len(xs))],
+        }
+
+    @expose_command()
+    def set_offset(self, value, dragging=False):
+        """Move the viewport to an absolute strip position."""
+        self._scrolling = bool(dragging)
+        self.offset = int(value)
+        self._relayout()
 
     @expose_command()
     def next(self):

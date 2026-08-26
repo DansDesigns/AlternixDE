@@ -193,14 +193,6 @@ chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-touchscroll.py
 cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
 
-echo "• Updating Ponder.."
-cd ~
-sudo rm -rf ~/Ponder
-git clone https://github.com/DansDesigns/Ponder
-cd Ponder
-chmod +x install.sh
-./install.sh
-echo "[✓] Ponder Updated..."
 
 
 echo " "

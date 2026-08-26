@@ -38,6 +38,7 @@ import time
 # from pathlib import Path
 # import configparser
 from scroller import Scroller
+import scrollerbar
 
 
 mod = "mod4"
@@ -49,9 +50,6 @@ bg = '28282899'
 ## AutoStart ##
 ###############
 
-@hook.subscribe.startup
-def _osm_lockclean():
-    subprocess.call(["/usr/local/bin/osm-launcher-lockclean"])
 
 # Lock on DPMS wake (screen turning back on)
 @hook.subscribe.screen_change
@@ -62,8 +60,9 @@ def lock_on_screen_wake(event):
 def lock_on_resume():
     subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
 
-
 @hook.subscribe.startup
+def _osm_lockclean():
+    subprocess.call(["/usr/local/bin/osm-launcher-lockclean"])
 def autostart():
     # Autostart Programs
     subprocess.Popen(['osm-paper-restore'])
@@ -77,6 +76,9 @@ def autostart():
     subprocess.Popen(['osm-widgets'])
     subprocess.Popen([os.path.expanduser("~/.local/bin/alternix-touchscroll.py")])
 
+@hook.subscribe.startup_complete
+def _scrollbar():
+    scrollerbar.install(qtile, height=16)
 
     # Function to update the time
     def update_time():
