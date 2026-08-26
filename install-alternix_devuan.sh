@@ -354,10 +354,27 @@ sudo mkdir -p /usr/lib/udev
 sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
 
 # Reloading udev rules only works against a running udevd — this script
-# may run inside a chroot (e.g. the NexOS installer) where there's no
+# may run inside a chroot (e.g. the installer) where there's no
 # udevd to talk to. udevadm exits non-zero in that case and would take
 # down the rest of the install under `set -e`. Not fatal either way.
 sudo udevadm control --reload-rules 2>/dev/null || true
+
+
+# ────────────────────────────────────────────────
+# 2a. Qtile Scrolling Layout & other scripts
+# ────────────────────────────────────────────────
+echo " "
+echo "[2a/10] Installing Scrolling Layout for Qtile"
+
+cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
+cd ~/.config/Alternix/scripts
+chmod +x alternix-rotate-monitor.sh
+chmod +x alternix-rotate-setup.sh
+chmod +x alternix-rotate-toggle.sh
+
+chmod +x alternix-touchscroll.py
+cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
+
 
 # ────────────────────────────────────────────────
 # 3. Configure xinitrc autostart

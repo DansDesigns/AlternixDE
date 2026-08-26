@@ -37,6 +37,7 @@ import threading
 import time
 # from pathlib import Path
 # import configparser
+from scroller import Scroller
 
 
 mod = "mod4"
@@ -74,6 +75,7 @@ def autostart():
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['touchegg'])
     subprocess.Popen(['osm-widgets'])
+    subprocess.Popen([os.path.expanduser("~/.local/bin/alternix-touchscroll.py")])
 
 
     # Function to update the time
@@ -139,10 +141,10 @@ keys = [
     # A list of available commands that can be bound to keys can be found
     # at https://docs.qtile.org/en/latest/manual/config/lazy.html
     # Switch between windows
-    Key([mod], "g", lazy.function(show_graphs)),
-    Key([mod], "p", lazy.spawn("osm-power")),
+#    Key([mod], "g", lazy.function(show_graphs)),
+#    Key([mod], "p", lazy.spawn("osm-power")),
     Key([mod], "a", lazy.spawn("osm-launcher")),
-    Key([mod], "l", lazy.spawn("osm-lockd")),
+#    Key([mod], "l", lazy.spawn("osm-lockd")),
     Key([mod], "n", lazy.spawn("osm-rocker")),
     Key([mod], "Return", lazy.spawn(terminal), desc="Launch terminal"),
     Key([mod], "Tab", lazy.next_layout(), desc="Toggle between layouts"),
@@ -156,6 +158,19 @@ keys = [
     Key([], "XF86AudioRaiseVolume", lazy.spawn("amixer -q set Master 5%+")),
     Key([], "XF86AudioLowerVolume", lazy.spawn("amixer -q set Master 5%-")),
     Key([], "XF86AudioMute", lazy.spawn("amixer -q set Master toggle")),
+
+# Scrolling Layout:
+    Key([mod], "h", lazy.layout.left()),
+    Key([mod], "l", lazy.layout.right()),
+    Key([mod, "shift"], "h", lazy.layout.shuffle_left()),
+    Key([mod, "shift"], "l", lazy.layout.shuffle_right()),
+    Key([mod], "Home", lazy.layout.first()),
+    Key([mod], "End", lazy.layout.last()),
+    Key([mod], "bracketleft", lazy.layout.scroll_left()),
+    Key([mod], "bracketright", lazy.layout.scroll_right()),
+    Key([mod], "equal", lazy.layout.grow()),
+    Key([mod], "minus", lazy.layout.shrink()),
+    Key([mod], "c", lazy.layout.centre()),
 ]
 
 # Add key bindings to switch VTs in Wayland.
@@ -200,6 +215,17 @@ layouts = [
     #layout.RatioTile(margin=6),
     layout.MonadWide(border_width=0, margin=6),
     layout.MonadTall(border_width=0, margin=6),
+    Scroller(
+        border_width=3,
+        border_focus="#8aadf4c0",
+        border_normal="#494d6480",
+        gap=10,
+        edge_padding=10,
+        column_widths=[0.34, 0.5, 0.67, 1.0],
+        default_width=2,
+        centre_focused=False,     # True = niri-style always-centred column
+        unmap_offscreen=True,     # keeps picom off the Atom GPU's back
+    )
 ]
 
 widget_defaults = dict(
@@ -327,7 +353,10 @@ screens = [
 mouse = [
     Drag([mod], "Button1", lazy.window.set_position_floating(), start=lazy.window.get_position()),
     Drag([mod], "Button3", lazy.window.set_size_floating(), start=lazy.window.get_size()),
-    Click([mod], "Button2", lazy.window.bring_to_front()),
+    Click([mod], "Button2", lazy.layout.centre()),
+    Click([mod], "Button4", lazy.layout.left()),
+    Click([mod], "Button5", lazy.layout.right()),
+
 ]
 
 dgroups_key_binder = None

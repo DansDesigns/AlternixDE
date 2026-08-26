@@ -190,6 +190,9 @@ chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 
+chmod +x alternix-touchscroll.py
+cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
+
 echo "• Updating Ponder.."
 cd ~
 sudo rm -rf ~/Ponder
