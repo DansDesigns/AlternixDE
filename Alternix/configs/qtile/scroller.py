@@ -198,14 +198,20 @@ class Scroller(Layout):
         client.unhide()
 
     def _relayout(self):
-        if self.group:
-            self.group.layout_all()
+        if self._group is not None:
+            self._group.layout_all()
+
+    def _focus_client(self, client):
+        if self._group is not None:
+            self._group.focus(client, False)
 
     # --------------------------------------------------------- drag plumbing
 
     def _arm_drag_timer(self):
         """Qtile gives no button-release hook, so settle on pointer stillness."""
-        qtile = getattr(self.group, "qtile", None) if self.group else None
+        if self._group is None:
+            return
+        qtile = getattr(self._group, "qtile", None)
         if qtile is None:
             return
         self._drag_seq += 1
@@ -220,6 +226,20 @@ class Scroller(Layout):
             self.scroll_settle()
 
     # -------------------------------------------------------------- commands
+
+    @expose_command()
+    def next(self):
+        """Focus the next column, wrapping at the end of the strip."""
+        if self.clients:
+            i = (self.current + 1) % len(self.clients)
+            self._focus_client(self.clients[i])
+
+    @expose_command()
+    def previous(self):
+        """Focus the previous column, wrapping at the start of the strip."""
+        if self.clients:
+            i = (self.current - 1) % len(self.clients)
+            self._focus_client(self.clients[i])
 
     @expose_command()
     def drag_start(self):
@@ -253,6 +273,9 @@ class Scroller(Layout):
             self._relayout()
             return
         xs, ws, _ = self._geo
+        if not xs:
+            self._relayout()
+            return
         centre = self.offset + self._viewport(self._rect) / 2.0
         best, best_d = 0, None
         for i, (x, w) in enumerate(zip(xs, ws)):
@@ -262,9 +285,10 @@ class Scroller(Layout):
         self.current = best
         self._reveal = True
         win = self.clients[best]
-        if self.group and self.group.current_window is not win:
-            self.group.focus(win, False)
-        self._relayout()
+        if self._group is not None and self._group.current_window is not win:
+            self._group.focus(win, False)
+        else:
+            self._relayout()
 
     @expose_command()
     def scroll_left(self, step=None):
@@ -280,23 +304,23 @@ class Scroller(Layout):
     def left(self):
         """Focus the column to the left."""
         if self.clients and self.current > 0:
-            self.group.focus(self.clients[self.current - 1], False)
+            self._focus_client(self.clients[self.current - 1])
 
     @expose_command()
     def right(self):
         """Focus the column to the right."""
         if self.clients and self.current < len(self.clients) - 1:
-            self.group.focus(self.clients[self.current + 1], False)
+            self._focus_client(self.clients[self.current + 1])
 
     @expose_command()
     def first(self):
         if self.clients:
-            self.group.focus(self.clients[0], False)
+            self._focus_client(self.clients[0])
 
     @expose_command()
     def last(self):
         if self.clients:
-            self.group.focus(self.clients[-1], False)
+            self._focus_client(self.clients[-1])
 
     @expose_command()
     def shuffle_left(self):
@@ -352,9 +376,10 @@ class Scroller(Layout):
         """Centre the focused column in the viewport."""
         if self.clients and self._rect is not None:
             xs, ws, _ = self._geo
-            i = self.current
-            self.offset = xs[i] - (self._viewport(self._rect) - ws[i]) // 2
-            self._relayout()
+            if xs:
+                i = max(0, min(self.current, len(xs) - 1))
+                self.offset = xs[i] - (self._viewport(self._rect) - ws[i]) // 2
+                self._relayout()
 
     @expose_command()
     def info(self):

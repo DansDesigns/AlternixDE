@@ -55,7 +55,7 @@ def _osm_lockclean():
 
 # Lock on DPMS wake (screen turning back on)
 @hook.subscribe.screen_change
-def lock_on_screen_wake(event, screen):
+def lock_on_screen_wake(event):
     subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
 
 @hook.subscribe.resume
@@ -361,7 +361,7 @@ mouse = [
 
 dgroups_key_binder = None
 dgroups_app_rules = []  # type: list
-follow_mouse_focus = True
+follow_mouse_focus = False
 bring_front_click = False
 floats_kept_above = True
 cursor_warp = False
