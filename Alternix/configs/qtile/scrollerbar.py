@@ -2,10 +2,12 @@
 #
 # Draws a miniature of the whole window strip into a qtile Internal window
 # placed inside the usable screen area, at its bottom edge: above the bottom
-# bar, below the windows. Scroller.bottom_reserve must match `height` so the
-# layout leaves room for it.
+# bar, below the windows.
 #
-# Works with plain pointer events, so it is driven equally well by a mouse or
+# The bar owns the reservation: it writes its own height into every Scroller's
+# bottom_reserve at startup, so the gap can never disagree with the strip.
+#
+# Works from plain pointer events, so it is driven equally well by a mouse or
 # by a touchscreen running in pointer-emulation mode.
 
 import time
@@ -15,8 +17,8 @@ from libqtile.log_utils import logger
 
 from scroller import Scroller
 
-# Surviving across lazy.reload_config(), which re-execs config.py but keeps
-# already-imported modules, so the previous window can be torn down.
+# Survives lazy.reload_config(), which re-execs config.py but keeps already
+# imported modules, so the previous window can be torn down.
 _instance = None
 
 
@@ -34,6 +36,7 @@ class ScrollerBar:
         radius=True,
         min_viewport=28,
         interval=0.016,
+        reserve=True,
     ):
         self.height = int(height)
         self.background = background
@@ -46,6 +49,7 @@ class ScrollerBar:
         self.radius = bool(radius)
         self.min_viewport = int(min_viewport)
         self.interval = float(interval)
+        self.reserve = bool(reserve)
 
         self.qtile = None
         self.window = None
@@ -61,11 +65,16 @@ class ScrollerBar:
     def start(self, qtile):
         """Call once from a startup_complete hook."""
         self.qtile = qtile
+        self._apply_reserve()
         self._build()
         Scroller.add_observer(self._on_layout)
         hook.subscribe.setgroup(self._sync)
         hook.subscribe.layout_change(lambda *args: self._sync())
         hook.subscribe.screens_reconfigured(self._rebuild)
+        hook.subscribe.client_managed(lambda *args: self._sync())
+        hook.subscribe.client_killed(lambda *args: self._sync())
+        hook.subscribe.float_change(self._sync)
+        hook.subscribe.focus_change(self._raise_if_visible)
 
     def finalize(self):
         Scroller.remove_observer(self._on_layout)
@@ -81,6 +90,25 @@ class ScrollerBar:
             except Exception:
                 pass
             self.window = None
+        self._visible = False
+
+    def _apply_reserve(self):
+        """Write our height into every Scroller, prototypes and clones alike."""
+        if not self.reserve:
+            return
+        config = getattr(self.qtile, "config", None)
+        for lay in getattr(config, "layouts", None) or []:
+            if isinstance(lay, Scroller):
+                lay.bottom_reserve = self.height
+        for group in getattr(self.qtile, "groups", None) or []:
+            for lay in getattr(group, "layouts", None) or []:
+                if isinstance(lay, Scroller):
+                    lay.bottom_reserve = self.height
+            if isinstance(getattr(group, "layout", None), Scroller):
+                try:
+                    group.layout_all()
+                except Exception:
+                    pass
 
     def _geometry(self):
         screen = self.qtile.current_screen
@@ -122,6 +150,7 @@ class ScrollerBar:
 
     def _rebuild(self, *args):
         self.finalize()
+        self._apply_reserve()
         self._build()
 
     # ---------------------------------------------------------------- layout
@@ -135,26 +164,50 @@ class ScrollerBar:
         lay = getattr(group, "layout", None) if group else None
         return lay if isinstance(lay, Scroller) else None
 
+    def _fullscreen_present(self):
+        screen = self.qtile.current_screen if self.qtile else None
+        group = getattr(screen, "group", None) if screen else None
+        for win in getattr(group, "windows", None) or []:
+            if getattr(win, "fullscreen", False):
+                return True
+        return False
+
+    def _raise(self):
+        """Internal windows do not outrank clients by default; lift ours."""
+        if self.window is None:
+            return
+        try:
+            self.window.place(
+                self.x, self.y, self.width, self.height, 0, None, above=True
+            )
+        except Exception:
+            logger.exception("ScrollerBar: could not raise window")
+
+    def _raise_if_visible(self, *args):
+        if self._visible:
+            self._raise()
+
     def _reposition(self):
         """Follow the usable area if a bar or the screen geometry changed."""
         geo = self._geometry()
         if geo is None:
-            return
+            return False
         x, y, w, h = geo
         if (x, y, w) == (self.x, self.y, self.width):
-            return
+            return False
         self.x, self.y, self.width = x, y, w
         try:
-            self.window.place(x, y, w, h, 0, None)
+            self.window.place(x, y, w, h, 0, None, above=True)
             self.drawer.width = w
             self.drawer.height = h
         except Exception:
             logger.exception("ScrollerBar: could not reposition")
+        return True
 
     def _sync(self, *args):
         if self.window is None:
             return
-        want = self._layout() is not None
+        want = self._layout() is not None and not self._fullscreen_present()
         if want:
             self._reposition()
         if want != self._visible:
@@ -162,10 +215,11 @@ class ScrollerBar:
             try:
                 if want:
                     self.window.unhide()
+                    self._raise()
                 else:
                     self.window.hide()
             except Exception:
-                pass
+                logger.exception("ScrollerBar: could not toggle window")
         if want:
             self.draw()
 
