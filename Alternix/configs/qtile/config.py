@@ -223,7 +223,7 @@ layouts = [
         default_width=2,
         centre_focused=False,     # True = niri-style always-centred column
         unmap_offscreen=True,     # keeps picom off the Atom GPU's back
-    )
+    ),
     # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
     layout.Max(border_width=0, margin=6),
     #layout.RatioTile(margin=6),
