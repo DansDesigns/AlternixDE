@@ -20,8 +20,8 @@ sudo nala upgrade -y
 echo " "
 echo "Checking for Alternix Updates..."
 
-REPO_URL="https://github.com/DansDesigns/Alternix.git"
-VERSION_URL="https://raw.githubusercontent.com/DansDesigns/Alternix/main/update/version.txt"
+REPO_URL="https://github.com/DansDesigns/AlternixDE.git"
+VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixDE/main/update/version.txt"
 
 REMOTE_VERSION=$(curl -fs $VERSION_URL)
 
