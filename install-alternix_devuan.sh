@@ -670,6 +670,9 @@ echo "• Building ui.so..."
 g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv ui.so /usr/local/bin/
 
+echo "• Building reticulum.so..."
+g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
 # ────────────────────────────────────────────────
 # 6b. Build OSM Widgets (desktop widget overlay)

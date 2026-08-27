@@ -136,6 +136,11 @@ echo "• Building location.so..."
 g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo mv location.so /usr/local/bin/
 
+echo "• Building reticulum.so..."
+g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
+
+
 cd "$ALT_ROOT/Alternix/apps"
 
 echo "• Updating osm-power..."

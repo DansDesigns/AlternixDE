@@ -165,6 +165,7 @@ private:
             {"🔃", "Bluetooth", "Bluetooth Settings", "bluetooth"},
             {"📶", "Mobile Network", "Cellular, APN, Roaming", "mobile"},
             {"🔗", "Ethernet", eth, "ethernet"},
+            {"🕸️", "Reticulum", "Encrypted Mesh Network", "reticulum"},
             {"📍", "Location", "GPS, Geolocation Services", "location"},
             {"🖥️", "Display", "Brightness, Sleep, Screen Info", "display"},
             {"🎨", "UI", "Font Size, Wallpaper", "ui"},
