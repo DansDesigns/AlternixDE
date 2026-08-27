@@ -7,6 +7,11 @@
 # libinput only synthesises GESTURE_SWIPE for touchpads, never touchscreens,
 # so raw ABS_MT events are read and the gesture composed here.
 #
+# Pen devices are rejected on capability (BTN_TOOL_PEN / BTN_STYLUS), never on
+# vendor name: panels with active-pen support enumerate their finger digitiser
+# under the same vendor as the pen one, so name matching threw out the very
+# device we want.
+#
 # Events are NOT taken away from X by default. EVIOCGRAB mid-gesture leaves X
 # holding touch sequences that never receive a TouchEnd, which wedges the
 # pointer for the rest of the session: clicks stop resolving and edge-swipe
@@ -15,6 +20,10 @@
 # the ones already open when the grab was taken.
 #
 # Requires membership of the 'input' group.
+#
+#   --verbose   report every device considered, and why it was kept or
+#               dropped, then log finger counts live. Under qtile's autostart
+#               this lands in ~/.local/share/qtile/qtile.log.
 
 import argparse
 import errno
@@ -23,6 +32,7 @@ import glob
 import os
 import select
 import signal
+import socket
 import struct
 import sys
 import time
@@ -33,17 +43,27 @@ EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
 SYN_REPORT, SYN_MT_REPORT = 0x00, 0x02
 ABS_MT_SLOT, ABS_MT_POSITION_X = 0x2F, 0x35
 ABS_MT_POSITION_Y, ABS_MT_TRACKING_ID = 0x36, 0x39
-BTN_TOUCH, BTN_TOOL_FINGER = 0x14A, 0x145
+BTN_TOOL_PEN, BTN_TOOL_FINGER = 0x140, 0x145
+BTN_TOUCH, BTN_STYLUS, BTN_STYLUS2 = 0x14A, 0x14B, 0x14C
 PROP_POINTER, PROP_DIRECT = 0x00, 0x01
 
 EV_FMT = "llHHi"
 EV_SIZE = struct.calcsize(EV_FMT)
 
-PEN_HINTS = ("stylus", " pen", "digitiser", "digitizer", "wacom", "eraser")
-TOUCH_HINTS = ("touchscreen", "touch screen", "goodix", "silead", "atmel",
-               "sis touch", "elan", "raydium", "melfas", "chipone", "hid touch")
+# Name hints only ever add confidence; nothing is rejected on a name.
+TOUCH_HINTS = ("touchscreen", "touch screen", "touchpad", "finger", "goodix",
+               "silead", "atmel", "sis touch", "elan", "raydium", "melfas",
+               "chipone", "hid touch", "synaptics", "wacom")
 
 GRAB_WATCHDOG = 0.75      # seconds of no touches before a stuck grab is dropped
+
+_verbose = False
+
+
+def log(msg):
+    if _verbose:
+        sys.stderr.write("alternix-touchscroll: %s\n" % msg)
+        sys.stderr.flush()
 
 
 def _ioc(direction, size, nr):
@@ -85,6 +105,11 @@ def _absinfo(fd, axis):
     return (lo, hi) if hi > lo else None
 
 
+def _slot_count(fd):
+    rng = _absinfo(fd, ABS_MT_SLOT)
+    return (rng[1] - rng[0] + 1) if rng else 0
+
+
 def _grab(fd, on):
     try:
         fcntl.ioctl(fd, _ioc(1, 4, 0x90), struct.pack("i", 1 if on else 0))
@@ -113,6 +138,7 @@ class Device:
         self.gesture = None
         self.grabbed = False
         self.idle_since = None   # first moment the glass was seen empty
+        self.last_n = -1         # for verbose finger-count reporting
 
     def points(self):
         return list(self.slots.values())
@@ -134,16 +160,14 @@ def probe(path, allow_touchpad):
     """Open path and decide whether it is a usable multitouch device."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
-        return None
-
-    absb = _read_bits(fd, 0x20 + EV_ABS, 8)
-    if not (_bit(absb, ABS_MT_POSITION_X) and _bit(absb, ABS_MT_POSITION_Y)):
-        os.close(fd)
+    except OSError as e:
+        log("%s: cannot open (%s)" % (path, e.strerror))
         return None
 
     name = _name(fd)
-    if any(h in name for h in PEN_HINTS):
+    absb = _read_bits(fd, 0x20 + EV_ABS, 8)
+    if not (_bit(absb, ABS_MT_POSITION_X) and _bit(absb, ABS_MT_POSITION_Y)):
+        log("%s '%s': no ABS_MT axes, skipped" % (path, name))
         os.close(fd)
         return None
 
@@ -151,11 +175,20 @@ def probe(path, allow_touchpad):
     keyb = _read_bits(fd, 0x20 + EV_KEY, 96)
     direct = _bit(props, PROP_DIRECT)
     pointer = _bit(props, PROP_POINTER)
+    tool_pen = _bit(keyb, BTN_TOOL_PEN)
+    stylus = _bit(keyb, BTN_STYLUS) or _bit(keyb, BTN_STYLUS2)
     tool_finger = _bit(keyb, BTN_TOOL_FINGER)
     touch = _bit(keyb, BTN_TOUCH)
-    touchpad = bool(pointer or (tool_finger and not direct))
 
+    # A pen digitiser, judged by the tools it reports rather than its vendor.
+    if tool_pen or stylus:
+        log("%s '%s': reports pen tools, skipped" % (path, name))
+        os.close(fd)
+        return None
+
+    touchpad = bool(pointer or (tool_finger and not direct))
     if touchpad and not allow_touchpad:
+        log("%s '%s': touchpad, excluded by --no-touchpad" % (path, name))
         os.close(fd)
         return None
 
@@ -169,12 +202,17 @@ def probe(path, allow_touchpad):
     if touchpad:
         score += 1          # usable, but rank below a real panel
     if score <= 0:
+        log("%s '%s': no touch indicators, skipped" % (path, name))
         os.close(fd)
         return None
 
-    return Device(path, fd, name, score,
-                  _absinfo(fd, ABS_MT_POSITION_X),
-                  _bit(absb, ABS_MT_SLOT), touchpad)
+    slotted = _bit(absb, ABS_MT_SLOT)
+    slots = _slot_count(fd) if slotted else 0
+    rng = _absinfo(fd, ABS_MT_POSITION_X)
+    log("%s '%s': accepted, score=%d %s protocol-%s slots=%s x-range=%s"
+        % (path, name, score, "touchpad" if touchpad else "touchscreen",
+           "B" if slotted else "A", slots or "n/a", rng or "unknown"))
+    return Device(path, fd, name, score, rng, slotted, touchpad)
 
 
 def scan(allow_touchpad):
@@ -273,6 +311,23 @@ def ensure_qtile_python():
             continue
 
 
+def claim_singleton():
+    """Abstract-namespace socket: dies with the process, so it cannot go stale.
+
+    qtile's startup hook fires on every restart and reload_config, so without
+    this each reload would leave another copy reading the same devices.
+    """
+    key = "\0alternix-touchscroll-%d-%s" % (
+        os.getuid(), os.environ.get("DISPLAY", "none")
+    )
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.bind(key)
+    except OSError:
+        return None
+    return sock
+
+
 # ---------------------------------------------------------------- event logic
 
 def feed(dev, data):
@@ -324,6 +379,10 @@ def handle(dev, pts, qtile, args, state):
     n = len(pts)
     g = dev.gesture
 
+    if _verbose and n != dev.last_n:
+        log("%s: %d finger%s" % (dev.name, n, "" if n == 1 else "s"))
+        dev.last_n = n
+
     # Track how long the glass has been completely clear. A grab is only ever
     # released here, never while fingers remain down: releasing part-way leaves
     # X receiving motion and release events for touches it never saw begin.
@@ -354,12 +413,15 @@ def handle(dev, pts, qtile, args, state):
         dx = abs(cx - g["x0"]) * abs(dev.scale)
         dy = abs(cy - g["y0"]) * abs(dev.scale)
         if dx > args.threshold and dx > dy:
-            if qtile.layout_name() != "scroller":
+            lay = qtile.layout_name()
+            if lay != "scroller":
+                log("gesture dropped: layout is '%s', not scroller" % lay)
                 g["dead"] = True
                 return
             g["armed"] = True
             g["last"] = cx
             state["pending"] = 0.0
+            log("gesture armed on %s" % dev.name)
             if args.grab:
                 dev.grabbed = _grab(dev.fd, True)
         elif dy > args.threshold:
@@ -387,6 +449,7 @@ def rescale(devs, qtile, args):
             if d.touchpad:
                 s *= args.touchpad_factor
         d.scale = -s if args.invert else s
+        log("%s: scale %.4f (screen width %d)" % (d.name, d.scale, sw))
 
 
 def watchdog(devs):
@@ -399,10 +462,13 @@ def watchdog(devs):
             if d.idle_since is None:
                 d.idle_since = now
             elif now - d.idle_since > GRAB_WATCHDOG:
+                log("%s: watchdog released a stranded grab" % d.name)
                 d.ungrab()
 
 
 def main():
+    global _verbose
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--fingers", type=int, default=3)
     ap.add_argument("--threshold", type=float, default=18.0,
@@ -420,9 +486,35 @@ def main():
                          "this wedges X's touch state and is off by default)")
     ap.add_argument("--rescan", type=float, default=3.0,
                     help="seconds between hotplug rescans")
+    ap.add_argument("--verbose", action="store_true",
+                    help="report device detection and live finger counts")
+    ap.add_argument("--list", action="store_true",
+                    help="report detected devices and exit")
+    ap.add_argument("--allow-multiple", action="store_true",
+                    help="do not exit when another instance is already running")
     args = ap.parse_args()
+    _verbose = args.verbose or args.list
+
+    if args.list:
+        devs = scan(args.touchpad)
+        if not devs:
+            sys.stderr.write("alternix-touchscroll: no usable touch devices\n")
+        for d in devs:
+            d.close()
+        return 0 if devs else 1
 
     ensure_qtile_python()
+
+    guard = None
+    if not args.allow_multiple:
+        guard = claim_singleton()
+        if guard is None:
+            sys.stderr.write(
+                "alternix-touchscroll: already running on this display, "
+                "exiting\n"
+            )
+            return 0
+
     qtile = Qtile()
     devs = []
     state = {"pending": 0.0, "last_send": 0.0}
@@ -498,6 +590,8 @@ def main():
     finally:
         for d in devs:
             d.close()
+        if guard is not None:
+            guard.close()
 
     return 0
 
