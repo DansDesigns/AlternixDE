@@ -7,6 +7,13 @@
 # libinput only synthesises GESTURE_SWIPE for touchpads, never touchscreens,
 # so raw ABS_MT events are read and the gesture composed here.
 #
+# Events are NOT taken away from X by default. EVIOCGRAB mid-gesture leaves X
+# holding touch sequences that never receive a TouchEnd, which wedges the
+# pointer for the rest of the session: clicks stop resolving and edge-swipe
+# daemons stop matching. --grab opts back in; it only releases once every
+# finger is off the glass, which avoids partial sequences but cannot repair
+# the ones already open when the grab was taken.
+#
 # Requires membership of the 'input' group.
 
 import argparse
@@ -15,6 +22,7 @@ import fcntl
 import glob
 import os
 import select
+import signal
 import struct
 import sys
 import time
@@ -34,6 +42,8 @@ EV_SIZE = struct.calcsize(EV_FMT)
 PEN_HINTS = ("stylus", " pen", "digitiser", "digitizer", "wacom", "eraser")
 TOUCH_HINTS = ("touchscreen", "touch screen", "goodix", "silead", "atmel",
                "sis touch", "elan", "raydium", "melfas", "chipone", "hid touch")
+
+GRAB_WATCHDOG = 0.75      # seconds of no touches before a stuck grab is dropped
 
 
 def _ioc(direction, size, nr):
@@ -102,19 +112,18 @@ class Device:
         self.frame = []          # protocol A accumulator
         self.gesture = None
         self.grabbed = False
+        self.idle_since = None   # first moment the glass was seen empty
 
     def points(self):
         return list(self.slots.values())
 
-    def reset(self):
-        self.slots.clear()
-        self.frame = []
-        self.gesture = None
-
-    def close(self):
+    def ungrab(self):
         if self.grabbed:
             _grab(self.fd, False)
             self.grabbed = False
+
+    def close(self):
+        self.ungrab()
         try:
             os.close(self.fd)
         except OSError:
@@ -315,16 +324,20 @@ def handle(dev, pts, qtile, args, state):
     n = len(pts)
     g = dev.gesture
 
+    # Track how long the glass has been completely clear. A grab is only ever
+    # released here, never while fingers remain down: releasing part-way leaves
+    # X receiving motion and release events for touches it never saw begin.
+    dev.idle_since = time.monotonic() if n == 0 else None
+
     if n != args.fingers:
         if g and g["armed"]:
             if state["pending"]:
                 qtile.call("scroll_by", int(round(state["pending"])))
                 state["pending"] = 0.0
             qtile.call("scroll_settle")
-        if dev.grabbed:
-            _grab(dev.fd, False)
-            dev.grabbed = False
         dev.gesture = None
+        if n == 0:
+            dev.ungrab()
         return
 
     cx = sum(p[0] for p in pts) / float(n)
@@ -376,6 +389,19 @@ def rescale(devs, qtile, args):
         d.scale = -s if args.invert else s
 
 
+def watchdog(devs):
+    """Drop a grab that outlived its gesture, so input can never stay wedged."""
+    now = time.monotonic()
+    for d in devs:
+        if not d.grabbed:
+            continue
+        if not d.slots and not d.frame:
+            if d.idle_since is None:
+                d.idle_since = now
+            elif now - d.idle_since > GRAB_WATCHDOG:
+                d.ungrab()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fingers", type=int, default=3)
@@ -389,8 +415,9 @@ def main():
     ap.add_argument("--invert", action="store_true")
     ap.add_argument("--no-touchpad", dest="touchpad", action="store_false",
                     default=True)
-    ap.add_argument("--no-grab", dest="grab", action="store_false", default=True,
-                    help="do not grab the device once a swipe engages")
+    ap.add_argument("--grab", action="store_true", default=False,
+                    help="take the device from X during a swipe (see header; "
+                         "this wedges X's touch state and is off by default)")
     ap.add_argument("--rescan", type=float, default=3.0,
                     help="seconds between hotplug rescans")
     args = ap.parse_args()
@@ -401,58 +428,76 @@ def main():
     state = {"pending": 0.0, "last_send": 0.0}
     next_scan = 0.0
 
-    while True:
-        now = time.monotonic()
-        if now >= next_scan:
-            next_scan = now + args.rescan
-            live = set(d.path for d in devs)
-            fresh = scan(args.touchpad)
-            names = set(d.path for d in fresh)
+    def _bail(signum, frame):
+        for d in devs:
+            d.close()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _bail)
+    signal.signal(signal.SIGINT, _bail)
+
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= next_scan:
+                next_scan = now + args.rescan
+                live = set(d.path for d in devs)
+                fresh = scan(args.touchpad)
+                names = set(d.path for d in fresh)
+                for d in list(devs):
+                    if d.path not in names:
+                        d.close()
+                        devs.remove(d)
+                added = False
+                for d in fresh:
+                    if d.path in live:
+                        d.close()
+                    else:
+                        devs.append(d)
+                        added = True
+                if added:
+                    rescale(devs, qtile, args)
+
+            if not devs:
+                time.sleep(args.rescan)
+                continue
+
+            try:
+                ready, _, _ = select.select(
+                    [d.fd for d in devs], [], [], min(args.rescan, 0.5)
+                )
+            except OSError as e:
+                if e.errno == errno.EINTR:
+                    continue
+                next_scan = 0.0
+                continue
+
+            if not ready:
+                watchdog(devs)
+                continue
+
             for d in list(devs):
-                if d.path not in names:
+                if d.fd not in ready:
+                    continue
+                try:
+                    data = os.read(d.fd, EV_SIZE * 64)
+                except OSError as e:
+                    if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        continue
                     d.close()
                     devs.remove(d)
-            added = False
-            for d in fresh:
-                if d.path in live:
-                    d.close()
-                else:
-                    devs.append(d)
-                    added = True
-            if added:
-                rescale(devs, qtile, args)
-
-        if not devs:
-            time.sleep(args.rescan)
-            continue
-
-        try:
-            ready, _, _ = select.select([d.fd for d in devs], [], [], args.rescan)
-        except OSError as e:
-            if e.errno == errno.EINTR:
-                continue
-            next_scan = 0.0
-            continue
-
-        for d in list(devs):
-            if d.fd not in ready:
-                continue
-            try:
-                data = os.read(d.fd, EV_SIZE * 64)
-            except OSError as e:
-                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    next_scan = 0.0
                     continue
-                d.close()
-                devs.remove(d)
-                next_scan = 0.0
-                continue
-            if not data:
-                d.close()
-                devs.remove(d)
-                next_scan = 0.0
-                continue
-            for pts in feed(d, data):
-                handle(d, pts, qtile, args, state)
+                if not data:
+                    d.close()
+                    devs.remove(d)
+                    next_scan = 0.0
+                    continue
+                for pts in feed(d, data):
+                    handle(d, pts, qtile, args, state)
+    finally:
+        for d in devs:
+            d.close()
 
     return 0
 
