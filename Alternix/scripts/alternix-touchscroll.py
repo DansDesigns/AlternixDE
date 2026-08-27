@@ -34,6 +34,7 @@ import select
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -259,6 +260,12 @@ class Qtile:
         r = self._run(lambda c: c.layout.info().get("name"))
         return r or ""
 
+    def window_kill(self):
+        return self._run(lambda c: c.window.kill()) is not None
+
+    def spawn(self, cmd):
+        return self._run(lambda c: c.spawn(cmd)) is not None
+
     def screen_width(self):
         r = self._run(lambda c: int(c.screen.info()["width"]))
         return r or 0
@@ -375,6 +382,29 @@ def feed(dev, data):
     return frames
 
 
+def run_action(spec, qtile):
+    """Fire a vertical-swipe action.
+
+    'none' disables, 'kill' closes the focused window over qtile's IPC,
+    'spawn:CMD' launches through qtile, anything else runs under /bin/sh.
+    """
+    if not spec or spec == "none":
+        return
+    log("action: %s" % spec)
+    try:
+        if spec == "kill":
+            qtile.window_kill()
+        elif spec.startswith("spawn:"):
+            qtile.spawn(spec[6:])
+        else:
+            cmd = spec[4:] if spec.startswith("cmd:") else spec
+            subprocess.Popen(["/bin/sh", "-c", cmd],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log("action failed: %s" % e)
+
+
 def handle(dev, pts, qtile, args, state):
     n = len(pts)
     g = dev.gesture
@@ -410,9 +440,16 @@ def handle(dev, pts, qtile, args, state):
         return
 
     if not g["armed"]:
-        dx = abs(cx - g["x0"]) * abs(dev.scale)
-        dy = abs(cy - g["y0"]) * abs(dev.scale)
-        if dx > args.threshold and dx > dy:
+        raw_dx = cx - g["x0"]
+        raw_dy = cy - g["y0"]
+        dx = abs(raw_dx) * abs(dev.scale)
+        dy = abs(raw_dy) * abs(dev.scale)
+        ratio = max(1.0, args.axis_ratio)
+
+        # A plain dx > dy test lets a mostly-vertical swipe that drifts
+        # sideways arm a scroll, which then fights whatever else is watching
+        # these three fingers. Require a clear majority on one axis.
+        if dx > args.threshold and dx > dy * ratio:
             lay = qtile.layout_name()
             if lay != "scroller":
                 log("gesture dropped: layout is '%s', not scroller" % lay)
@@ -424,8 +461,11 @@ def handle(dev, pts, qtile, args, state):
             log("gesture armed on %s" % dev.name)
             if args.grab:
                 dev.grabbed = _grab(dev.fd, True)
-        elif dy > args.threshold:
+        elif dy > args.threshold and dy > dx * ratio:
             g["dead"] = True
+            up = raw_dy < 0
+            log("vertical swipe %s on %s" % ("up" if up else "down", dev.name))
+            run_action(args.swipe_up if up else args.swipe_down, qtile)
         return
 
     state["pending"] += -(cx - g["last"]) * dev.scale
@@ -484,6 +524,15 @@ def main():
     ap.add_argument("--grab", action="store_true", default=False,
                     help="take the device from X during a swipe (see header; "
                          "this wedges X's touch state and is off by default)")
+    ap.add_argument("--axis-ratio", type=float, default=1.3,
+                    help="how far one axis must lead the other before a "
+                         "gesture is claimed; higher leaves more for other "
+                         "gesture daemons")
+    ap.add_argument("--swipe-up", default="none",
+                    help="action for an upward swipe: 'none', 'kill', "
+                         "'spawn:CMD', or a shell command")
+    ap.add_argument("--swipe-down", default="none",
+                    help="action for a downward swipe, same forms as --swipe-up")
     ap.add_argument("--rescan", type=float, default=3.0,
                     help="seconds between hotplug rescans")
     ap.add_argument("--verbose", action="store_true",
