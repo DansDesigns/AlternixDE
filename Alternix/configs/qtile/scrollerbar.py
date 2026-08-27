@@ -115,8 +115,9 @@ class ScrollerBar:
         self.window.process_pointer_enter = lambda *a: None
         self.window.process_pointer_leave = lambda *a: None
         self.window.process_key_press = lambda *a: None
-        self.window.unhide()
-        self._visible = True
+        # create_internal leaves the window unmapped; _sync decides whether the
+        # current layout wants it, so it never flashes on a non-Scroller group.
+        self._visible = False
         self._sync()
 
     def _rebuild(self, *args):
@@ -134,14 +135,35 @@ class ScrollerBar:
         lay = getattr(group, "layout", None) if group else None
         return lay if isinstance(lay, Scroller) else None
 
+    def _reposition(self):
+        """Follow the usable area if a bar or the screen geometry changed."""
+        geo = self._geometry()
+        if geo is None:
+            return
+        x, y, w, h = geo
+        if (x, y, w) == (self.x, self.y, self.width):
+            return
+        self.x, self.y, self.width = x, y, w
+        try:
+            self.window.place(x, y, w, h, 0, None)
+            self.drawer.width = w
+            self.drawer.height = h
+        except Exception:
+            logger.exception("ScrollerBar: could not reposition")
+
     def _sync(self, *args):
         if self.window is None:
             return
         want = self._layout() is not None
+        if want:
+            self._reposition()
         if want != self._visible:
             self._visible = want
             try:
-                self.window.unhide() if want else self.window.hide()
+                if want:
+                    self.window.unhide()
+                else:
+                    self.window.hide()
             except Exception:
                 pass
         if want:

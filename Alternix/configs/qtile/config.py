@@ -212,11 +212,6 @@ for i in groups:
 
 
 layouts = [
-    # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
-    layout.Max(border_width=0, margin=6),
-    #layout.RatioTile(margin=6),
-    layout.MonadWide(border_width=0, margin=6),
-    layout.MonadTall(border_width=0, margin=6),
     Scroller(
         border_width=3,
         border_focus="#8aadf4c0",
@@ -228,6 +223,11 @@ layouts = [
         centre_focused=False,     # True = niri-style always-centred column
         unmap_offscreen=True,     # keeps picom off the Atom GPU's back
     )
+    # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
+    layout.Max(border_width=0, margin=6),
+    #layout.RatioTile(margin=6),
+    layout.MonadWide(border_width=0, margin=6),
+    layout.MonadTall(border_width=0, margin=6),
 ]
 
 widget_defaults = dict(
