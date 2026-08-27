@@ -7,6 +7,11 @@
 # The bar owns the reservation: it writes its own height into every Scroller's
 # bottom_reserve at startup, so the gap can never disagree with the strip.
 #
+# Raising is always deferred by one event-loop turn. Group.use_layout fires
+# layout_change *before* it calls layout_all, and every window unhidden by
+# that pass is mapped on top of the stack, so a raise done inline is undone
+# microseconds later.
+#
 # Works from plain pointer events, so it is driven equally well by a mouse or
 # by a touchscreen running in pointer-emulation mode.
 
@@ -59,6 +64,7 @@ class ScrollerBar:
         self._visible = False
         self._grab = None
         self._last_apply = 0.0
+        self._raise_pending = False
 
     # ------------------------------------------------------------- lifecycle
 
@@ -74,7 +80,7 @@ class ScrollerBar:
         hook.subscribe.client_managed(lambda *args: self._sync())
         hook.subscribe.client_killed(lambda *args: self._sync())
         hook.subscribe.float_change(self._sync)
-        hook.subscribe.focus_change(self._raise_if_visible)
+        hook.subscribe.focus_change(self._raise_soon)
 
     def finalize(self):
         Scroller.remove_observer(self._on_layout)
@@ -183,9 +189,21 @@ class ScrollerBar:
         except Exception:
             logger.exception("ScrollerBar: could not raise window")
 
-    def _raise_if_visible(self, *args):
+    def _raise_now(self):
+        self._raise_pending = False
         if self._visible:
             self._raise()
+
+    def _raise_soon(self, *args):
+        """Defer past the placement pass that follows layout_change/focus."""
+        if self.qtile is None or self._raise_pending:
+            return
+        self._raise_pending = True
+        try:
+            self.qtile.call_later(0, self._raise_now)
+        except Exception:
+            self._raise_pending = False
+            self._raise_now()
 
     def _reposition(self):
         """Follow the usable area if a bar or the screen geometry changed."""
@@ -215,13 +233,13 @@ class ScrollerBar:
             try:
                 if want:
                     self.window.unhide()
-                    self._raise()
                 else:
                     self.window.hide()
             except Exception:
                 logger.exception("ScrollerBar: could not toggle window")
         if want:
             self.draw()
+            self._raise_soon()
 
     def _on_layout(self, lay):
         if self.window is None or lay is not self._layout():

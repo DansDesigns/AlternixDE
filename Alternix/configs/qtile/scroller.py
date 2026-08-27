@@ -2,6 +2,13 @@
 #
 # Windows live on an infinite horizontal strip. The screen is a viewport onto
 # that strip; anything outside it is simply placed off-screen.
+#
+# Bringing a column into view is eased rather than jumped: every reveal, from
+# a swipe settling to a new window opening, runs through _start_anim. Set
+# snap_duration to 0 for the old instant behaviour, or snap="free" to stop the
+# viewport being pulled toward the focused column at all.
+
+import time
 
 from libqtile.command.base import expose_command
 from libqtile.layout.base import Layout
@@ -24,6 +31,17 @@ class Scroller(Layout):
          "Ignore column_widths when the group holds one window."),
         ("centre_focused", False,
          "Keep the focused column centred instead of just visible."),
+        ("snap", "column",
+         "'column' eases the viewport onto the nearest column after a swipe; "
+         "'free' leaves the viewport exactly where it was let go."),
+        ("snap_duration", 0.18,
+         "Seconds an eased move takes. 0 restores instant jumps."),
+        ("snap_overshoot", 0.12,
+         "Fraction of the travelled distance the ease overshoots before "
+         "settling back. 0 is a plain ease-out with no bounce."),
+        ("snap_overshoot_max", 40,
+         "Ceiling in pixels on that overshoot, so long jumps do not fling."),
+        ("snap_fps", 30, "Frames per second while easing."),
         ("scroll_step", 160, "Pixels moved by scroll_left / scroll_right."),
         ("unmap_offscreen", True,
          "Unmap windows fully outside the viewport (saves CPU on Atom)."),
@@ -48,9 +66,15 @@ class Scroller(Layout):
         self._rect = None
         self._geo = ([], [], 0)
         self._reveal = True
+        self._no_reveal = False
         self._scrolling = False
         self._drag_base = 0
         self._drag_seq = 0
+        self._anim_seq = 0
+        self._anim_from = 0
+        self._anim_to = 0
+        self._anim_t0 = 0.0
+        self._anim_c1 = 0.0
 
     # ------------------------------------------------------------- observers
 
@@ -82,9 +106,15 @@ class Scroller(Layout):
         c._rect = None
         c._geo = ([], [], 0)
         c._reveal = True
+        c._no_reveal = False
         c._scrolling = False
         c._drag_base = 0
         c._drag_seq = 0
+        c._anim_seq = 0
+        c._anim_from = 0
+        c._anim_to = 0
+        c._anim_t0 = 0.0
+        c._anim_c1 = 0.0
         return c
 
     def add_client(self, client):
@@ -160,17 +190,19 @@ class Scroller(Layout):
         total = x - self.gap if self.clients else 0
         return xs, ws, total
 
-    def _do_reveal(self, xs, ws, sr):
-        if not self.clients:
-            return
+    def _reveal_offset(self, xs, ws, sr, i):
+        """Where the viewport would sit to show column i, without moving it."""
+        if not xs:
+            return self.offset
+        i = max(0, min(i, len(xs) - 1))
         view = self._viewport(sr)
-        i = max(0, min(self.current, len(xs) - 1))
         if self.centre_focused:
-            self.offset = xs[i] - (view - ws[i]) // 2
-        elif xs[i] < self.offset:
-            self.offset = xs[i]
-        elif xs[i] + ws[i] > self.offset + view:
-            self.offset = xs[i] + ws[i] - view
+            return xs[i] - (view - ws[i]) // 2
+        if xs[i] < self.offset:
+            return xs[i]
+        if xs[i] + ws[i] > self.offset + view:
+            return xs[i] + ws[i] - view
+        return self.offset
 
     def _clamp(self, total, sr):
         view = self._viewport(sr)
@@ -179,12 +211,104 @@ class Scroller(Layout):
         else:
             self.offset = max(0, min(self.offset, total - view))
 
+    # ------------------------------------------------------------- animation
+
+    @staticmethod
+    def _back_peak(c1):
+        """Peak of the back-ease for a given constant, as a fraction over 1."""
+        u = -2.0 * c1 / (3.0 * (c1 + 1.0))
+        return (c1 + 1.0) * u * u * u + c1 * u * u
+
+    def _solve_back(self, k):
+        """Constant whose back-ease peaks k above the target.
+
+        Peak overshoot is strongly non-linear in the constant, so scaling the
+        textbook 1.70158 gives almost no bounce. Bisection gets the parameter
+        to mean the fraction it claims.
+        """
+        lo, hi = 0.0, 12.0
+        for _ in range(40):
+            mid = (lo + hi) / 2.0
+            if self._back_peak(mid) < k:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2.0
+
+    def _ease(self, t):
+        """Ease-out, optionally overshooting the target before settling."""
+        c1 = self._anim_c1
+        if c1 <= 0.0:
+            u = 1.0 - t
+            return 1.0 - u * u * u
+        c3 = c1 + 1.0
+        u = t - 1.0
+        return 1.0 + c3 * u * u * u + c1 * u * u
+
+    def _cancel_anim(self):
+        self._anim_seq += 1
+
+    def _start_anim(self, target):
+        """Begin easing toward target. False if it must be done instantly."""
+        if self.snap_duration <= 0 or self._group is None:
+            return False
+        qtile = getattr(self._group, "qtile", None)
+        if qtile is None:
+            return False
+        self._anim_seq += 1
+        seq = self._anim_seq
+        self._anim_from = self.offset
+        self._anim_to = int(target)
+        self._anim_t0 = time.monotonic()
+        self._scrolling = True
+
+        # Overshoot is a fraction of the distance, capped in pixels so a jump
+        # across the whole strip does not fling far past its destination.
+        span = abs(self._anim_to - self._anim_from)
+        k = float(self.snap_overshoot)
+        if k > 0 and span > 0:
+            k = min(k, float(self.snap_overshoot_max) / span)
+        self._anim_c1 = self._solve_back(k) if k > 0.0005 else 0.0
+        try:
+            qtile.call_later(1.0 / max(1, self.snap_fps), self._anim_step, seq)
+        except Exception:
+            return False
+        return True
+
+    def _anim_step(self, seq):
+        if seq != self._anim_seq or self._group is None:
+            return
+        elapsed = time.monotonic() - self._anim_t0
+        t = elapsed / max(0.001, self.snap_duration)
+        if t >= 1.0:
+            self.offset = self._anim_to
+            self._scrolling = False
+            self._anim_seq += 1
+            self._relayout()
+            return
+        span = self._anim_to - self._anim_from
+        self.offset = int(round(self._anim_from + span * self._ease(t)))
+        self._relayout()
+        qtile = getattr(self._group, "qtile", None)
+        if qtile is not None:
+            try:
+                qtile.call_later(
+                    1.0 / max(1, self.snap_fps), self._anim_step, seq
+                )
+            except Exception:
+                pass
+
+    # ----------------------------------------------------------------- passes
+
     def layout(self, windows, screen_rect):
         self._rect = screen_rect
         xs, ws, total = self._compute(screen_rect)
         if self._reveal:
-            self._do_reveal(xs, ws, screen_rect)
             self._reveal = False
+            if not self._no_reveal:
+                target = self._reveal_offset(xs, ws, screen_rect, self.current)
+                if target != self.offset and not self._start_anim(target):
+                    self.offset = target
         self._clamp(total, screen_rect)
         self._geo = (xs, ws, total)
         Layout.layout(self, windows, screen_rect)
@@ -272,6 +396,7 @@ class Scroller(Layout):
     @expose_command()
     def set_offset(self, value, dragging=False):
         """Move the viewport to an absolute strip position."""
+        self._cancel_anim()
         self._scrolling = bool(dragging)
         self.offset = int(value)
         self._relayout()
@@ -293,6 +418,7 @@ class Scroller(Layout):
     @expose_command()
     def drag_start(self):
         """Bind as a Drag start=. Anchors the strip and returns an origin."""
+        self._cancel_anim()
         self._drag_base = self.offset
         self._scrolling = True
         self._arm_drag_timer()
@@ -301,6 +427,7 @@ class Scroller(Layout):
     @expose_command()
     def drag_scroll(self, dx=0, dy=0):
         """Bind as a Drag command. dx is pointer travel since drag_start."""
+        self._cancel_anim()
         self._scrolling = True
         self.offset = self._drag_base - int(dx)
         self._arm_drag_timer()
@@ -309,13 +436,15 @@ class Scroller(Layout):
     @expose_command()
     def scroll_by(self, dx):
         """Scroll the viewport by dx pixels. Used by the swipe daemon."""
+        self._cancel_anim()
         self._scrolling = True
         self.offset += int(dx)
         self._relayout()
 
     @expose_command()
     def scroll_settle(self):
-        """End a swipe or drag: snap to the nearest column and focus it."""
+        """End a swipe or drag: ease onto the nearest column and focus it."""
+        self._cancel_anim()
         self._scrolling = False
         self._drag_seq += 1
         if not self.clients or self._rect is None:
@@ -332,8 +461,23 @@ class Scroller(Layout):
             if best_d is None or d < best_d:
                 best, best_d = i, d
         self.current = best
-        self._reveal = True
         win = self.clients[best]
+
+        if self.snap == "free":
+            # Focus follows the eye, but the viewport stays put.
+            self._no_reveal = True
+            try:
+                if self._group is not None and \
+                        self._group.current_window is not win:
+                    self._group.focus(win, False)
+                else:
+                    self._reveal = False
+                    self._relayout()
+            finally:
+                self._no_reveal = False
+            return
+
+        self._reveal = True
         if self._group is not None and self._group.current_window is not win:
             self._group.focus(win, False)
         else:
@@ -341,11 +485,13 @@ class Scroller(Layout):
 
     @expose_command()
     def scroll_left(self, step=None):
+        self._cancel_anim()
         self.offset -= int(step or self.scroll_step)
         self._relayout()
 
     @expose_command()
     def scroll_right(self, step=None):
+        self._cancel_anim()
         self.offset += int(step or self.scroll_step)
         self._relayout()
 
@@ -427,8 +573,17 @@ class Scroller(Layout):
             xs, ws, _ = self._geo
             if xs:
                 i = max(0, min(self.current, len(xs) - 1))
-                self.offset = xs[i] - (self._viewport(self._rect) - ws[i]) // 2
+                target = xs[i] - (self._viewport(self._rect) - ws[i]) // 2
+                self._cancel_anim()
+                if not self._start_anim(target):
+                    self.offset = target
                 self._relayout()
+
+    @expose_command()
+    def set_snap(self, mode):
+        """Switch between 'column' and 'free' at runtime."""
+        if mode in ("column", "free"):
+            self.snap = mode
 
     @expose_command()
     def info(self):
@@ -436,4 +591,5 @@ class Scroller(Layout):
         d["clients"] = [c.name for c in self.clients]
         d["current"] = self.current
         d["offset"] = self.offset
+        d["snap"] = self.snap
         return d
