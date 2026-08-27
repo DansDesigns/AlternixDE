@@ -14,6 +14,8 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <signal.h>
 
 static const int MAX_EVENTS = 32;
 
@@ -239,8 +241,37 @@ void run_osm_power_as_user() {
     _exit(1);
 }
 
+// Reap exited osm-power children. Each power-button press forks, and without
+// this every press leaves a zombie in the process table for the lifetime of
+// the daemon. A real handler is used rather than signal(SIGCHLD, SIG_IGN)
+// because SIG_IGN for SIGCHLD *is* inherited across execve() — it would be
+// carried into osm-power and break its own waitpid()/QProcess handling —
+// whereas an installed handler is reset to SIG_DFL by exec automatically.
+// waitpid() is async-signal-safe; errno is saved and restored so that an
+// interrupted syscall in the main loop still sees its own error value.
+static void reapChildren(int) {
+    int savedErrno = errno;
+    while (waitpid(-1, nullptr, WNOHANG) > 0) {
+        // keep reaping until no more exited children remain
+    }
+    errno = savedErrno;
+}
+
 int main() {
     std::vector<MonitoredDevice> devices;
+
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = reapChildren;
+        sigemptyset(&sa.sa_mask);
+        // SA_RESTART so a press arriving mid-read() doesn't surface as EINTR;
+        // SA_NOCLDSTOP so we're only woken for actual child exits.
+        sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+        if (sigaction(SIGCHLD, &sa, nullptr) < 0) {
+            perror("sigaction SIGCHLD");
+        }
+    }
 
     // Scan event0..event39
     for (int i = 0; i < 40; i++) {
@@ -345,16 +376,63 @@ int main() {
 
     struct epoll_event events[MAX_EVENTS];
 
+    // Unregister and close a device node that has gone away. The entry is
+    // marked dead (fd = -1) rather than erased so that any MonitoredDevice*
+    // taken elsewhere in the loop stays valid.
+    auto dropDevice = [&](int deadFd, const char *why) {
+        for (auto &d : devices) {
+            if (d.fd == deadFd) {
+                std::cerr << "osm-powerd: dropping " << d.path
+                          << " (" << d.name << "): " << why << "\n";
+                d.fd = -1;
+            }
+        }
+        epoll_ctl(epfd, EPOLL_CTL_DEL, deadFd, nullptr);
+        close(deadFd);
+    };
+
+    auto liveDeviceCount = [&]() {
+        int live = 0;
+        for (const auto &d : devices)
+            if (d.fd >= 0) live++;
+        return live;
+    };
+
     while (true) {
         int n = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (n < 0)
-            continue;
+        if (n < 0) {
+            // EINTR is normal (signal delivery) and must be retried, but any
+            // other error is persistent — the original unconditional
+            // `continue` here turned e.g. EBADF into an unbreakable tight
+            // loop at 100% CPU.
+            if (errno == EINTR)
+                continue;
+            perror("epoll_wait");
+            break;
+        }
 
         for (int i = 0; i < n; i++) {
             int fd = events[i].data.fd;
-            struct input_event ev;
 
-            while (read(fd, &ev, sizeof(ev)) > 0) {
+            // DEAD-DEVICE HANDLING — DO NOT REMOVE.
+            // epoll reports EPOLLERR/EPOLLHUP regardless of the event mask
+            // requested at registration time. When an input device
+            // disappears (detachable keyboard undocked, USB/HID device lost
+            // over suspend/resume, or udev re-creating a node during boot
+            // after we've already opened the original) its fd is left
+            // permanently "ready". read() then fails instantly with ENODEV,
+            // so without this check epoll_wait returns immediately on every
+            // iteration for the rest of the process's life and pins a core
+            // at 100% CPU with no events ever being delivered.
+            if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+                dropDevice(fd, "device removed (EPOLLERR/EPOLLHUP)");
+                continue;
+            }
+
+            struct input_event ev;
+            ssize_t r;
+
+            while ((r = read(fd, &ev, sizeof(ev))) == (ssize_t)sizeof(ev)) {
                 if (ev.type == EV_KEY &&
                     ev.code == KEY_POWER &&
                     ev.value != 0) {  // press or repeat
@@ -388,6 +466,24 @@ int main() {
                     }
                 }
             }
+
+            // EAGAIN simply means the non-blocking queue is drained, which is
+            // the normal way out of the loop above. Anything else (ENODEV in
+            // particular) means the node is gone and must be dropped, for the
+            // same busy-loop reason as the EPOLLHUP case. A zero-length read
+            // is likewise treated as a dead node rather than being ignored,
+            // since it would otherwise leave the fd readable forever.
+            if (r == 0) {
+                dropDevice(fd, "unexpected EOF on device node");
+            } else if (r < 0 && errno != EAGAIN && errno != EINTR) {
+                dropDevice(fd, strerror(errno));
+            }
+        }
+
+        if (liveDeviceCount() == 0) {
+            std::cerr << "osm-powerd: all monitored input devices have gone "
+                         "away, exiting\n";
+            return 1;
         }
     }
 
