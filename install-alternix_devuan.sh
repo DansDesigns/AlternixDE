@@ -361,7 +361,7 @@ sudo udevadm control --reload-rules 2>/dev/null || true
 
 
 # ────────────────────────────────────────────────
-# 2a. Qtile Scrolling Layout & other scripts
+# 2a. Scripts
 # ────────────────────────────────────────────────
 echo " "
 echo "[2a/10] Installing Scrolling Layout for Qtile"
@@ -373,7 +373,13 @@ chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 
 chmod +x alternix-touchscroll.py
-cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
+sudo cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
+
+chnmod +x alternix-waydroid-session
+sudo cp alternix-waydroid-session /usr/local/bin
+
+chnmod +x alternix-exe
+sudo cp alternix-exe /usr/local/bin
 
 
 # ────────────────────────────────────────────────

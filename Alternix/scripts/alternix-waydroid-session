@@ -1,0 +1,144 @@
+#!/bin/sh
+# alternix-waydroid-session — start, thaw or freeze the Waydroid session.
+#
+# Shell equivalent of EmulationPage::startWaydroid() in emulation.cpp, for use
+# from Qtile's setgroup hook. Idempotent: safe to call on every group switch
+# and on Qtile restart.
+#
+#   alternix-waydroid-session            start or thaw, then show the UI
+#   alternix-waydroid-session --freeze   suspend the container (RAM stays)
+#   alternix-waydroid-session --stop     stop the session and kill Weston
+
+set -u
+
+LOG="$HOME/.cache/Alternix/waydroid-session.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+# elogind normally provides /run/user/<uid>; fall back the same way emulation.cpp does.
+RT="${XDG_RUNTIME_DIR:-}"
+if [ -z "$RT" ] || [ ! -d "$RT" ]; then
+    RT="/tmp/alternix-runtime-$(id -u)"
+fi
+mkdir -p "$RT" 2>/dev/null || true
+chmod 700 "$RT" 2>/dev/null || true
+export XDG_RUNTIME_DIR="$RT"
+
+LXCPATH="/var/lib/waydroid/lxc"
+
+_sudox() {
+    if sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    else
+        SUDO_ASKPASS=$(command -v osm-sudo) sudo -A "$@"
+    fi
+}
+
+_container_running() { pgrep -f '[w]aydroid container' >/dev/null 2>&1; }
+_session_running()   { pgrep -f '[w]aydroid session'   >/dev/null 2>&1; }
+
+_frozen() {
+    _sudox lxc-info -P "$LXCPATH" -n waydroid -s 2>/dev/null \
+        | grep -qi 'frozen'
+}
+
+case "${1:-}" in
+    --freeze)
+        _session_running || exit 0
+        _sudox lxc-freeze -P "$LXCPATH" -n waydroid >>"$LOG" 2>&1 || true
+        exit 0
+        ;;
+    --stop)
+        waydroid session stop >>"$LOG" 2>&1 || true
+        pkill -f 'weston.*--socket=waydroid-0' >/dev/null 2>&1 || true
+        exit 0
+        ;;
+esac
+
+# ---- start / thaw ----
+
+command -v waydroid >/dev/null 2>&1 || {
+    echo "waydroid is not installed" >>"$LOG"; exit 0; }
+
+[ -f /var/lib/waydroid/waydroid.cfg ] || {
+    echo "no Android system image (/var/lib/waydroid/waydroid.cfg missing)" >>"$LOG"; exit 0; }
+
+# Already up? Thaw if frozen and re-show the UI, then stop.
+if _session_running; then
+    if _frozen; then
+        _sudox lxc-unfreeze -P "$LXCPATH" -n waydroid >>"$LOG" 2>&1 || true
+    fi
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-waydroid-0}" \
+        waydroid show-full-ui >>"$LOG" 2>&1 &
+    exit 0
+fi
+
+# Binder must be present or the container will not come up.
+if [ -e /dev/binderfs/binder-control ]; then
+    :
+elif [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then
+    :
+else
+    echo "no binder interface — run 'Set up binder' in Settings > Emulation" >>"$LOG"
+    exit 0
+fi
+
+if ! _container_running; then
+    _sudox waydroid container start >>"$LOG" 2>&1 &
+    i=0
+    while [ $i -lt 20 ]; do
+        _container_running && break
+        sleep 1
+        i=$((i + 1))
+    done
+    if ! _container_running; then
+        echo "container did not start" >>"$LOG"
+        exit 0
+    fi
+fi
+
+# Waydroid only renders to Wayland. Under X11, nest Weston on a private socket.
+WL="${WAYLAND_DISPLAY:-}"
+if [ -z "$WL" ]; then
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "no Wayland compositor and no X display to nest one in" >>"$LOG"
+        exit 0
+    fi
+
+    command -v weston >/dev/null 2>&1 || {
+        echo "weston is not installed" >>"$LOG"; exit 0; }
+
+    if [ ! -e "$RT/waydroid-0" ]; then
+        WLOG="$HOME/.cache/Alternix/weston.log"
+        # --backend=x11 on Weston 13+, the older module name as a fallback.
+        {
+            weston --socket=waydroid-0 --backend=x11 >"$WLOG" 2>&1 ||
+            weston --socket=waydroid-0 --backend=x11-backend.so >>"$WLOG" 2>&1
+        } &
+
+        i=0
+        while [ $i -lt 15 ] && [ ! -e "$RT/waydroid-0" ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+
+        if [ ! -e "$RT/waydroid-0" ]; then
+            echo "weston socket never appeared — see $WLOG" >>"$LOG"
+            exit 0
+        fi
+    fi
+
+    WL="waydroid-0"
+fi
+export WAYLAND_DISPLAY="$WL"
+
+waydroid session start >>"$LOG" 2>&1 &
+
+i=0
+while [ $i -lt 30 ]; do
+    _session_running && break
+    sleep 1
+    i=$((i + 1))
+done
+
+waydroid show-full-ui >>"$LOG" 2>&1 &
+exit 0

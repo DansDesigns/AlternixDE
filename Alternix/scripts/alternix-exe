@@ -1,0 +1,93 @@
+#!/bin/sh
+# alternix-exe — run a Windows program with the runner chosen in
+# Settings > Emulation (Emulation/Runner = wine | proton).
+#
+#   alternix-exe                    open Wine's file manager (browse C:)
+#   alternix-exe /path/to/app.exe   run that program
+#
+# Reads ~/.config/Alternix/osm-settings.conf, the same QSettings INI that
+# emulation.cpp writes.
+
+set -u
+
+CONF="$HOME/.config/Alternix/osm-settings.conf"
+LOG="$HOME/.cache/Alternix/alternix-exe.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+
+PROTON_ROOT="$HOME/.local/share/Alternix/proton"
+PROTON_PREFIX="$HOME/.local/share/Alternix/proton-prefix"
+
+_err() {
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "Windows apps" "$1" 2>/dev/null || true
+    fi
+    echo "$1" >>"$LOG"
+    exit 1
+}
+
+# Read a key from the [Emulation] section of the INI.
+_cfg() {
+    [ -f "$CONF" ] || return 0
+    sed -n '/^\[Emulation\]/,/^\[/p' "$CONF" 2>/dev/null \
+        | sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" \
+        | head -n1 \
+        | tr -d '\r'
+}
+
+# Mirror findProtonBuilds()/selectedProtonDir(): a build is any directory
+# containing a `proton` script, preferring the one named in the config.
+_proton_dir() {
+    want=$(_cfg ProtonBuild)
+    first=""
+    for root in "$PROTON_ROOT" \
+                "$HOME/.steam/root/compatibilitytools.d" \
+                "$HOME/.steam/steam/compatibilitytools.d" \
+                "$HOME/.local/share/Steam/compatibilitytools.d"; do
+        [ -d "$root" ] || continue
+        for d in "$root"/*; do
+            [ -f "$d/proton" ] || continue
+            [ -n "$first" ] || first="$d"
+            if [ -n "$want" ] && [ "$(basename "$d")" = "$want" ]; then
+                printf '%s' "$d"
+                return 0
+            fi
+        done
+    done
+    printf '%s' "$first"
+}
+
+RUNNER=$(_cfg Runner)
+[ -n "$RUNNER" ] || RUNNER="wine"
+
+TARGET="${1:-}"
+if [ -n "$TARGET" ] && [ ! -f "$TARGET" ]; then
+    _err "Not found: $TARGET"
+fi
+
+if [ "$RUNNER" = "proton" ]; then
+    PDIR=$(_proton_dir)
+    if [ -z "$PDIR" ]; then
+        _err "No Proton build is installed. Falling back requires Wine — set the runner to Wine in Settings > Emulation."
+    fi
+    command -v python3 >/dev/null 2>&1 || _err "Proton needs python3, which is not installed."
+
+    export STEAM_COMPAT_DATA_PATH="$PROTON_PREFIX"
+    export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam/steam"
+    mkdir -p "$STEAM_COMPAT_DATA_PATH" "$STEAM_COMPAT_CLIENT_INSTALL_PATH" 2>/dev/null || true
+
+    if [ -n "$TARGET" ]; then
+        exec "$PDIR/proton" run "$TARGET" >>"$LOG" 2>&1
+    fi
+    exec "$PDIR/proton" run explorer.exe >>"$LOG" 2>&1
+fi
+
+command -v wine >/dev/null 2>&1 || \
+    _err "Wine is not installed. Use Settings > Emulation > Install / setup."
+
+if [ -n "$TARGET" ]; then
+    cd "$(dirname "$TARGET")" 2>/dev/null || true
+    exec wine "$(basename "$TARGET")" >>"$LOG" 2>&1
+fi
+
+# No argument: Wine's own file manager, so there is something to click.
+exec wine explorer >>"$LOG" 2>&1

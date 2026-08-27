@@ -198,6 +198,12 @@ chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-touchscroll.py
 cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
 
+chnmod +x alternix-waydroid-session
+sudo cp alternix-waydroid-session /usr/local/bin
+
+chnmod +x alternix-exe
+sudo cp alternix-exe /usr/local/bin
+
 
 
 echo " "

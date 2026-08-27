@@ -39,6 +39,7 @@ import time
 # import configparser
 from scroller import Scroller
 import scrollerbar
+import re
 
 
 mod = "mod4"
@@ -87,6 +88,30 @@ def _scrollbar():
         qtile.call_later(1, update_time)  # refresh every second
 
     update_time()
+
+#############################
+## Lazy group activation   ##
+#############################
+
+_grp_started = {"2": False, "3": False}
+_prev_group = {"name": None}
+
+@hook.subscribe.setgroup
+def _activate_group():
+    name = qtile.current_group.name
+    prev = _prev_group["name"]
+    _prev_group["name"] = name
+
+    if prev == "2" and name != "2" and _grp_started["2"]:
+        subprocess.Popen(["/usr/local/bin/alternix-waydroid-session", "--freeze"])
+
+    if name in _grp_started and not _grp_started[name]:
+        _grp_started[name] = True
+        if name == "2":
+            subprocess.Popen(["/usr/local/bin/alternix-waydroid-session"])
+        else:
+            subprocess.Popen(["/usr/local/bin/alternix-exe"])
+
 
 ###################
 ## System Graphs ##
@@ -189,7 +214,14 @@ for vt in range(1, 8):
         )
     )
 
-groups = [Group(i) for i in "123"]
+groups = [
+    Group("1"),
+    Group("2", layout="max", matches=[Match(wm_class=re.compile(r"^weston"))]),
+    Group("3", layout="max", matches=[
+        Match(wm_class="Wine"),
+        Match(wm_class="explorer.exe"),
+    ]),
+]
 
 for i in groups:
     keys.extend(
