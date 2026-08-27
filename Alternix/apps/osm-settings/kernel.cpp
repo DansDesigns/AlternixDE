@@ -407,7 +407,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     scroll->setWidget(wrap);
     rootLay->addWidget(scroll);
 
-    // ── Refresh + Back row ──────────────────────────────
+    // ── Back row ───────────────────────────────────
     auto refreshAll = [=]() {
         fillList(modList, modCount, getModules());
         fillList(drvList, drvCount, getDriverMap());
@@ -416,11 +416,6 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     QHBoxLayout *btnRow = new QHBoxLayout();
     btnRow->setSpacing(40);
     btnRow->setAlignment(Qt::AlignHCenter);
-
-    QPushButton *refresh = makeBtn("Refresh");
-    refresh->setFixedSize(180, 60);
-    QObject::connect(refresh, &QPushButton::clicked, [=]() { refreshAll(); });
-    btnRow->addWidget(refresh);
 
     QPushButton *back = makeBtn("❮");
     back->setFixedSize(140, 60);
