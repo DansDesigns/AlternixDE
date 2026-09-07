@@ -37,7 +37,7 @@ class ScrollerBar:
         column_focus="#8aadf4ff",
         viewport="#8aadf433",
         viewport_border="#8aadf4aa",
-        padding=6,
+        padding=8,
         radius=True,
         min_viewport=28,
         interval=0.016,
