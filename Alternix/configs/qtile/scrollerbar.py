@@ -30,7 +30,7 @@ _instance = None
 class ScrollerBar:
     def __init__(
         self,
-        height=16,
+        height=20,
         background="#00000000",
         track="#494d6455",
         column="#494d64cc",
