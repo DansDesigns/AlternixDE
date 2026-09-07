@@ -24,7 +24,7 @@ class Scroller(Layout):
         ("edge_padding", 10, "Padding kept at the left/right screen edges."),
         ("bottom_reserve", 0,
          "Pixels left free at the bottom of the screen for the scrollbar."),
-        ("column_widths", [0.34, 0.5, 0.67, 1.0],
+        ("column_widths", [0.67, 1.0],
          "Selectable column widths, as a fraction of the viewport."),
         ("default_width", 2, "Index into column_widths used for new windows."),
         ("single_full_width", True,
@@ -47,7 +47,7 @@ class Scroller(Layout):
          "Unmap windows fully outside the viewport (saves CPU on Atom)."),
         ("offscreen_buffer", 400,
          "Extra pixels beyond the viewport kept mapped."),
-        ("min_column", 120, "Minimum column width in pixels."),
+        ("min_column", 150, "Minimum column width in pixels."),
         ("drag_settle_delay", 0.25,
          "Seconds of pointer stillness that ends a drag."),
     ]
