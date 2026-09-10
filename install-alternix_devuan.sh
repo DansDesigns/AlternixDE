@@ -366,6 +366,7 @@ sudo udevadm control --reload-rules 2>/dev/null || true
 echo " "
 echo "[2a/10] Installing Scrolling Layout for Qtile"
 
+mkdir -p ~/.config/Alternix
 cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
 cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
