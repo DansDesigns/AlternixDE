@@ -367,7 +367,9 @@ echo " "
 echo "[2a/10] Installing Scrolling Layout for Qtile"
 
 mkdir -p ~/.config/Alternix
+mkdir -p ~/.local/bin
 cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
+
 cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
@@ -376,10 +378,10 @@ chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-touchscroll.py
 cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
 
-chnmod +x alternix-waydroid-session
+chmod +x alternix-waydroid-session
 sudo cp alternix-waydroid-session /usr/local/bin
 
-chnmod +x alternix-exe
+chmod +x alternix-exe
 sudo cp alternix-exe /usr/local/bin
 
 
