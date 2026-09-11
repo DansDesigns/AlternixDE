@@ -1068,21 +1068,9 @@ cd "$HOME"
 rm -rf fetch
 
 
-# ────────────────────────────────────────────────
-# 13. auto-cpufreq
-# ────────────────────────────────────────────────
-echo " "
-echo "- Installing auto-cpufreq..."
-cd "$HOME"
-git clone https://github.com/AdnanHodzic/auto-cpufreq.git
-cd auto-cpufreq
-sudo ./auto-cpufreq-installer
-sudo auto-cpufreq --install
-
-
 
 # ────────────────────────────────────────────────
-# 14. GLX compatibility check → patch picom.conf
+# 13. GLX compatibility check → patch picom.conf
 # Detects whether the GPU supports GLX/OpenGL well
 # enough for picom's glx backend. If not, switches
 # picom.conf to xrender (safe on all hardware).
@@ -1155,7 +1143,7 @@ fi
 
 
 # ──────────────────────────────────────────────── 
-# install rounded-corners
+# 14. install rounded-corners
 # ────────────────────────────────────────────────
 echo " "
 
@@ -1169,18 +1157,29 @@ echo "[✓] Rounded-Corers Installed..."
 
 
 # ──────────────────────────────────────────────── 
-# install Ponder
+# 15. install Ponder
 # ────────────────────────────────────────────────
 echo " "
 
 echo "• Installing Ponder..."
 cd ~
-sudo rm -rf ~/Ponder
 git clone https://github.com/DansDesigns/Ponder
 cd Ponder
 chmod +x install.sh
 ./install.sh
 echo "[✓] Ponder Installed..."
+
+
+# ────────────────────────────────────────────────
+# 16. auto-cpufreq
+# ────────────────────────────────────────────────
+echo " "
+echo "- Installing auto-cpufreq..."
+cd "$HOME"
+git clone https://github.com/AdnanHodzic/auto-cpufreq.git
+cd auto-cpufreq
+sudo ./auto-cpufreq-installer
+sudo auto-cpufreq --install
 
 
 # ────────────────────────────────────────────────
