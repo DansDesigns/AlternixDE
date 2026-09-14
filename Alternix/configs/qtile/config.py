@@ -247,7 +247,7 @@ for i in groups:
 layouts = [
     Scroller(
         border_width=3,
-        border_focus="#8aadf4c0",
+        border_focus="#2A2C32",
         border_normal="#494d6480",
         gap=10,
         edge_padding=10,

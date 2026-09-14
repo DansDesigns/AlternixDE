@@ -16,7 +16,7 @@ from libqtile.layout.base import Layout
 
 class Scroller(Layout):
     defaults = [
-        ("border_focus", "#8aadf4c0", "Border colour for the focused window."),
+        ("border_focus", "#2A2C32", "Border colour for the focused window."),
         ("border_normal", "#494d6480", "Border colour for unfocused windows."),
         ("border_width", 3, "Border width in pixels."),
         ("margin", 0, "Margin inside each column (int or [t, r, b, l])."),
