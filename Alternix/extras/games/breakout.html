@@ -37,7 +37,7 @@
   }
   .hud {
     display: flex;
-    gap: 20px;
+    gap: 18px;
     font-size: 15px;
     font-weight: 600;
     background: #1e293b;
@@ -45,17 +45,18 @@
     border-radius: 8px;
     border: 1px solid #334155;
   }
-  .hud span { min-width: 84px; text-align: center; }
+  .hud span { min-width: 78px; text-align: center; }
+  .hud .hidden { display: none; }
   .controls-hint {
     font-size: 13px;
     color: #94a3b8;
     margin-top: 4px;
     text-align: center;
     max-width: 90vw;
+    line-height: 1.6;
   }
   .canvas-wrap { position: relative; }
 
-  /* ---------- Menu ---------- */
   .menu {
     position: absolute;
     inset: 0;
@@ -69,7 +70,7 @@
   }
   .menu.hidden { display: none; }
   .panel {
-    width: min(360px, 88%);
+    width: min(370px, 90%);
     max-height: 94%;
     overflow-y: auto;
     text-align: center;
@@ -106,17 +107,14 @@
   }
   .btn:hover:not(:disabled) { background: #263449; border-color: #38bdf8; }
   .btn:active:not(:disabled) { transform: scale(0.98); }
-  .btn.primary {
-    background: #0ea5e9;
-    border-color: #38bdf8;
-    color: #f8fafc;
-  }
+  .btn.primary { background: #0ea5e9; border-color: #38bdf8; color: #f8fafc; }
   .btn.primary:hover:not(:disabled) { background: #38bdf8; }
   .btn:disabled { opacity: 0.35; cursor: default; }
   .btn small { display: block; font-size: 11px; font-weight: 500; opacity: 0.85; margin-top: 2px; }
   .btn.small { padding: 8px; font-size: 13px; }
   .row { text-align: left; margin-bottom: 16px; }
   .row .label { font-size: 13px; color: #94a3b8; margin-bottom: 7px; font-weight: 600; }
+  .row .label b { color: #38bdf8; float: right; font-variant-numeric: tabular-nums; }
   .seg { display: flex; gap: 6px; flex-wrap: wrap; }
   .seg button {
     flex: 1 1 60px;
@@ -131,6 +129,40 @@
     cursor: pointer;
   }
   .seg button.active { background: #0ea5e9; border-color: #38bdf8; color: #f8fafc; }
+  .swatches { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatches button {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+  }
+  .swatches button.active { border-color: #f8fafc; box-shadow: 0 0 10px currentColor; }
+  .swatches button.taken { opacity: 0.3; }
+  .binds { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .binds button {
+    flex: 1 1 72px;
+    padding: 7px 4px;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 700;
+    color: #e2e8f0;
+    background: #0f172a;
+    border: 1px dashed #334155;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .binds button b { display: block; font-size: 10px; color: #64748b; font-weight: 600; margin-bottom: 3px; letter-spacing: 1px; }
+  .binds button.listening { border-color: #38bdf8; border-style: solid; color: #38bdf8; }
+  .binds button.listening b { color: #38bdf8; }
+  .binds button.muted { opacity: 0.45; }
+  input[type="range"] {
+    width: 100%;
+    accent-color: #0ea5e9;
+    height: 22px;
+    background: transparent;
+    cursor: pointer;
+  }
   .toggle {
     display: flex;
     justify-content: space-between;
@@ -161,7 +193,7 @@
   }
   .toggle.on .switch { background: #0ea5e9; }
   .toggle.on .switch::after { transform: translateX(20px); background: #f8fafc; }
-  .info { font-size: 12px; color: #64748b; margin: -8px 0 16px; text-align: left; }
+  .info { font-size: 12px; color: #64748b; margin: -8px 0 16px; text-align: left; line-height: 1.5; }
   .scores { list-style: none; text-align: left; margin-bottom: 16px; }
   .scores li {
     display: flex;
@@ -176,7 +208,7 @@
   .scores .rank { color: #64748b; width: 22px; flex: none; }
   .scores .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .scores .sc { color: #38bdf8; font-weight: 700; }
-  .scores .lv { color: #64748b; font-size: 11px; width: 42px; text-align: right; flex: none; }
+  .scores .lv { color: #64748b; font-size: 11px; width: 52px; text-align: right; flex: none; }
   .empty { color: #64748b; font-size: 13px; padding: 18px 0; }
   input[type="text"] {
     width: 100%;
@@ -201,7 +233,8 @@
 <body>
 <div class="game-container">
   <div class="hud">
-    <span>Score: <span id="score">0</span></span>
+    <span id="hud-score1">Score: 0</span>
+    <span id="hud-score2" class="hidden">P2: 0</span>
     <span>Lives: <span id="lives">3</span></span>
     <span>Level: <span id="level">1</span></span>
     <span>Best: <span id="best">0</span></span>
@@ -211,7 +244,6 @@
     <canvas id="gameCanvas" width="640" height="480"></canvas>
 
     <div id="menu" class="menu">
-      <!-- Main menu (identical on open and on pause) -->
       <div class="panel" id="panel-main">
         <h1>BREAKOUT</h1>
         <p class="sub" id="main-sub">Ready</p>
@@ -219,10 +251,17 @@
         <button class="btn" id="btn-new">New Game</button>
         <button class="btn" id="btn-settings">Settings</button>
         <button class="btn" id="btn-scores">High Scores</button>
-        <p class="hint">Move: Arrow keys, mouse or touch drag<br>Space, click or tap to fire the cannon<br>Esc or P to pause &middot; F for fullscreen</p>
+        <p class="hint">P1: arrows, mouse or touch &middot; Space to fire<br>P2: A and D &middot; W to fire<br>Esc or P to pause &middot; F for fullscreen</p>
       </div>
 
-      <!-- Settings -->
+      <div class="panel hidden" id="panel-mode">
+        <h2>New Game</h2>
+        <button class="btn primary" id="btn-mode-1">1 Player</button>
+        <button class="btn" id="btn-mode-2">2 Players<small>Same machine, shared bricks and lives</small></button>
+        <button class="btn" id="btn-mode-back">Back</button>
+        <p class="hint" id="mode-hint">Colours, keys, gamepads and play area scale are in Settings.</p>
+      </div>
+
       <div class="panel hidden" id="panel-settings">
         <h2>Settings</h2>
         <div class="row">
@@ -231,10 +270,34 @@
         </div>
         <p class="info" id="difficulty-info"></p>
         <div class="row">
+          <div class="label">Play area scale <b id="scale-value">1.0x</b></div>
+          <input type="range" id="scale-slider" min="1" max="2.5" step="0.1" value="1">
+        </div>
+        <p class="info" id="scale-info"></p>
+        <div class="row">
           <div class="label">Wind</div>
           <div class="seg" id="seg-wind"></div>
         </div>
         <p class="info" id="wind-info"></p>
+        <div class="row">
+          <div class="label">Player 1 colour</div>
+          <div class="swatches" id="swatch-1"></div>
+        </div>
+        <div class="row">
+          <div class="label">Player 2 colour</div>
+          <div class="swatches" id="swatch-2"></div>
+        </div>
+        <div class="row">
+          <div class="label">Player 1 controls</div>
+          <div class="seg" id="seg-dev-0"></div>
+          <div class="binds" id="binds-0"></div>
+        </div>
+        <div class="row">
+          <div class="label">Player 2 controls</div>
+          <div class="seg" id="seg-dev-1"></div>
+          <div class="binds" id="binds-1"></div>
+        </div>
+        <p class="info" id="pad-info"></p>
         <div class="row">
           <div class="label">Display</div>
           <div class="toggle" id="toggle-fullscreen">
@@ -244,17 +307,15 @@
         </div>
         <button class="btn small" id="btn-clear-scores">Clear High Scores</button>
         <button class="btn" id="btn-settings-back">Back</button>
-        <p class="hint">Difficulty applies to the next new game.</p>
+        <p class="hint">Difficulty and scale apply to the next new game.</p>
       </div>
 
-      <!-- High scores -->
       <div class="panel hidden" id="panel-scores">
         <h2>High Scores</h2>
         <ul class="scores" id="scores-list"></ul>
         <button class="btn" id="btn-scores-back">Back</button>
       </div>
 
-      <!-- Name entry -->
       <div class="panel hidden" id="panel-name">
         <h2>New High Score</h2>
         <div class="big-score" id="name-score">0</div>
@@ -263,7 +324,6 @@
         <button class="btn primary" id="btn-name-save">Save</button>
       </div>
 
-      <!-- Game over -->
       <div class="panel hidden" id="panel-gameover">
         <h2>Game Over</h2>
         <div class="big-score" id="over-score">0</div>
@@ -274,7 +334,7 @@
     </div>
   </div>
 
-  <div class="controls-hint">Arrow keys, mouse or touch drag to move &middot; Space / click / tap fires the cannon &middot; Esc / P for the menu &middot; F for fullscreen</div>
+  <div class="controls-hint" id="controls-hint">Arrow keys, mouse or touch drag to move &middot; Space / click / tap fires the cannon &middot; Esc / P for the menu &middot; F for fullscreen</div>
 </div>
 
 <script>
@@ -323,51 +383,63 @@
     strong: { label: 'Strong', force: 0.120 }
   };
   var WIND_ORDER = ['off', 'light', 'normal', 'strong'];
-  var WIND_GUST_MIN = 2200;      // ms before the wind picks a new target
-  var WIND_GUST_VAR = 3600;
-  var WIND_EASE = 900;           // ms to ease toward that target
-  var WIND_CALM_CHANCE = 0.25;   // how often a gust resolves to dead calm
-  var WIND_DRIFT_PU = 2.2;       // how much harder wind pushes falling powerups
-  var MIN_VERTICAL = 0.22;       // never let a ball get blown fully sideways
+  var WIND_GUST_MIN = 2200, WIND_GUST_VAR = 3600, WIND_EASE = 900;
+  var WIND_CALM_CHANCE = 0.25, WIND_DRIFT_PU = 2.2;
+  var MIN_VERTICAL = 0.22;
 
-  var settings = loadJSON(KEY_SETTINGS, null) || { difficulty: 'normal', startFullscreen: false, wind: 'light' };
+  var PALETTE = ['#38bdf8', '#f472b6', '#4ade80', '#fbbf24', '#fb7185', '#a78bfa', '#2dd4bf', '#f97316'];
+
+  var SCALE_MIN = 1, SCALE_MAX = 2.5;
+
+  var DEFAULT_CONTROLS = [
+    { device: 'keys', pointer: true,  left: 'ArrowLeft', right: 'ArrowRight', fire: 'Space', pad: 0 },
+    { device: 'keys', pointer: false, left: 'KeyA',      right: 'KeyD',       fire: 'KeyW', pad: 1 }
+  ];
+  var RESERVED_KEYS = ['Escape', 'KeyP', 'KeyF', 'Enter', 'Tab'];
+  var BIND_ACTIONS = ['left', 'right', 'fire'];
+
+  var settings = loadJSON(KEY_SETTINGS, null) || {};
   if (!DIFFICULTIES[settings.difficulty]) settings.difficulty = 'normal';
   if (!WIND[settings.wind]) settings.wind = 'light';
+  if (PALETTE.indexOf(settings.p1Colour) < 0) settings.p1Colour = PALETTE[0];
+  if (PALETTE.indexOf(settings.p2Colour) < 0) settings.p2Colour = PALETTE[1];
+  if (settings.p1Colour === settings.p2Colour) settings.p2Colour = PALETTE[1];
+  settings.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(settings.scale) || 1));
   settings.startFullscreen = !!settings.startFullscreen;
 
-  var SLOW_MS = 8000;
-  var SLOW_FACTOR = 0.6;
-  var EXPAND_MS = 12000;
-  var SURFACE_MS = 15000;        // bump / jagged / cannon duration
-  var CANNON_HOLD_MS = 6000;     // auto-fire if the player never releases
-  var JAG_TEETH = 7;
-  var JAG_TILT = 26 * Math.PI / 180;
-  var BUMP_SPREAD = Math.PI / 2.4;
-  var BUMP_CURVE = 0.6;
-  var MAX_BOUNCE = 78 * Math.PI / 180;
-  var PADDLE_BASE_W = 100;
-  var PADDLE_MAX_W = 200;
-  var LEVEL_CLEAR_MS = 1500;
-  var AUTOSAVE_MS = 3000;
+  var storedControls = Array.isArray(settings.controls) ? settings.controls : [];
+  settings.controls = DEFAULT_CONTROLS.map(function (d, i) {
+    var c = storedControls[i] || {};
+    return {
+      device: (c.device === 'pad' || c.device === 'keys') ? c.device : d.device,
+      pointer: typeof c.pointer === 'boolean' ? c.pointer : d.pointer,
+      left: typeof c.left === 'string' ? c.left : d.left,
+      right: typeof c.right === 'string' ? c.right : d.right,
+      fire: typeof c.fire === 'string' ? c.fire : d.fire,
+      pad: typeof c.pad === 'number' ? c.pad : d.pad
+    };
+  });
+  if (settings.controls[0].pointer && settings.controls[1].pointer) settings.controls[1].pointer = false;
 
-  var BRICK_COLS = 10;
-  var BRICK_W = 54;
-  var BRICK_H = 20;
-  var BRICK_PAD = 6;
-  var BRICK_OFFSET_TOP = 58;
-  var BRICK_OFFSET_LEFT = 23;
+  var SLOW_MS = 8000, SLOW_FACTOR = 0.6;
+  var EXPAND_MS = 12000;
+  var SURFACE_MS = 15000, CANNON_HOLD_MS = 6000;
+  var JAG_TEETH = 7, JAG_TILT = 26 * Math.PI / 180;
+  var BUMP_SPREAD = Math.PI / 2.4, BUMP_CURVE = 0.6;
+  var MAX_BOUNCE = 78 * Math.PI / 180;
+  var LEVEL_CLEAR_MS = 1500, AUTOSAVE_MS = 3000;
+
+  var BRICK_W = 54, BRICK_H = 20, BRICK_PAD = 6;
   var COLORS = ['#f87171', '#fb923c', '#facc15', '#4ade80', '#60a5fa', '#c084fc', '#2dd4bf', '#f0abfc'];
 
-  var COUNTDOWN_DURATION = 900;
-  var COUNTDOWN_START = 3;
-  var COUNTDOWN_FADE = 180;
+  var COUNTDOWN_DURATION = 900, COUNTDOWN_START = 3, COUNTDOWN_FADE = 180;
 
   /* ================= elements ============================================ */
   var canvas = document.getElementById('gameCanvas');
   var ctx = canvas.getContext('2d');
-  var W = canvas.width, H = canvas.height;
 
-  var scoreEl = document.getElementById('score');
+  var hudScore1 = document.getElementById('hud-score1');
+  var hudScore2 = document.getElementById('hud-score2');
   var livesEl = document.getElementById('lives');
   var levelEl = document.getElementById('level');
   var bestEl = document.getElementById('best');
@@ -375,105 +447,179 @@
   var menuEl = document.getElementById('menu');
   var panels = {
     main: document.getElementById('panel-main'),
+    mode: document.getElementById('panel-mode'),
     settings: document.getElementById('panel-settings'),
     scores: document.getElementById('panel-scores'),
     name: document.getElementById('panel-name'),
     gameover: document.getElementById('panel-gameover')
   };
 
+  /* ================= scaled geometry ===================================== */
+  // scale stretches the playfield: the canvas grows, bricks stay the same size
+  // so there are more of them, and the paddle and ball grow only by sqrt(scale)
+  // so they cover proportionally less ground.
+  var scale = 1, objScale = 1;
+  var W = 640, H = 480;
+  var BRICK_COLS = 10, BRICK_OFFSET_LEFT = 23, BRICK_OFFSET_TOP = 58;
+  var PADDLE_BASE_W = 100, PADDLE_MAX_W = 200, PADDLE_H = 14, PADDLE_Y = 450;
+  var BALL_R = 6, PU_SIZE = 20;
+
+  function applyScale(s) {
+    scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, s));
+    objScale = Math.sqrt(scale);
+    canvas.width = Math.round(640 * scale);
+    canvas.height = Math.round(480 * scale);
+    W = canvas.width;
+    H = canvas.height;
+    BRICK_COLS = Math.round(10 * scale);
+    BRICK_OFFSET_LEFT = Math.round((W - (BRICK_COLS * (BRICK_W + BRICK_PAD) - BRICK_PAD)) / 2);
+    BRICK_OFFSET_TOP = Math.round(58 * objScale);
+    PADDLE_H = Math.round(14 * objScale);
+    PADDLE_BASE_W = Math.round(100 * objScale);
+    PADDLE_MAX_W = Math.round(200 * objScale);
+    PADDLE_Y = H - Math.round(30 * objScale);
+    BALL_R = Math.round(6 * objScale);
+    PU_SIZE = Math.round(20 * objScale);
+    initWindParticles();
+  }
+
+  function layoutPreview(s) {
+    var cols = Math.round(10 * s);
+    var rows = Math.max(3, Math.round(4 * s));
+    return cols + ' x ' + rows + ' bricks on level 1, paddle covers ' +
+      Math.round(100 * Math.sqrt(s) / (640 * s) * 100) + '% of the width';
+  }
+
   /* ================= game state ========================================== */
-  // menu | countdown | playing | levelclear | gameover
-  var state = 'menu';
-  var score = 0, lives = 3, level = 1;
-  var hasGame = false;          // a game is in progress (resumable)
+  var state = 'menu';   // menu | countdown | playing | levelclear | gameover
+  var lives = 3, level = 1;
+  var hasGame = false;
   var savedGame = loadJSON(KEY_SAVE, null);
   var highscores = loadJSON(KEY_SCORES, []);
 
-  var paddle = { w: PADDLE_BASE_W, h: 14, x: W / 2 - PADDLE_BASE_W / 2, y: H - 30, speed: 7, dx: 0 };
+  var players = [];
   var balls = [], bricks = [], powerups = [], particles = [];
 
-  var slowTimer = 0, expandTimer = 0;
-  var paddleSurface = 'flat';    // flat | bump | jagged | cannon
-  var surfaceTimer = 0;
-  var wind = 0, windTarget = 0, windTimer = 0;
-  var windParticles = [];
-  var levelClearTimer = 0;
+  var slowTimer = 0, levelClearTimer = 0;
+  var wind = 0, windTarget = 0, windTimer = 0, windParticles = [];
   var countdownTimer = 0, countdownValue = COUNTDOWN_START, countdownAlpha = 0;
   var autosaveTimer = 0;
 
-  var keys = { left: false, right: false };
-  var touchActive = false, touchPaddleOffset = 0;
-  var tapStartX = 0, tapStartT = 0;
+  var keysDown = {};
+  var padAxes = [0, 0];
+  var padPrev = [{}, {}];
+  var padListening = -1;
+  var bindTarget = null;
+  var bindMessage = '';
+  var touchActive = false, touchPaddleOffset = 0, tapStartX = 0, tapStartT = 0;
   var lastTime = performance.now();
 
-  /* ================= helpers ============================================= */
   function diff() { return DIFFICULTIES[settings.difficulty]; }
-  function ballBaseSpeed() { var d = diff(); return d.ball + (level - 1) * d.step; }
-  function paddleBaseSpeed() { return diff().paddle; }
+  function ballBaseSpeed() { var d = diff(); return (d.ball + (level - 1) * d.step) * scale; }
+  function paddleBaseSpeed() { return diff().paddle * scale; }
+
+  function makePlayer(i) {
+    return {
+      index: i,
+      name: 'P' + (i + 1),
+      colour: i === 0 ? settings.p1Colour : settings.p2Colour,
+      x: W / 2 - PADDLE_BASE_W / 2,
+      w: PADDLE_BASE_W,
+      speed: paddleBaseSpeed(),
+      dx: 0,
+      score: 0,
+      surface: 'flat',
+      surfaceTimer: 0,
+      expandTimer: 0
+    };
+  }
+
+  function setupPlayers(count) {
+    players = [];
+    for (var i = 0; i < count; i++) players.push(makePlayer(i));
+    if (count === 2) {
+      players[0].x = W * 0.3 - PADDLE_BASE_W / 2;
+      players[1].x = W * 0.7 - PADDLE_BASE_W / 2;
+    } else {
+      players[0].x = W / 2 - PADDLE_BASE_W / 2;
+    }
+    hudScore2.classList.toggle('hidden', count < 2);
+    hudScore1.style.color = count > 1 ? players[0].colour : '';
+    if (count > 1) hudScore2.style.color = players[1].colour;
+  }
+
+  function clampPaddle(p) {
+    if (p.x < 0) p.x = 0;
+    if (p.x + p.w > W) p.x = W - p.w;
+  }
 
   function updateHUD() {
-    scoreEl.textContent = score;
+    if (players.length > 1) {
+      hudScore1.textContent = players[0].name + ': ' + players[0].score;
+      hudScore2.textContent = players[1].name + ': ' + players[1].score;
+    } else {
+      hudScore1.textContent = 'Score: ' + (players[0] ? players[0].score : 0);
+    }
     livesEl.textContent = lives;
     levelEl.textContent = level;
     bestEl.textContent = highscores.length ? highscores[0].score : 0;
   }
 
+  function totalScore() {
+    var t = 0;
+    for (var i = 0; i < players.length; i++) t += players[i].score;
+    return t;
+  }
+
+  function leader() {
+    var best = players[0];
+    for (var i = 1; i < players.length; i++) if (players[i].score > best.score) best = players[i];
+    return best;
+  }
+
   /* ================= level generation ==================================== */
   function generateLayout(lv) {
-    var rows = Math.min(4 + Math.floor((lv - 1) / 2), 8);
-    var half = Math.ceil(BRICK_COLS / 2);
+    var rowsBase = Math.min(4 + Math.floor((lv - 1) / 2), 8);
+    var rows = Math.max(3, Math.round(rowsBase * scale));
+    var cols = BRICK_COLS;
+    var half = Math.ceil(cols / 2);
     var patterns = ['random', 'pyramid', 'arch', 'diamond', 'checker', 'stripes', 'waves', 'frame'];
     var pattern = patterns[Math.floor(Math.random() * patterns.length)];
     var density = 0.55 + Math.random() * 0.3;
+    var minCount = Math.max(10, Math.round(rows * cols * 0.22));
     var grid, count, attempts = 0;
 
     do {
       grid = [];
       count = 0;
       for (var r = 0; r < rows; r++) {
-        grid.push(new Array(BRICK_COLS).fill(false));
+        grid.push(new Array(cols).fill(false));
         var span = Math.max(1, rows - 1);
         for (var c = 0; c < half; c++) {
           var on = false;
-          var fromCentre = half - 1 - c;               // 0 at centre, grows outward
+          var fromCentre = half - 1 - c;
           switch (pattern) {
-            case 'random':
-              on = Math.random() < density;
-              break;
-            case 'pyramid':
-              on = fromCentre <= Math.round((half - 1) * (r / span));
-              break;
-            case 'arch':
-              on = fromCentre >= Math.round((half - 1) * (r / span) * 0.8);
-              break;
-            case 'diamond':
-              on = (Math.abs(r - (rows - 1) / 2) / (rows / 2) + fromCentre / half) < 1.05;
-              break;
-            case 'checker':
-              on = ((r + c) % 2 === 0) || Math.random() < 0.25;
-              break;
-            case 'stripes':
-              on = (c % 2 === 0) || (r % 3 === 0);
-              break;
-            case 'waves':
-              on = Math.sin(c * 0.9 + r * 0.7) > -0.35;
-              break;
-            case 'frame':
-              on = (r === 0 || r === rows - 1 || fromCentre === half - 1 || fromCentre === 0) || Math.random() < 0.18;
-              break;
+            case 'random':  on = Math.random() < density; break;
+            case 'pyramid': on = fromCentre <= Math.round((half - 1) * (r / span)); break;
+            case 'arch':    on = fromCentre >= Math.round((half - 1) * (r / span) * 0.8); break;
+            case 'diamond': on = (Math.abs(r - (rows - 1) / 2) / (rows / 2) + fromCentre / half) < 1.05; break;
+            case 'checker': on = ((r + c) % 2 === 0) || Math.random() < 0.25; break;
+            case 'stripes': on = (c % 2 === 0) || (r % 3 === 0); break;
+            case 'waves':   on = Math.sin(c * 0.9 + r * 0.7) > -0.35; break;
+            case 'frame':   on = (r === 0 || r === rows - 1 || fromCentre === half - 1 || fromCentre === 0) || Math.random() < 0.18; break;
           }
-          if (on && Math.random() < 0.08) on = false;   // random holes for texture
+          if (on && Math.random() < 0.08) on = false;
           grid[r][c] = on;
-          grid[r][BRICK_COLS - 1 - c] = on;             // mirror for symmetry
+          grid[r][cols - 1 - c] = on;
         }
-        for (var k = 0; k < BRICK_COLS; k++) if (grid[r][k]) count++;
+        for (var k = 0; k < cols; k++) if (grid[r][k]) count++;
       }
       attempts++;
-      if (count < 14 && attempts < 6) pattern = 'random';
-    } while (count < 14 && attempts < 6);
+      if (count < minCount && attempts < 6) pattern = 'random';
+    } while (count < minCount && attempts < 6);
 
-    if (count < 14) {
-      for (var rr = 0; rr < rows; rr++) for (var cc = 0; cc < BRICK_COLS; cc++) grid[rr][cc] = true;
+    if (count < minCount) {
+      for (var rr = 0; rr < rows; rr++) for (var cc = 0; cc < cols; cc++) grid[rr][cc] = true;
     }
     return grid;
   }
@@ -497,65 +643,33 @@
     }
   }
 
-  /* ================= entities ============================================ */
-  function resetBall() {
-    balls.length = 0;
-    balls.push({
-      x: W / 2, y: paddle.y - 7, r: 6,
+  /* ================= balls and powerups ================================== */
+  function makeBall(owner) {
+    var p = players[owner] || players[0];
+    return {
+      x: p.x + p.w / 2, y: PADDLE_Y - BALL_R - 1, r: BALL_R,
       dx: 0, dy: 0, speed: ballBaseSpeed(),
-      active: false, stuck: true
-    });
+      owner: owner, active: false, stuck: true,
+      held: false, holder: -1, holdOffset: 0, holdTimer: 0, heldSpeed: 0
+    };
   }
 
-  function launchBall() {
-    var ball = balls[0];
-    if (!ball || !ball.stuck) return;
-    ball.stuck = false;
-    ball.active = true;
-    var angle = (Math.random() * 60 + 60) * Math.PI / 180;
-    var sp = ball.speed * (slowTimer > 0 ? SLOW_FACTOR : 1);
-    ball.dx = Math.cos(angle) * sp * (Math.random() < 0.5 ? 1 : -1);
-    ball.dy = -Math.sin(angle) * sp;
+  function resetBalls() {
+    balls.length = 0;
+    for (var i = 0; i < players.length; i++) balls.push(makeBall(i));
   }
 
-  function clearPowerupEffects() {
-    slowTimer = 0;
-    expandTimer = 0;
-    paddleSurface = 'flat';
-    surfaceTimer = 0;
-    for (var i = 0; i < balls.length; i++) { balls[i].held = false; balls[i].holdTimer = 0; }
-    paddle.w = PADDLE_BASE_W;
-    clampPaddle();
-  }
-
-  function clampPaddle() {
-    if (paddle.x < 0) paddle.x = 0;
-    if (paddle.x + paddle.w > W) paddle.x = W - paddle.w;
-  }
-
-  function resetGame() {
-    score = 0; lives = 3; level = 1;
-    paddle.speed = paddleBaseSpeed();
-    paddle.x = W / 2 - PADDLE_BASE_W / 2;
-    powerups.length = 0;
-    particles.length = 0;
-    clearPowerupEffects();
-    buildBricks();
-    resetBall();
-    updateHUD();
-    hasGame = true;
-  }
-
-  function nextLevel() {
-    level++;
-    powerups.length = 0;
-    particles.length = 0;
-    clearPowerupEffects();
-    buildBricks();
-    resetBall();
-    updateHUD();
-    saveGame();
-    startCountdown();
+  function launchBalls() {
+    for (var i = 0; i < balls.length; i++) {
+      var ball = balls[i];
+      if (!ball.stuck) continue;
+      ball.stuck = false;
+      ball.active = true;
+      var angle = (Math.random() * 60 + 60) * Math.PI / 180;
+      var sp = ball.speed * (slowTimer > 0 ? SLOW_FACTOR : 1);
+      ball.dx = Math.cos(angle) * sp * (Math.random() < 0.5 ? 1 : -1);
+      ball.dy = -Math.sin(angle) * sp;
+    }
   }
 
   var POWERUP_TABLE = [
@@ -576,17 +690,20 @@
       roll -= POWERUP_TABLE[i].weight;
       if (roll <= 0) { pick = POWERUP_TABLE[i]; break; }
     }
-    powerups.push({ x: x - 10, y: y, w: 20, h: 20, type: pick.type, color: pick.color, dy: 2.5 });
+    powerups.push({
+      x: x - PU_SIZE / 2, y: y, w: PU_SIZE, h: PU_SIZE,
+      type: pick.type, color: pick.color, dy: 2.5 * scale
+    });
   }
 
   function spawnParticles(x, y, color) {
     for (var i = 0; i < 8; i++) {
       particles.push({
         x: x, y: y,
-        dx: (Math.random() - 0.5) * 4,
-        dy: (Math.random() - 0.5) * 4,
+        dx: (Math.random() - 0.5) * 4 * objScale,
+        dy: (Math.random() - 0.5) * 4 * objScale,
         life: 1.0, color: color,
-        size: Math.random() * 3 + 2
+        size: (Math.random() * 3 + 2) * objScale
       });
     }
   }
@@ -601,71 +718,29 @@
     for (var i = 0; i < balls.length; i++) { balls[i].dx /= SLOW_FACTOR; balls[i].dy /= SLOW_FACTOR; }
     slowTimer = 0;
   }
-  function applyExpand() {
-    paddle.w = Math.min(paddle.w + 40, PADDLE_MAX_W);
-    clampPaddle();
-    expandTimer = EXPAND_MS;
+  function applyExpand(p) {
+    p.w = Math.min(p.w + Math.round(40 * objScale), PADDLE_MAX_W);
+    clampPaddle(p);
+    p.expandTimer = EXPAND_MS;
   }
-  function endExpand() {
-    var centre = paddle.x + paddle.w / 2;
-    paddle.w = PADDLE_BASE_W;
-    paddle.x = centre - paddle.w / 2;
-    clampPaddle();
-    expandTimer = 0;
-  }
-
-  /* ================= countdown =========================================== */
-  function startCountdown() {
-    state = 'countdown';
-    countdownTimer = 0;
-    countdownValue = COUNTDOWN_START;
-    countdownAlpha = 0;
+  function endExpand(p) {
+    var centre = p.x + p.w / 2;
+    p.w = PADDLE_BASE_W;
+    p.x = centre - p.w / 2;
+    clampPaddle(p);
+    p.expandTimer = 0;
   }
 
-  function updateCountdown(dt) {
-    countdownTimer += dt;
-    var current = COUNTDOWN_START - Math.floor(countdownTimer / COUNTDOWN_DURATION);
-    if (current < 1) { state = 'playing'; launchBall(); return; }
-    countdownValue = current;
-    var t = countdownTimer % COUNTDOWN_DURATION;
-    if (t < COUNTDOWN_FADE) countdownAlpha = t / COUNTDOWN_FADE;
-    else if (t > COUNTDOWN_DURATION - COUNTDOWN_FADE) countdownAlpha = (COUNTDOWN_DURATION - t) / COUNTDOWN_FADE;
-    else countdownAlpha = 1;
-  }
-
-  /* ================= update loop ========================================= */
-  function movePaddle() {
-    if (!touchActive) {
-      if (keys.left) paddle.dx = -paddle.speed;
-      else if (keys.right) paddle.dx = paddle.speed;
-      else paddle.dx = 0;
-      paddle.x += paddle.dx;
-    }
-    clampPaddle();
-  }
-
-  function stickBalls() {
-    for (var i = 0; i < balls.length; i++) {
-      if (balls[i].held) {
-        balls[i].x = paddle.x + paddle.w / 2 + balls[i].holdOffset;
-        balls[i].y = paddle.y - balls[i].r - 2;
-      } else if (balls[i].stuck) {
-        balls[i].x = paddle.x + paddle.w / 2;
-        balls[i].y = paddle.y - balls[i].r - 1;
-      }
-    }
-  }
-
-  /* ================= wind =============================================== */
-  function windForce() { return WIND[settings.wind].force; }
+  /* ================= wind ================================================ */
+  function windForce() { return WIND[settings.wind].force * scale; }
 
   function initWindParticles() {
     windParticles.length = 0;
-    for (var i = 0; i < 46; i++) {
+    for (var i = 0; i < Math.round(46 * scale); i++) {
       windParticles.push({
         x: Math.random() * W,
         y: Math.random() * (H - 40) + 10,
-        len: 8 + Math.random() * 22,
+        len: (8 + Math.random() * 22) * objScale,
         a: 0.06 + Math.random() * 0.14
       });
     }
@@ -689,7 +764,6 @@
     }
   }
 
-  // Keeps a ball from being blown into a flat, unrecoverable sideways path.
   function clampVertical(ball, speed) {
     var floorY = MIN_VERTICAL * speed;
     if (Math.abs(ball.dy) >= floorY) return;
@@ -698,13 +772,10 @@
     ball.dx = (ball.dx < 0 ? -1 : 1) * Math.sqrt(rem > 0 ? rem : 0);
   }
 
-  // Wind bends the ball's path without altering its speed, so pace stays
-  // governed by the difficulty setting alone.
   function applyWind(dt) {
     var force = windForce() * wind;
     if (force === 0) return;
     var f = dt / 16.67;
-
     for (var i = 0; i < balls.length; i++) {
       var ball = balls[i];
       if (!ball.active) continue;
@@ -715,68 +786,242 @@
       if (ns > 0.0001) { ball.dx *= speed / ns; ball.dy *= speed / ns; }
       clampVertical(ball, speed);
     }
-
     for (var p = 0; p < powerups.length; p++) powerups[p].x += force * f * WIND_DRIFT_PU;
   }
 
-  /* ================= paddle surfaces ==================================== */
-  function setSurface(type) {
-    if (paddleSurface === 'cannon' && type !== 'cannon') releaseHeldBalls();
-    paddleSurface = type;
-    surfaceTimer = SURFACE_MS;
+  /* ================= paddle surfaces ===================================== */
+  function setSurface(p, type) {
+    if (p.surface === 'cannon' && type !== 'cannon') releaseHeld(p.index);
+    p.surface = type;
+    p.surfaceTimer = SURFACE_MS;
   }
 
-  function endSurface() {
-    if (paddleSurface === 'cannon') releaseHeldBalls();
-    paddleSurface = 'flat';
-    surfaceTimer = 0;
+  function endSurface(p) {
+    if (p.surface === 'cannon') releaseHeld(p.index);
+    p.surface = 'flat';
+    p.surfaceTimer = 0;
   }
 
-  function aimAngle(offset) {
-    var h = offset / (paddle.w / 2);
+  function aimAngle(offset, p) {
+    var h = offset / (p.w / 2);
     if (h < -1) h = -1;
     if (h > 1) h = 1;
     return h * (Math.PI / 3);
   }
 
-  function releaseHeldBalls() {
+  function releaseHeld(playerIndex) {
     for (var i = 0; i < balls.length; i++) {
       var ball = balls[i];
       if (!ball.held) continue;
-      var ang = aimAngle(ball.holdOffset);
+      if (playerIndex >= 0 && ball.holder !== playerIndex) continue;
+      var p = players[ball.holder] || players[0];
+      var ang = aimAngle(ball.holdOffset, p);
       var sp = ball.heldSpeed || ball.speed;
       ball.dx = Math.sin(ang) * sp;
       ball.dy = -Math.cos(ang) * sp;
       ball.held = false;
+      ball.holder = -1;
       ball.active = true;
       ball.holdTimer = 0;
     }
   }
 
-  // Returns the outgoing angle from vertical for a ball striking the paddle.
-  function bounceAngle(ball) {
-    var hit = (ball.x - (paddle.x + paddle.w / 2)) / (paddle.w / 2);
+  function bounceAngle(ball, p) {
+    var hit = (ball.x - (p.x + p.w / 2)) / (p.w / 2);
     if (hit < -1) hit = -1;
     if (hit > 1) hit = 1;
     var ang;
-
-    if (paddleSurface === 'bump') {
-      // domed top: the normal swings away faster as you leave dead centre
+    if (p.surface === 'bump') {
       var e = (hit < 0 ? -1 : 1) * Math.pow(Math.abs(hit), BUMP_CURVE);
       ang = e * BUMP_SPREAD;
-    } else if (paddleSurface === 'jagged') {
-      // sawtooth: position within a tooth tilts the face, so returns scatter
-      var tw = paddle.w / JAG_TEETH;
-      var within = ((ball.x - paddle.x) % tw) / tw;
+    } else if (p.surface === 'jagged') {
+      var tw = p.w / JAG_TEETH;
+      var within = ((ball.x - p.x) % tw) / tw;
       if (within < 0) within += 1;
       ang = hit * (Math.PI / 3) + (within - 0.5) * 2 * JAG_TILT;
     } else {
       ang = hit * (Math.PI / 3);
     }
-
     if (ang > MAX_BOUNCE) ang = MAX_BOUNCE;
     if (ang < -MAX_BOUNCE) ang = -MAX_BOUNCE;
     return ang;
+  }
+
+  /* ================= game flow =========================================== */
+  function clearPowerupEffects() {
+    slowTimer = 0;
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      p.surface = 'flat';
+      p.surfaceTimer = 0;
+      p.expandTimer = 0;
+      p.w = PADDLE_BASE_W;
+      clampPaddle(p);
+    }
+    for (var b = 0; b < balls.length; b++) { balls[b].held = false; balls[b].holder = -1; balls[b].holdTimer = 0; }
+  }
+
+  function resetGame(playerCount) {
+    applyScale(settings.scale);
+    setupPlayers(playerCount);
+    lives = 3;
+    level = 1;
+    powerups.length = 0;
+    particles.length = 0;
+    clearPowerupEffects();
+    buildBricks();
+    resetBalls();
+    updateHUD();
+    hasGame = true;
+  }
+
+  function nextLevel() {
+    level++;
+    powerups.length = 0;
+    particles.length = 0;
+    clearPowerupEffects();
+    for (var i = 0; i < players.length; i++) players[i].speed = paddleBaseSpeed();
+    buildBricks();
+    resetBalls();
+    updateHUD();
+    saveGame();
+    startCountdown();
+  }
+
+  function startCountdown() {
+    state = 'countdown';
+    countdownTimer = 0;
+    countdownValue = COUNTDOWN_START;
+    countdownAlpha = 0;
+  }
+
+  function updateCountdown(dt) {
+    countdownTimer += dt;
+    var current = COUNTDOWN_START - Math.floor(countdownTimer / COUNTDOWN_DURATION);
+    if (current < 1) { state = 'playing'; launchBalls(); return; }
+    countdownValue = current;
+    var t = countdownTimer % COUNTDOWN_DURATION;
+    if (t < COUNTDOWN_FADE) countdownAlpha = t / COUNTDOWN_FADE;
+    else if (t > COUNTDOWN_DURATION - COUNTDOWN_FADE) countdownAlpha = (COUNTDOWN_DURATION - t) / COUNTDOWN_FADE;
+    else countdownAlpha = 1;
+  }
+
+  /* ================= update ============================================== */
+  function controlsFor(i) { return settings.controls[i] || DEFAULT_CONTROLS[i] || DEFAULT_CONTROLS[0]; }
+
+  function pointerPlayer() {
+    for (var i = 0; i < players.length; i++) if (controlsFor(i).pointer) return players[i];
+    return null;
+  }
+
+  function movePaddles() {
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      var cfg = controlsFor(i);
+
+      // analog stick or d-pad takes priority while it is being pushed
+      var ax = padAxes[i] || 0;
+      if (ax !== 0) {
+        p.pointerActive = false;
+        p.dx = ax * p.speed;
+        p.x += p.dx;
+        clampPaddle(p);
+        continue;
+      }
+
+      var left = !!keysDown[cfg.left];
+      var right = !!keysDown[cfg.right];
+      if (left || right) p.pointerActive = false;
+
+      if (p.pointerActive) { clampPaddle(p); continue; }
+
+      if (left) p.dx = -p.speed;
+      else if (right) p.dx = p.speed;
+      else p.dx = 0;
+      p.x += p.dx;
+      clampPaddle(p);
+    }
+  }
+
+  function stickBalls() {
+    for (var i = 0; i < balls.length; i++) {
+      var ball = balls[i];
+      if (ball.held) {
+        var hp = players[ball.holder] || players[0];
+        ball.x = hp.x + hp.w / 2 + ball.holdOffset;
+        ball.y = PADDLE_Y - ball.r - 2;
+      } else if (ball.stuck) {
+        var op = players[ball.owner] || players[0];
+        ball.x = op.x + op.w / 2;
+        ball.y = PADDLE_Y - ball.r - 1;
+      }
+    }
+  }
+
+  // One movement substep with collision. Returns false if the ball was
+  // captured by a cannon and should stop moving this frame.
+  function stepBall(ball, f) {
+    ball.x += ball.dx * f;
+    ball.y += ball.dy * f;
+
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.dx = Math.abs(ball.dx); }
+    if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); }
+    if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy = Math.abs(ball.dy); }
+
+    if (ball.dy > 0) {
+      for (var i = 0; i < players.length; i++) {
+        var p = players[i];
+        if (ball.y + ball.r < PADDLE_Y) continue;
+        if (ball.y + ball.r > PADDLE_Y + PADDLE_H + 6 * objScale) continue;
+        if (ball.x < p.x || ball.x > p.x + p.w) continue;
+
+        var sp = Math.sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
+        ball.owner = i;
+
+        if (p.surface === 'cannon') {
+          ball.held = true;
+          ball.holder = i;
+          ball.active = false;
+          ball.heldSpeed = sp;
+          ball.holdOffset = ball.x - (p.x + p.w / 2);
+          ball.holdTimer = CANNON_HOLD_MS;
+          ball.y = PADDLE_Y - ball.r - 2;
+          spawnParticles(ball.x, PADDLE_Y, p.colour);
+          return false;
+        }
+
+        ball.y = PADDLE_Y - ball.r;
+        var ang = bounceAngle(ball, p);
+        ball.dx = sp * Math.sin(ang);
+        ball.dy = -Math.abs(sp * Math.cos(ang));
+        clampVertical(ball, sp);
+        break;
+      }
+    }
+
+    for (var k = 0; k < bricks.length; k++) {
+      var brick = bricks[k];
+      if (!brick.alive) continue;
+      if (ball.x + ball.r <= brick.x || ball.x - ball.r >= brick.x + brick.w) continue;
+      if (ball.y + ball.r <= brick.y || ball.y - ball.r >= brick.y + brick.h) continue;
+
+      brick.alive = false;
+      var scorer = players[ball.owner] || players[0];
+      scorer.score += brick.points;
+      updateHUD();
+      spawnParticles(brick.x + brick.w / 2, brick.y + brick.h / 2, brick.color);
+
+      var oL = (ball.x + ball.r) - brick.x;
+      var oR = (brick.x + brick.w) - (ball.x - ball.r);
+      var oT = (ball.y + ball.r) - brick.y;
+      var oB = (brick.y + brick.h) - (ball.y - ball.r);
+      var mn = Math.min(oL, oR, oT, oB);
+      if (mn === oL || mn === oR) ball.dx = -ball.dx; else ball.dy = -ball.dy;
+
+      if (Math.random() < 0.15) spawnPowerup(brick.x + brick.w / 2, brick.y + brick.h / 2);
+      break;
+    }
+    return true;
   }
 
   function update(dt) {
@@ -792,17 +1037,19 @@
 
     if (state === 'countdown') {
       updateCountdown(dt);
-      movePaddle();
+      movePaddles();
       stickBalls();
       return;
     }
 
-    // ---- playing ----
-    movePaddle();
+    movePaddles();
 
     if (slowTimer > 0) { slowTimer -= dt; if (slowTimer <= 0) endSlow(); }
-    if (expandTimer > 0) { expandTimer -= dt; if (expandTimer <= 0) endExpand(); }
-    if (surfaceTimer > 0) { surfaceTimer -= dt; if (surfaceTimer <= 0) endSurface(); }
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      if (p.expandTimer > 0) { p.expandTimer -= dt; if (p.expandTimer <= 0) endExpand(p); }
+      if (p.surfaceTimer > 0) { p.surfaceTimer -= dt; if (p.surfaceTimer <= 0) endSurface(p); }
+    }
 
     applyWind(dt);
 
@@ -810,147 +1057,104 @@
       var ball = balls[b];
 
       if (ball.held) {
-        ball.x = paddle.x + paddle.w / 2 + ball.holdOffset;
-        ball.y = paddle.y - ball.r - 2;
+        var hp = players[ball.holder] || players[0];
+        ball.x = hp.x + hp.w / 2 + ball.holdOffset;
+        ball.y = PADDLE_Y - ball.r - 2;
         ball.holdTimer -= dt;
-        if (ball.holdTimer <= 0) releaseHeldBalls();
+        if (ball.holdTimer <= 0) releaseHeld(ball.holder);
         continue;
       }
 
       if (!ball.active) {
-        if (ball.stuck) { ball.x = paddle.x + paddle.w / 2; ball.y = paddle.y - ball.r - 1; }
+        if (ball.stuck) {
+          var op = players[ball.owner] || players[0];
+          ball.x = op.x + op.w / 2;
+          ball.y = PADDLE_Y - ball.r - 1;
+        }
         continue;
       }
-      ball.x += ball.dx;
-      ball.y += ball.dy;
 
-      if (ball.x - ball.r < 0) { ball.x = ball.r; ball.dx = Math.abs(ball.dx); }
-      if (ball.x + ball.r > W) { ball.x = W - ball.r; ball.dx = -Math.abs(ball.dx); }
-      if (ball.y - ball.r < 0) { ball.y = ball.r; ball.dy = Math.abs(ball.dy); }
-
-      if (ball.dy > 0 &&
-          ball.y + ball.r >= paddle.y &&
-          ball.y + ball.r <= paddle.y + paddle.h + 6 &&
-          ball.x >= paddle.x &&
-          ball.x <= paddle.x + paddle.w) {
-        var sp = Math.sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
-
-        if (paddleSurface === 'cannon') {
-          ball.held = true;
-          ball.active = false;
-          ball.heldSpeed = sp;
-          ball.holdOffset = ball.x - (paddle.x + paddle.w / 2);
-          ball.holdTimer = CANNON_HOLD_MS;
-          ball.y = paddle.y - ball.r - 2;
-          spawnParticles(ball.x, paddle.y, '#38bdf8');
-          continue;
-        }
-
-        ball.y = paddle.y - ball.r;
-        var ang = bounceAngle(ball);
-        ball.dx = sp * Math.sin(ang);
-        ball.dy = -Math.abs(sp * Math.cos(ang));
-        clampVertical(ball, sp);
+      // substep so fast balls at large scales cannot tunnel through bricks
+      var maxComp = Math.max(Math.abs(ball.dx), Math.abs(ball.dy));
+      var steps = Math.max(1, Math.ceil(maxComp / Math.max(3, ball.r * 0.9)));
+      for (var s = 0; s < steps; s++) {
+        if (!stepBall(ball, 1 / steps)) break;
       }
 
       if (ball.y - ball.r > H) balls.splice(b, 1);
     }
 
-    // ---- life lost ----
-    var activeBalls = 0;
-    for (var i = 0; i < balls.length; i++) {
-      if (balls[i].active || balls[i].held || balls[i].stuck) activeBalls++;
+    var inPlay = 0;
+    for (var n = 0; n < balls.length; n++) {
+      if (balls[n].active || balls[n].held || balls[n].stuck) inPlay++;
     }
-    if (activeBalls === 0) {
+    if (inPlay === 0) {
       lives--;
       updateHUD();
       if (lives <= 0) { endGame(); return; }
       powerups.length = 0;
       clearPowerupEffects();
-      resetBall();
+      resetBalls();
       saveGame();
       startCountdown();
       return;
     }
 
-    // ---- bricks ----
     var bricksAlive = 0;
-    for (var k = 0; k < bricks.length; k++) {
-      var brick = bricks[k];
-      if (!brick.alive) continue;
-      bricksAlive++;
-      for (var j = 0; j < balls.length; j++) {
-        var bl = balls[j];
-        if (!bl.active) continue;
-        if (bl.x + bl.r > brick.x && bl.x - bl.r < brick.x + brick.w &&
-            bl.y + bl.r > brick.y && bl.y - bl.r < brick.y + brick.h) {
-          brick.alive = false;
-          bricksAlive--;
-          score += brick.points;
-          updateHUD();
-          spawnParticles(brick.x + brick.w / 2, brick.y + brick.h / 2, brick.color);
-
-          var oL = (bl.x + bl.r) - brick.x;
-          var oR = (brick.x + brick.w) - (bl.x - bl.r);
-          var oT = (bl.y + bl.r) - brick.y;
-          var oB = (brick.y + brick.h) - (bl.y - bl.r);
-          var mn = Math.min(oL, oR, oT, oB);
-          if (mn === oL || mn === oR) bl.dx = -bl.dx; else bl.dy = -bl.dy;
-
-          if (Math.random() < 0.15) spawnPowerup(brick.x + brick.w / 2, brick.y + brick.h / 2);
-          break;
-        }
-      }
-    }
-
+    for (var q = 0; q < bricks.length; q++) if (bricks[q].alive) bricksAlive++;
     if (bricksAlive === 0) {
       state = 'levelclear';
       levelClearTimer = LEVEL_CLEAR_MS;
-      score += 100 * level;
+      leader().score += 100 * level;
       updateHUD();
       return;
     }
 
-    // ---- powerups ----
-    for (var p = powerups.length - 1; p >= 0; p--) {
-      var pu = powerups[p];
+    for (var u = powerups.length - 1; u >= 0; u--) {
+      var pu = powerups[u];
       pu.y += pu.dy;
-      pu.x += Math.sin(pu.y * 0.05) * 0.5;
+      pu.x += Math.sin(pu.y * 0.05) * 0.5 * objScale;
+      var caught = -1;
 
-      if (pu.y + pu.h >= paddle.y && pu.y <= paddle.y + paddle.h &&
-          pu.x + pu.w >= paddle.x && pu.x <= paddle.x + paddle.w) {
-        if (pu.type === 'expand') applyExpand();
+      for (var pi = 0; pi < players.length; pi++) {
+        var pp = players[pi];
+        if (pu.y + pu.h >= PADDLE_Y && pu.y <= PADDLE_Y + PADDLE_H &&
+            pu.x + pu.w >= pp.x && pu.x <= pp.x + pp.w) { caught = pi; break; }
+      }
+
+      if (caught >= 0) {
+        var owner = players[caught];
+        if (pu.type === 'expand') applyExpand(owner);
         if (pu.type === 'slow') applySlow();
         if (pu.type === 'life') { lives++; updateHUD(); }
-        if (pu.type === 'bump' || pu.type === 'jagged' || pu.type === 'cannon') setSurface(pu.type);
+        if (pu.type === 'bump' || pu.type === 'jagged' || pu.type === 'cannon') setSurface(owner, pu.type);
         if (pu.type === 'multiball') {
           var base = null;
           for (var m = 0; m < balls.length; m++) if (balls[m].active) { base = balls[m]; break; }
           if (base) {
-            for (var n = 0; n < 2; n++) {
+            for (var nn = 0; nn < 2; nn++) {
               balls.push({
-                x: base.x, y: base.y, r: 6,
-                dx: base.dx * (n === 0 ? 0.9 : 1.1) + (Math.random() - 0.5),
-                dy: base.dy * (n === 0 ? 1.1 : 0.9),
-                speed: base.speed, active: true, stuck: false
+                x: base.x, y: base.y, r: BALL_R,
+                dx: base.dx * (nn === 0 ? 0.9 : 1.1) + (Math.random() - 0.5),
+                dy: base.dy * (nn === 0 ? 1.1 : 0.9),
+                speed: base.speed, owner: caught, active: true, stuck: false,
+                held: false, holder: -1, holdOffset: 0, holdTimer: 0, heldSpeed: 0
               });
             }
           }
         }
-        powerups.splice(p, 1);
+        powerups.splice(u, 1);
         continue;
       }
-      if (pu.y > H) powerups.splice(p, 1);
+      if (pu.y > H) powerups.splice(u, 1);
     }
 
-    // ---- particles ----
-    for (var q = particles.length - 1; q >= 0; q--) {
-      var pt = particles[q];
+    for (var t = particles.length - 1; t >= 0; t--) {
+      var pt = particles[t];
       pt.x += pt.dx; pt.y += pt.dy; pt.life -= 0.03;
-      if (pt.life <= 0) particles.splice(q, 1);
+      if (pt.life <= 0) particles.splice(t, 1);
     }
 
-    // ---- autosave ----
     autosaveTimer -= dt;
     if (autosaveTimer <= 0) { autosaveTimer = AUTOSAVE_MS; saveGame(); }
   }
@@ -970,43 +1174,34 @@
     c.closePath();
   }
 
-  function paddleTint() {
-    if (paddleSurface === 'cannon') return '#facc15';
-    if (paddleSurface === 'jagged') return '#fb7185';
-    if (paddleSurface === 'bump') return '#38bdf8';
-    return expandTimer > 0 ? '#34d399' : '#38bdf8';
-  }
-
-  function drawPaddle() {
-    var col = paddleTint();
-    var x = paddle.x, y = paddle.y, w = paddle.w, h = paddle.h;
-
+  function drawPaddle(p) {
+    var x = p.x, y = PADDLE_Y, w = p.w, h = PADDLE_H;
     ctx.save();
-    ctx.fillStyle = col;
-    ctx.shadowColor = col;
+    ctx.fillStyle = p.colour;
+    ctx.shadowColor = p.colour;
     ctx.shadowBlur = 12;
 
-    if (paddleSurface === 'jagged') {
+    if (p.surface === 'jagged') {
       var tw = w / JAG_TEETH;
       ctx.beginPath();
       ctx.moveTo(x, y + h);
-      ctx.lineTo(x, y + 5);
+      ctx.lineTo(x, y + 5 * objScale);
       for (var t = 0; t < JAG_TEETH; t++) {
-        ctx.lineTo(x + t * tw + tw / 2, y - 5);
-        ctx.lineTo(x + (t + 1) * tw, y + 5);
+        ctx.lineTo(x + t * tw + tw / 2, y - 5 * objScale);
+        ctx.lineTo(x + (t + 1) * tw, y + 5 * objScale);
       }
       ctx.lineTo(x + w, y + h);
       ctx.closePath();
       ctx.fill();
-    } else if (paddleSurface === 'bump') {
+    } else if (p.surface === 'bump') {
       ctx.beginPath();
       ctx.moveTo(x, y + h);
-      ctx.lineTo(x, y + 4);
-      ctx.quadraticCurveTo(x + w / 2, y - 12, x + w, y + 4);
+      ctx.lineTo(x, y + 4 * objScale);
+      ctx.quadraticCurveTo(x + w / 2, y - 12 * objScale, x + w, y + 4 * objScale);
       ctx.lineTo(x + w, y + h);
       ctx.closePath();
       ctx.fill();
-    } else if (paddleSurface === 'cannon') {
+    } else if (p.surface === 'cannon') {
       roundRect(ctx, x, y, w, h, 7);
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1020,31 +1215,31 @@
     }
 
     ctx.shadowBlur = 0;
-    if (paddleSurface === 'flat' || paddleSurface === 'cannon') {
+    if (p.surface === 'flat' || p.surface === 'cannon') {
       ctx.fillStyle = 'rgba(255,255,255,0.25)';
-      ctx.fillRect(x + 4, y + 2, w - 8, 5);
+      ctx.fillRect(x + 4, y + 2, w - 8, Math.max(3, 5 * objScale - 2));
     }
     ctx.restore();
 
-    // cannon barrels showing the release angle of each held ball
     for (var i = 0; i < balls.length; i++) {
       var ball = balls[i];
-      if (!ball.held) continue;
-      var ang = aimAngle(ball.holdOffset);
+      if (!ball.held || ball.holder !== p.index) continue;
+      var ang = aimAngle(ball.holdOffset, p);
       ctx.save();
       ctx.translate(ball.x, y + 2);
       ctx.rotate(ang);
-      ctx.fillStyle = 'rgba(250,204,21,0.9)';
-      ctx.shadowColor = '#facc15';
+      ctx.fillStyle = p.colour;
+      ctx.shadowColor = p.colour;
       ctx.shadowBlur = 10;
-      roundRect(ctx, -4, -26, 8, 28, 3);
+      roundRect(ctx, -4 * objScale, -26 * objScale, 8 * objScale, 28 * objScale, 3);
       ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = 'rgba(250,204,21,0.35)';
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = p.colour;
       ctx.setLineDash([4, 5]);
       ctx.beginPath();
-      ctx.moveTo(0, -26);
-      ctx.lineTo(0, -95);
+      ctx.moveTo(0, -26 * objScale);
+      ctx.lineTo(0, -95 * objScale);
       ctx.stroke();
       ctx.restore();
     }
@@ -1070,16 +1265,15 @@
     }
     ctx.restore();
 
-    // gauge, top right
     var gx = W - 130, gy = 12;
     ctx.save();
     ctx.fillStyle = 'rgba(30,41,59,0.9)';
     roundRect(ctx, gx, gy, 118, 18, 5);
     ctx.fill();
     ctx.fillStyle = 'rgba(56,189,248,0.75)';
-    var barW = (118 - 4) / 2 * mag;
-    if (dir > 0) roundRect(ctx, gx + 59, gy + 2, Math.max(2, barW), 14, 3);
-    else roundRect(ctx, gx + 59 - Math.max(2, barW), gy + 2, Math.max(2, barW), 14, 3);
+    var barW = Math.max(2, (118 - 4) / 2 * mag);
+    if (dir > 0) roundRect(ctx, gx + 59, gy + 2, barW, 14, 3);
+    else roundRect(ctx, gx + 59 - barW, gy + 2, barW, 14, 3);
     ctx.fill();
     ctx.fillStyle = '#e2e8f0';
     ctx.font = 'bold 11px sans-serif';
@@ -1088,29 +1282,50 @@
     ctx.fillText((dir < 0 ? '\u25C0 ' : '') + 'WIND' + (dir > 0 ? ' \u25B6' : ''), gx + 59, gy + 10);
     ctx.restore();
   }
+
   function drawTimerBars() {
-    var items = [];
-    if (expandTimer > 0) items.push({ icon: '\u2194', frac: expandTimer / EXPAND_MS, color: '#34d399', secs: expandTimer });
-    if (slowTimer > 0) items.push({ icon: '\u25D0', frac: slowTimer / SLOW_MS, color: '#a78bfa', secs: slowTimer });
-    if (surfaceTimer > 0) {
-      var sc = { bump: '#38bdf8', jagged: '#fb7185', cannon: '#facc15' }[paddleSurface] || '#38bdf8';
-      var sl = { bump: 'BUMP', jagged: 'JAGGED', cannon: 'CANNON' }[paddleSurface] || '';
-      items.push({ icon: sl, frac: surfaceTimer / SURFACE_MS, color: sc, secs: surfaceTimer });
+    var row = 0;
+    if (slowTimer > 0) {
+      drawBar(12, 12, '\u25D0 ' + (slowTimer / 1000).toFixed(1) + 's', slowTimer / SLOW_MS, '#a78bfa');
+      row = 1;
     }
-    var x = 12;
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      ctx.fillStyle = 'rgba(30,41,59,0.9)';
-      roundRect(ctx, x, 12, 118, 18, 5); ctx.fill();
-      ctx.fillStyle = it.color;
-      roundRect(ctx, x + 2, 14, Math.max(2, (118 - 4) * it.frac), 14, 4); ctx.fill();
-      ctx.fillStyle = '#0f172a';
-      ctx.font = 'bold 11px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(it.icon + '  ' + (it.secs / 1000).toFixed(1) + 's', x + 8, 22);
-      x += 128;
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i];
+      var x = 12;
+      var y = 12 + row * 22;
+      var drew = false;
+      if (p.expandTimer > 0) {
+        drawBar(x, y, (players.length > 1 ? p.name + ' ' : '') + '\u2194 ' + (p.expandTimer / 1000).toFixed(1) + 's',
+                p.expandTimer / EXPAND_MS, p.colour);
+        x += 128;
+        drew = true;
+      }
+      if (p.surfaceTimer > 0) {
+        var sl = { bump: 'BUMP', jagged: 'JAGGED', cannon: 'CANNON' }[p.surface] || '';
+        drawBar(x, y, (players.length > 1 ? p.name + ' ' : '') + sl + ' ' + (p.surfaceTimer / 1000).toFixed(1) + 's',
+                p.surfaceTimer / SURFACE_MS, p.colour);
+        drew = true;
+      }
+      if (drew) row++;
     }
+  }
+
+  function drawBar(x, y, label, frac, color) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(30,41,59,0.9)';
+    roundRect(ctx, x, y, 118, 18, 5);
+    ctx.fill();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = color;
+    roundRect(ctx, x + 2, y + 2, Math.max(2, 114 * frac), 14, 4);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + 8, y + 10);
+    ctx.restore();
   }
 
   function drawCentredText(text, size, color, alpha) {
@@ -1119,7 +1334,7 @@
     ctx.fillStyle = color;
     ctx.shadowColor = color;
     ctx.shadowBlur = 30;
-    ctx.font = 'bold ' + size + 'px "Segoe UI", system-ui, sans-serif';
+    ctx.font = 'bold ' + Math.round(size * objScale) + 'px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, W / 2, H / 2);
@@ -1128,7 +1343,6 @@
 
   function draw() {
     ctx.clearRect(0, 0, W, H);
-
     drawWind();
 
     for (var i = 0; i < bricks.length; i++) {
@@ -1144,18 +1358,26 @@
       ctx.fillRect(brick.x + 2, brick.y + 2, brick.w - 4, 6);
     }
 
-    drawPaddle();
+    for (var pi = 0; pi < players.length; pi++) drawPaddle(players[pi]);
 
     for (var b = 0; b < balls.length; b++) {
       var ball = balls[b];
+      var owner = players[ball.owner] || players[0];
+      var col = owner ? owner.colour : '#f8fafc';
       ctx.beginPath();
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
-      ctx.fillStyle = slowTimer > 0 ? '#c4b5fd' : '#f8fafc';
-      ctx.shadowColor = ctx.fillStyle;
+      ctx.fillStyle = slowTimer > 0 ? '#c4b5fd' : col;
+      ctx.shadowColor = col;
       ctx.shadowBlur = 10;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.closePath();
+      if (players.length > 1) {
+        ctx.fillStyle = 'rgba(255,255,255,0.75)';
+        ctx.beginPath();
+        ctx.arc(ball.x - ball.r * 0.3, ball.y - ball.r * 0.3, ball.r * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     for (var p = 0; p < powerups.length; p++) {
@@ -1168,30 +1390,30 @@
       ctx.shadowBlur = 0;
       ctx.fillStyle = '#0f172a';
       ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 2;
-      var cx = pu.x + pu.w / 2, cy = pu.y + pu.h / 2;
+      ctx.lineWidth = 2 * objScale;
+      var cx = pu.x + pu.w / 2, cy = pu.y + pu.h / 2, u = objScale;
 
       if (pu.type === 'bump') {
         ctx.beginPath();
-        ctx.moveTo(cx - 7, cy + 4);
-        ctx.quadraticCurveTo(cx, cy - 8, cx + 7, cy + 4);
+        ctx.moveTo(cx - 7 * u, cy + 4 * u);
+        ctx.quadraticCurveTo(cx, cy - 8 * u, cx + 7 * u, cy + 4 * u);
         ctx.stroke();
       } else if (pu.type === 'jagged') {
         ctx.beginPath();
-        ctx.moveTo(cx - 7, cy + 4);
+        ctx.moveTo(cx - 7 * u, cy + 4 * u);
         for (var z = 0; z < 3; z++) {
-          ctx.lineTo(cx - 7 + z * 4.7 + 2.3, cy - 4);
-          ctx.lineTo(cx - 7 + (z + 1) * 4.7, cy + 4);
+          ctx.lineTo(cx - 7 * u + z * 4.7 * u + 2.3 * u, cy - 4 * u);
+          ctx.lineTo(cx - 7 * u + (z + 1) * 4.7 * u, cy + 4 * u);
         }
         ctx.stroke();
       } else if (pu.type === 'cannon') {
-        ctx.fillRect(cx - 2.5, cy - 6, 5, 9);
-        ctx.fillRect(cx - 6, cy + 3, 12, 4);
+        ctx.fillRect(cx - 2.5 * u, cy - 6 * u, 5 * u, 9 * u);
+        ctx.fillRect(cx - 6 * u, cy + 3 * u, 12 * u, 4 * u);
         ctx.beginPath();
-        ctx.arc(cx, cy - 8, 2.2, 0, Math.PI * 2);
+        ctx.arc(cx, cy - 8 * u, 2.2 * u, 0, Math.PI * 2);
         ctx.fill();
       } else {
-        ctx.font = 'bold 12px sans-serif';
+        ctx.font = 'bold ' + Math.round(12 * u) + 'px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         var icons = { expand: '\u2194', multiball: '\u25CF', slow: '\u25D0', life: '\u2665' };
@@ -1212,19 +1434,146 @@
     if (state === 'playing' || state === 'countdown') drawTimerBars();
     if (state === 'countdown') drawCentredText(String(countdownValue), 120, '#38bdf8', countdownAlpha);
     if (state === 'levelclear') {
-      var a = Math.min(1, levelClearTimer / 300);
-      drawCentredText('LEVEL ' + level + ' CLEARED', 44, '#4ade80', a);
+      drawCentredText('LEVEL ' + level + ' CLEARED', 44, '#4ade80', Math.min(1, levelClearTimer / 300));
     }
   }
 
   function loop(timestamp) {
     var dt = Math.min(timestamp - lastTime, 50);
     lastTime = timestamp;
+    pollPadAssign();
+    pollPads(dt);
     update(dt);
     draw();
     requestAnimationFrame(loop);
   }
 
+  /* ================= gamepads ============================================ */
+  function rawPads() {
+    if (!navigator.getGamepads) return [];
+    try { return navigator.getGamepads() || []; } catch (e) { return []; }
+  }
+
+  function padFor(i) {
+    var list = rawPads();
+    var idx = controlsFor(i).pad;
+    return list[idx] || null;
+  }
+
+  function padPressed(gp, n) { return !!(gp.buttons && gp.buttons[n] && gp.buttons[n].pressed); }
+
+  function pollPads(dt) {
+    for (var i = 0; i < 2; i++) {
+      padAxes[i] = 0;
+      var gp = padFor(i);
+      if (!gp) { padPrev[i] = {}; continue; }
+
+      var ax = (gp.axes && gp.axes.length) ? gp.axes[0] : 0;
+      if (Math.abs(ax) < 0.18) ax = 0;                       // deadzone
+      else ax = (ax - (ax < 0 ? -0.18 : 0.18)) / 0.82;        // rescale past the deadzone
+      if (padPressed(gp, 14)) ax = -1;                        // d-pad left
+      else if (padPressed(gp, 15)) ax = 1;                    // d-pad right
+      if (ax < -1) ax = -1;
+      if (ax > 1) ax = 1;
+      padAxes[i] = ax;
+
+      var fire = padPressed(gp, 0) || padPressed(gp, 5) || padPressed(gp, 7);
+      var pause = padPressed(gp, 9);
+
+      if (fire && !padPrev[i].fire && state === 'playing' && i < players.length) releaseHeld(i);
+      if (pause && !padPrev[i].pause) {
+        if (state === 'playing' || state === 'countdown' || state === 'levelclear') openMenu();
+        else if (state === 'menu' && !panels.main.classList.contains('hidden') && (hasGame || savedGame)) doResume();
+      }
+      padPrev[i].fire = fire;
+      padPrev[i].pause = pause;
+    }
+  }
+
+  function pollPadAssign() {
+    if (padListening < 0) return;
+    var list = rawPads();
+    for (var g = 0; g < list.length; g++) {
+      var gp = list[g];
+      if (!gp || !gp.buttons) continue;
+      for (var b = 0; b < gp.buttons.length; b++) {
+        if (gp.buttons[b].pressed) {
+          var cfg = controlsFor(padListening);
+          cfg.pad = gp.index;
+          cfg.device = 'pad';
+          var other = controlsFor(padListening === 0 ? 1 : 0);
+          if (other.device === 'pad' && other.pad === gp.index) other.pad = gp.index === 0 ? 1 : 0;
+          padListening = -1;
+          bindMessage = '';
+          saveJSON(KEY_SETTINGS, settings);
+          refreshSettingsUI();
+          return;
+        }
+      }
+    }
+  }
+
+  var KEY_LABELS = {
+    ArrowLeft: '\u2190', ArrowRight: '\u2192', ArrowUp: '\u2191', ArrowDown: '\u2193',
+    Space: 'Space', ShiftLeft: 'L Shift', ShiftRight: 'R Shift',
+    ControlLeft: 'L Ctrl', ControlRight: 'R Ctrl', AltLeft: 'L Alt', AltRight: 'R Alt',
+    Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'",
+    BracketLeft: '[', BracketRight: ']', Backslash: '\\', Minus: '-', Equal: '=', Backquote: '`'
+  };
+
+  function codeLabel(code) {
+    if (!code) return '\u2014';
+    if (KEY_LABELS[code]) return KEY_LABELS[code];
+    if (code.indexOf('Key') === 0) return code.slice(3);
+    if (code.indexOf('Digit') === 0) return code.slice(5);
+    if (code.indexOf('Numpad') === 0) return 'Num ' + code.slice(6);
+    return code;
+  }
+
+  function bindingConflict(playerIndex, action, code) {
+    for (var i = 0; i < settings.controls.length; i++) {
+      for (var a = 0; a < BIND_ACTIONS.length; a++) {
+        if (i === playerIndex && BIND_ACTIONS[a] === action) continue;
+        if (settings.controls[i][BIND_ACTIONS[a]] === code) {
+          return 'P' + (i + 1) + ' ' + BIND_ACTIONS[a];
+        }
+      }
+    }
+    return null;
+  }
+
+  function captureBinding(e) {
+    e.preventDefault();
+    if (e.code === 'Escape') { bindTarget = null; bindMessage = ''; refreshSettingsUI(); return; }
+    if (RESERVED_KEYS.indexOf(e.code) >= 0) {
+      bindMessage = codeLabel(e.code) + ' is reserved for pause and fullscreen.';
+      refreshSettingsUI();
+      return;
+    }
+    var clash = bindingConflict(bindTarget.player, bindTarget.action, e.code);
+    if (clash) {
+      bindMessage = codeLabel(e.code) + ' is already ' + clash + '.';
+      refreshSettingsUI();
+      return;
+    }
+    settings.controls[bindTarget.player][bindTarget.action] = e.code;
+    bindTarget = null;
+    bindMessage = '';
+    saveJSON(KEY_SETTINGS, settings);
+    refreshHints();
+    refreshSettingsUI();
+  }
+
+  function refreshHints() {
+    var c0 = controlsFor(0), c1 = controlsFor(1);
+    document.getElementById('controls-hint').innerHTML =
+      'P1: ' + codeLabel(c0.left) + ' ' + codeLabel(c0.right) +
+      (c0.pointer ? ' or mouse/touch' : '') + ', ' + codeLabel(c0.fire) + ' fires' +
+      ' &middot; P2: ' + codeLabel(c1.left) + ' ' + codeLabel(c1.right) +
+      (c1.pointer ? ' or mouse/touch' : '') + ', ' + codeLabel(c1.fire) + ' fires' +
+      '<br>Gamepads: stick or d-pad to move, A / trigger to fire, Start to pause' +
+      ' &middot; Esc or P for the menu &middot; F for fullscreen';
+  }
   /* ================= save / resume ======================================= */
   function saveGame() {
     if (!hasGame) return;
@@ -1236,26 +1585,28 @@
       }
     }
     var data = {
-      v: 1,
-      score: score, lives: lives, level: level,
+      v: 3,
+      scale: scale,
+      lives: lives, level: level,
       difficulty: settings.difficulty,
-      paddle: { x: paddle.x, w: paddle.w },
+      players: players.map(function (p) {
+        return {
+          name: p.name, colour: p.colour, x: p.x, w: p.w, score: p.score,
+          surface: p.surface, surfaceTimer: p.surfaceTimer, expandTimer: p.expandTimer
+        };
+      }),
       balls: balls.map(function (b) {
         return {
-          x: b.x, y: b.y, r: b.r, dx: b.dx, dy: b.dy, speed: b.speed,
-          active: b.active, stuck: b.stuck,
-          held: !!b.held, holdOffset: b.holdOffset || 0,
-          holdTimer: b.holdTimer || 0, heldSpeed: b.heldSpeed || 0
+          x: b.x, y: b.y, r: b.r, dx: b.dx, dy: b.dy, speed: b.speed, owner: b.owner || 0,
+          active: b.active, stuck: b.stuck, held: !!b.held, holder: b.holder,
+          holdOffset: b.holdOffset || 0, holdTimer: b.holdTimer || 0, heldSpeed: b.heldSpeed || 0
         };
       }),
       bricks: alive,
       powerups: powerups.map(function (p) {
         return { x: p.x, y: p.y, w: p.w, h: p.h, type: p.type, color: p.color, dy: p.dy };
       }),
-      slowTimer: slowTimer,
-      expandTimer: expandTimer,
-      paddleSurface: paddleSurface,
-      surfaceTimer: surfaceTimer
+      slowTimer: slowTimer
     };
     savedGame = data;
     saveJSON(KEY_SAVE, data);
@@ -1267,35 +1618,47 @@
   }
 
   function restoreSave(s) {
-    score = s.score; lives = s.lives; level = s.level;
-    paddle.w = s.paddle.w;
-    paddle.x = s.paddle.x;
-    paddle.speed = paddleBaseSpeed();
-    clampPaddle();
+    applyScale(s.scale || 1);
+    setupPlayers((s.players && s.players.length) || 1);
+    for (var i = 0; i < players.length; i++) {
+      var sp = s.players[i];
+      if (!sp) continue;
+      players[i].x = sp.x;
+      players[i].w = sp.w;
+      players[i].score = sp.score || 0;
+      players[i].surface = sp.surface || 'flat';
+      players[i].surfaceTimer = sp.surfaceTimer || 0;
+      players[i].expandTimer = sp.expandTimer || 0;
+      players[i].speed = paddleBaseSpeed();
+      clampPaddle(players[i]);
+    }
+
+    lives = s.lives;
+    level = s.level;
 
     balls.length = 0;
-    for (var i = 0; i < s.balls.length; i++) balls.push(Object.assign({}, s.balls[i]));
-    if (!balls.length) resetBall();
+    for (var j = 0; j < s.balls.length; j++) {
+      var nb = Object.assign({}, s.balls[j]);
+      if (nb.owner >= players.length) nb.owner = 0;
+      var holderP = players[nb.holder];
+      if (nb.held && (!holderP || holderP.surface !== 'cannon')) { nb.held = false; nb.active = true; }
+      balls.push(nb);
+    }
+    if (!balls.length) resetBalls();
 
     bricks.length = 0;
-    for (var j = 0; j < s.bricks.length; j++) {
-      var bk = Object.assign({}, s.bricks[j]);
+    for (var k = 0; k < s.bricks.length; k++) {
+      var bk = Object.assign({}, s.bricks[k]);
       bk.alive = true;
       bricks.push(bk);
     }
     if (!bricks.length) buildBricks();
 
     powerups.length = 0;
-    for (var k = 0; k < s.powerups.length; k++) powerups.push(Object.assign({}, s.powerups[k]));
+    for (var m = 0; m < s.powerups.length; m++) powerups.push(Object.assign({}, s.powerups[m]));
 
     particles.length = 0;
     slowTimer = s.slowTimer || 0;
-    expandTimer = s.expandTimer || 0;
-    paddleSurface = s.paddleSurface || 'flat';
-    surfaceTimer = s.surfaceTimer || 0;
-    if (paddleSurface !== 'cannon') {
-      for (var h = 0; h < balls.length; h++) balls[h].held = false;
-    }
     hasGame = true;
     updateHUD();
   }
@@ -1307,8 +1670,8 @@
     return sc > highscores[highscores.length - 1].score;
   }
 
-  function addHighscore(name, sc, lv) {
-    var entry = { name: name, score: sc, level: lv, diff: settings.difficulty, date: Date.now() };
+  function addHighscore(name, sc, lv, np) {
+    var entry = { name: name, score: sc, level: lv, diff: settings.difficulty, players: np, scale: scale, date: Date.now() };
     highscores.push(entry);
     highscores.sort(function (a, b) { return b.score - a.score; });
     highscores = highscores.slice(0, 10);
@@ -1331,17 +1694,18 @@
       var h = highscores[i];
       var row = document.createElement('li');
       if (highlight && h === highlight) row.className = 'me';
+      var tag = 'L' + h.level + (h.players > 1 ? ' 2P' : '');
       row.innerHTML =
         '<span class="rank">' + (i + 1) + '</span>' +
         '<span class="nm"></span>' +
         '<span class="sc">' + h.score + '</span>' +
-        '<span class="lv">L' + h.level + '</span>';
+        '<span class="lv">' + tag + '</span>';
       row.querySelector('.nm').textContent = h.name;
       list.appendChild(row);
     }
   }
 
-  /* ================= menu plumbing ======================================= */
+  /* ================= menu ================================================ */
   function showPanel(which) {
     for (var key in panels) panels[key].classList.toggle('hidden', key !== which);
     menuEl.classList.remove('hidden');
@@ -1353,14 +1717,18 @@
     var sub = document.getElementById('resume-sub');
     btn.disabled = !resumable;
     if (hasGame) {
-      sub.textContent = 'Level ' + level + ' \u00B7 ' + score + ' pts';
+      sub.textContent = 'Level ' + level + ' \u00B7 ' + totalScore() + ' pts' + (players.length > 1 ? ' \u00B7 2P' : '');
     } else if (savedGame) {
-      sub.textContent = 'Saved \u00B7 Level ' + savedGame.level + ' \u00B7 ' + savedGame.score + ' pts';
+      var st = 0;
+      (savedGame.players || []).forEach(function (p) { st += p.score || 0; });
+      sub.textContent = 'Saved \u00B7 Level ' + savedGame.level + ' \u00B7 ' + st + ' pts' +
+        ((savedGame.players || []).length > 1 ? ' \u00B7 2P' : '');
     } else {
       sub.textContent = '';
     }
     document.getElementById('main-sub').textContent =
-      hasGame ? 'Paused' : (savedGame ? 'Game saved' : DIFFICULTIES[settings.difficulty].label + ' difficulty');
+      hasGame ? 'Paused' : (savedGame ? 'Game saved' :
+        DIFFICULTIES[settings.difficulty].label + ' \u00B7 ' + settings.scale.toFixed(1) + 'x area');
   }
 
   function openMenu() {
@@ -1372,13 +1740,10 @@
     showPanel('main');
   }
 
-  function closeMenu() {
-    menuEl.classList.add('hidden');
-  }
+  function closeMenu() { menuEl.classList.add('hidden'); }
 
   function goFullscreenIfWanted() {
-    if (!settings.startFullscreen) return;
-    if (document.fullscreenElement) return;
+    if (!settings.startFullscreen || document.fullscreenElement) return;
     var el = document.documentElement;
     var req = el.requestFullscreen || el.webkitRequestFullscreen;
     if (req) { try { var r = req.call(el); if (r && r.catch) r.catch(function () {}); } catch (e) {} }
@@ -1395,10 +1760,10 @@
     }
   }
 
-  function startNewGame() {
+  function startNewGame(playerCount) {
     goFullscreenIfWanted();
     clearSave();
-    resetGame();
+    resetGame(playerCount);
     closeMenu();
     autosaveTimer = AUTOSAVE_MS;
     startCountdown();
@@ -1417,16 +1782,23 @@
     state = 'gameover';
     hasGame = false;
     clearSave();
-    if (qualifies(score)) {
-      document.getElementById('name-score').textContent = score;
-      document.getElementById('name-detail').textContent = 'Level ' + level + ' \u00B7 ' + DIFFICULTIES[settings.difficulty].label;
+    var winner = leader();
+    var best = winner.score;
+    var detail = 'Level ' + level + ' \u00B7 ' + DIFFICULTIES[settings.difficulty].label +
+                 ' \u00B7 ' + scale.toFixed(1) + 'x' +
+                 (players.length > 1 ? ' \u00B7 ' + winner.name + ' wins (' +
+                   players.map(function (p) { return p.name + ' ' + p.score; }).join(', ') + ')' : '');
+
+    if (qualifies(best)) {
+      document.getElementById('name-score').textContent = best;
+      document.getElementById('name-detail').textContent = detail;
       var input = document.getElementById('name-input');
       input.value = Store.get(KEY_NAME) || '';
       showPanel('name');
       setTimeout(function () { input.focus(); input.select(); }, 60);
     } else {
-      document.getElementById('over-score').textContent = score;
-      document.getElementById('over-detail').textContent = 'Level ' + level + ' \u00B7 ' + DIFFICULTIES[settings.difficulty].label;
+      document.getElementById('over-score').textContent = best;
+      document.getElementById('over-detail').textContent = detail;
       showPanel('gameover');
     }
   }
@@ -1435,83 +1807,173 @@
     var input = document.getElementById('name-input');
     var name = (input.value || '').trim().slice(0, 12) || 'PLAYER';
     Store.set(KEY_NAME, name);
-    var entry = addHighscore(name, score, level);
+    var entry = addHighscore(name, leader().score, level, players.length);
     renderScores(entry);
     showPanel('scores');
   }
 
   /* ================= settings UI ========================================= */
-  function buildDifficultyButtons() {
-    var seg = document.getElementById('seg-difficulty');
+  function buildSeg(id, order, table, get, set) {
+    var seg = document.getElementById(id);
     seg.innerHTML = '';
-    DIFF_ORDER.forEach(function (key) {
+    order.forEach(function (key) {
       var b = document.createElement('button');
-      b.textContent = DIFFICULTIES[key].label;
+      b.textContent = table[key].label;
       b.dataset.key = key;
-      b.addEventListener('click', function () {
-        settings.difficulty = key;
-        saveJSON(KEY_SETTINGS, settings);
-        if (!hasGame) paddle.speed = paddleBaseSpeed();
-        refreshSettingsUI();
-      });
+      b.addEventListener('click', function () { set(key); });
       seg.appendChild(b);
     });
   }
 
-  function buildWindButtons() {
-    var seg = document.getElementById('seg-wind');
-    seg.innerHTML = '';
-    WIND_ORDER.forEach(function (key) {
+  function buildSwatches(id, which) {
+    var box = document.getElementById(id);
+    box.innerHTML = '';
+    PALETTE.forEach(function (col) {
       var b = document.createElement('button');
-      b.textContent = WIND[key].label;
-      b.dataset.key = key;
+      b.style.background = col;
+      b.style.color = col;
+      b.dataset.col = col;
       b.addEventListener('click', function () {
-        settings.wind = key;
+        var other = which === 1 ? 'p2Colour' : 'p1Colour';
+        var mine = which === 1 ? 'p1Colour' : 'p2Colour';
+        if (settings[other] === col) settings[other] = settings[mine];
+        settings[mine] = col;
         saveJSON(KEY_SETTINGS, settings);
-        if (key === 'off') { wind = 0; windTarget = 0; }
-        windTimer = 0;
+        for (var i = 0; i < players.length; i++) {
+          players[i].colour = i === 0 ? settings.p1Colour : settings.p2Colour;
+        }
+        if (players.length > 1) {
+          hudScore1.style.color = settings.p1Colour;
+          hudScore2.style.color = settings.p2Colour;
+        }
+        refreshSettingsUI();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  function buildControlUI(i) {
+    var cfg = controlsFor(i);
+    var seg = document.getElementById('seg-dev-' + i);
+    seg.innerHTML = '';
+
+    [['keys', 'Keyboard'], ['pad', 'Gamepad'], ['pointer', 'Mouse']].forEach(function (opt) {
+      var b = document.createElement('button');
+      b.textContent = opt[1];
+      b.dataset.key = opt[0];
+      b.addEventListener('click', function () {
+        if (opt[0] === 'pointer') {
+          cfg.pointer = !cfg.pointer;
+          if (cfg.pointer) {
+            var other = controlsFor(i === 0 ? 1 : 0);
+            other.pointer = false;
+          }
+          for (var k = 0; k < players.length; k++) players[k].pointerActive = false;
+        } else {
+          cfg.device = opt[0];
+          if (opt[0] === 'pad') padListening = i;
+          else padListening = -1;
+        }
+        bindMessage = '';
+        saveJSON(KEY_SETTINGS, settings);
+        refreshHints();
         refreshSettingsUI();
       });
       seg.appendChild(b);
     });
+
+    var binds = document.getElementById('binds-' + i);
+    binds.innerHTML = '';
+    BIND_ACTIONS.forEach(function (action) {
+      var b = document.createElement('button');
+      var listening = bindTarget && bindTarget.player === i && bindTarget.action === action;
+      b.className = (listening ? 'listening' : '') + (cfg.device === 'pad' ? ' muted' : '');
+      b.innerHTML = '<b>' + action.toUpperCase() + '</b>';
+      b.appendChild(document.createTextNode(listening ? 'press a key' : codeLabel(cfg[action])));
+      b.addEventListener('click', function () {
+        bindTarget = listening ? null : { player: i, action: action };
+        bindMessage = listening ? '' : 'Press a key, or Escape to cancel.';
+        refreshSettingsUI();
+      });
+      binds.appendChild(b);
+    });
+  }
+
+  function refreshControlUI() {
+    for (var i = 0; i < 2; i++) {
+      var cfg = controlsFor(i);
+      buildControlUI(i);
+      var btns = document.getElementById('seg-dev-' + i).querySelectorAll('button');
+      for (var k = 0; k < btns.length; k++) {
+        var key = btns[k].dataset.key;
+        btns[k].classList.toggle('active', key === 'pointer' ? cfg.pointer : cfg.device === key);
+      }
+    }
+
+    var list = rawPads();
+    var names = [];
+    for (var g = 0; g < list.length; g++) {
+      if (list[g]) names.push('Pad ' + list[g].index + ': ' + String(list[g].id).slice(0, 28));
+    }
+    var info = document.getElementById('pad-info');
+    if (bindMessage) {
+      info.textContent = bindMessage;
+    } else if (padListening >= 0) {
+      info.textContent = 'Press any button on the controller for Player ' + (padListening + 1) + '.';
+    } else if (!names.length) {
+      info.textContent = 'No gamepads detected. Pair over Bluetooth, then press a button on the pad so the browser can see it.';
+    } else {
+      info.textContent = names.join(' \u00B7 ') +
+        ' \u00B7 P1 uses pad ' + controlsFor(0).pad + ', P2 uses pad ' + controlsFor(1).pad +
+        '. Keys keep working alongside a pad.';
+    }
   }
 
   function refreshSettingsUI() {
-    var seg = document.getElementById('seg-difficulty');
-    var btns = seg.querySelectorAll('button');
-    for (var i = 0; i < btns.length; i++) {
-      btns[i].classList.toggle('active', btns[i].dataset.key === settings.difficulty);
+    var dbtns = document.getElementById('seg-difficulty').querySelectorAll('button');
+    for (var i = 0; i < dbtns.length; i++) {
+      dbtns[i].classList.toggle('active', dbtns[i].dataset.key === settings.difficulty);
     }
     var wbtns = document.getElementById('seg-wind').querySelectorAll('button');
     for (var j = 0; j < wbtns.length; j++) {
       wbtns[j].classList.toggle('active', wbtns[j].dataset.key === settings.wind);
     }
+    [['swatch-1', settings.p1Colour, settings.p2Colour], ['swatch-2', settings.p2Colour, settings.p1Colour]]
+      .forEach(function (cfg) {
+        var btns = document.getElementById(cfg[0]).querySelectorAll('button');
+        for (var k = 0; k < btns.length; k++) {
+          btns[k].classList.toggle('active', btns[k].dataset.col === cfg[1]);
+          btns[k].classList.toggle('taken', btns[k].dataset.col === cfg[2]);
+        }
+      });
+
     var d = diff();
     document.getElementById('difficulty-info').textContent =
-      'Ball speed ' + d.ball.toFixed(1) + ' (+' + d.step.toFixed(2) + ' per level) \u00B7 Paddle speed ' + d.paddle;
+      'Ball speed ' + d.ball.toFixed(1) + ' (+' + d.step.toFixed(2) + ' per level) \u00B7 Paddle speed ' + d.paddle +
+      ' \u00B7 both multiplied by the area scale';
+    document.getElementById('scale-slider').value = settings.scale;
+    document.getElementById('scale-value').textContent = settings.scale.toFixed(1) + 'x';
+    document.getElementById('scale-info').textContent = layoutPreview(settings.scale);
     document.getElementById('wind-info').textContent = settings.wind === 'off'
       ? 'Still air. The ball travels in straight lines.'
-      : 'Gusts bend the ball and drag falling powerups sideways. Speed is never changed, only heading. Takes effect immediately.';
+      : 'Gusts bend the ball and drag falling powerups sideways. Speed is never changed, only heading.';
     document.getElementById('toggle-fullscreen').classList.toggle('on', settings.startFullscreen);
+    refreshControlUI();
   }
 
   /* ================= events ============================================== */
   document.getElementById('btn-resume').addEventListener('click', doResume);
-  document.getElementById('btn-new').addEventListener('click', startNewGame);
-  document.getElementById('btn-settings').addEventListener('click', function () {
-    refreshSettingsUI();
-    showPanel('settings');
-  });
-  document.getElementById('btn-scores').addEventListener('click', function () {
-    renderScores(null);
-    showPanel('scores');
-  });
+  document.getElementById('btn-new').addEventListener('click', function () { showPanel('mode'); });
+  document.getElementById('btn-mode-1').addEventListener('click', function () { startNewGame(1); });
+  document.getElementById('btn-mode-2').addEventListener('click', function () { startNewGame(2); });
+  document.getElementById('btn-mode-back').addEventListener('click', function () { refreshMain(); showPanel('main'); });
+  document.getElementById('btn-settings').addEventListener('click', function () { refreshSettingsUI(); showPanel('settings'); });
+  document.getElementById('btn-scores').addEventListener('click', function () { renderScores(null); showPanel('scores'); });
   document.getElementById('btn-settings-back').addEventListener('click', function () {
+    bindTarget = null; padListening = -1; bindMessage = '';
     refreshMain(); showPanel('main');
   });
-  document.getElementById('btn-scores-back').addEventListener('click', function () {
-    refreshMain(); showPanel('main');
-  });
+  document.getElementById('btn-scores-back').addEventListener('click', function () { refreshMain(); showPanel('main'); });
   document.getElementById('btn-clear-scores').addEventListener('click', function () {
     highscores = [];
     saveJSON(KEY_SCORES, highscores);
@@ -1522,41 +1984,53 @@
     saveJSON(KEY_SETTINGS, settings);
     refreshSettingsUI();
   });
+  document.getElementById('scale-slider').addEventListener('input', function (e) {
+    settings.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(e.target.value) || 1));
+    saveJSON(KEY_SETTINGS, settings);
+    document.getElementById('scale-value').textContent = settings.scale.toFixed(1) + 'x';
+    document.getElementById('scale-info').textContent = layoutPreview(settings.scale);
+  });
   document.getElementById('btn-name-save').addEventListener('click', submitName);
   document.getElementById('name-input').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); submitName(); }
     e.stopPropagation();
   });
-  document.getElementById('btn-again').addEventListener('click', startNewGame);
-  document.getElementById('btn-over-menu').addEventListener('click', function () {
-    refreshMain(); showPanel('main');
-  });
+  document.getElementById('btn-again').addEventListener('click', function () { showPanel('mode'); });
+  document.getElementById('btn-over-menu').addEventListener('click', function () { refreshMain(); showPanel('main'); });
 
   document.addEventListener('keydown', function (e) {
     if (e.target && e.target.tagName === 'INPUT') return;
-    if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
-    if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+    if (bindTarget) { captureBinding(e); return; }
+
+    keysDown[e.code] = true;
+    if (e.code === 'Space' || e.code.indexOf('Arrow') === 0) e.preventDefault();
+
     if (e.code === 'KeyF') { e.preventDefault(); toggleFullscreen(); }
+
+    if (state === 'playing') {
+      for (var i = 0; i < players.length; i++) {
+        if (e.code === controlsFor(i).fire) { e.preventDefault(); releaseHeld(i); }
+      }
+    }
+
     if (e.code === 'Escape' || e.code === 'KeyP') {
       e.preventDefault();
       if (state === 'playing' || state === 'countdown' || state === 'levelclear') openMenu();
-      else if (!panels.settings.classList.contains('hidden') || !panels.scores.classList.contains('hidden')) {
-        refreshMain(); showPanel('main');
-      } else if (state === 'menu' && !panels.main.classList.contains('hidden') && hasGame) doResume();
+      else if (!panels.settings.classList.contains('hidden') || !panels.scores.classList.contains('hidden') ||
+               !panels.mode.classList.contains('hidden')) { refreshMain(); showPanel('main'); }
+      else if (state === 'menu' && !panels.main.classList.contains('hidden') && hasGame) doResume();
     }
-    if (e.code === 'Space') {
-      e.preventDefault();
-      if (state === 'playing') { releaseHeldBalls(); return; }
-      if (state === 'menu' && !panels.main.classList.contains('hidden')) {
-        if (hasGame || savedGame) doResume(); else startNewGame();
-      }
+
+    if (e.code === 'Space' && state === 'menu' && !panels.main.classList.contains('hidden')) {
+      if (hasGame || savedGame) doResume(); else showPanel('mode');
     }
   });
 
   document.addEventListener('keyup', function (e) {
-    if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
-    if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+    delete keysDown[e.code];
   });
+
+  window.addEventListener('blur', function () { keysDown = {}; });
 
   function canvasX(clientX) {
     var rect = canvas.getBoundingClientRect();
@@ -1564,42 +2038,59 @@
   }
 
   canvas.addEventListener('click', function () {
-    if (state === 'playing') releaseHeldBalls();
+    var p = pointerPlayer();
+    if (state === 'playing' && p) releaseHeld(p.index);
   });
 
   canvas.addEventListener('mousemove', function (e) {
     if (state !== 'playing' && state !== 'countdown') return;
+    var p = pointerPlayer();
+    if (!p) return;
     touchActive = false;
-    paddle.x = canvasX(e.clientX) - paddle.w / 2;
-    clampPaddle();
+    p.pointerActive = true;
+    p.x = canvasX(e.clientX) - p.w / 2;
+    clampPaddle(p);
   });
 
   canvas.addEventListener('touchstart', function (e) {
     if (state !== 'playing' && state !== 'countdown') return;
+    var p = pointerPlayer();
+    if (!p) return;
     e.preventDefault();
-    if (e.touches.length > 1) { releaseHeldBalls(); return; }
+    if (e.touches.length > 1) { releaseHeld(p.index); return; }
     if (e.touches.length > 0) {
       touchActive = true;
+      p.pointerActive = true;
       tapStartX = canvasX(e.touches[0].clientX);
       tapStartT = performance.now();
-      touchPaddleOffset = tapStartX - (paddle.x + paddle.w / 2);
+      touchPaddleOffset = tapStartX - (p.x + p.w / 2);
     }
   }, { passive: false });
 
   canvas.addEventListener('touchmove', function (e) {
-    if (!touchActive || e.touches.length === 0) return;
+    var p = pointerPlayer();
+    if (!touchActive || e.touches.length === 0 || !p) return;
     e.preventDefault();
     var tx = canvasX(e.touches[0].clientX);
     if (Math.abs(tx - tapStartX) > 12) tapStartT = 0;
-    paddle.x = tx - touchPaddleOffset - paddle.w / 2;
-    clampPaddle();
+    p.pointerActive = true;
+    p.x = tx - touchPaddleOffset - p.w / 2;
+    clampPaddle(p);
   }, { passive: false });
 
   canvas.addEventListener('touchend', function (e) {
-    if (state === 'playing' && tapStartT && performance.now() - tapStartT < 300) releaseHeldBalls();
+    var p = pointerPlayer();
+    if (state === 'playing' && p && tapStartT && performance.now() - tapStartT < 300) releaseHeld(p.index);
     if (e.touches.length === 0) touchActive = false;
   });
   canvas.addEventListener('touchcancel', function () { touchActive = false; });
+
+  window.addEventListener('gamepadconnected', function () {
+    if (!panels.settings.classList.contains('hidden')) refreshSettingsUI();
+  });
+  window.addEventListener('gamepaddisconnected', function () {
+    if (!panels.settings.classList.contains('hidden')) refreshSettingsUI();
+  });
 
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
@@ -1611,13 +2102,27 @@
   window.addEventListener('beforeunload', function () { saveGame(); });
 
   /* ================= boot ================================================ */
-  buildDifficultyButtons();
-  buildWindButtons();
-  initWindParticles();
+  buildSeg('seg-difficulty', DIFF_ORDER, DIFFICULTIES, null, function (key) {
+    settings.difficulty = key;
+    saveJSON(KEY_SETTINGS, settings);
+    refreshSettingsUI();
+  });
+  buildSeg('seg-wind', WIND_ORDER, WIND, null, function (key) {
+    settings.wind = key;
+    saveJSON(KEY_SETTINGS, settings);
+    if (key === 'off') { wind = 0; windTarget = 0; }
+    windTimer = 0;
+    refreshSettingsUI();
+  });
+  buildSwatches('swatch-1', 1);
+  buildSwatches('swatch-2', 2);
+
+  applyScale(savedGame ? (savedGame.scale || settings.scale) : settings.scale);
+  setupPlayers(savedGame && savedGame.players ? savedGame.players.length : 1);
   refreshSettingsUI();
-  paddle.speed = paddleBaseSpeed();
+  refreshHints();
   buildBricks();
-  resetBall();
+  resetBalls();
   updateHUD();
   refreshMain();
   showPanel('main');
