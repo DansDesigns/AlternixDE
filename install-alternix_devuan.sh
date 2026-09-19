@@ -1157,7 +1157,21 @@ echo "[✓] Rounded-Corers Installed..."
 
 
 # ──────────────────────────────────────────────── 
-# 15. install Ponder
+# 15. install Merlin
+# ────────────────────────────────────────────────
+echo " "
+
+echo "• Installing Merlin Browser..."
+cd ~
+git clone https://github.com/DansDesigns/merlin-browser
+cd merlin-browser
+chmod +x install.sh
+./install.sh
+echo "[✓] Merlin Browser Installed..."
+
+
+# ──────────────────────────────────────────────── 
+# 16. install Ponder
 # ────────────────────────────────────────────────
 echo " "
 
@@ -1171,7 +1185,7 @@ echo "[✓] Ponder Installed..."
 
 
 # ────────────────────────────────────────────────
-# 16. auto-cpufreq
+# 17. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing auto-cpufreq..."
