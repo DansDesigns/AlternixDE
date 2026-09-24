@@ -36,7 +36,7 @@ CTRL + SPACE: open Ulauncher Application, file & search bar
 
 # Install
 
-Recomended to use NexOS Linux ([here](https://github.com/DansDesigns/NexOS))
+Recomended to use AlternixOS ([here](https://github.com/DansDesigns/AlternixOS))
 or manually:
 
 start with a fresh install of Debain 13 or Devuan (or any distro based on these) with NO desktop,
