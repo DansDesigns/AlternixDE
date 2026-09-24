@@ -36,10 +36,10 @@ CTRL + SPACE: open Ulauncher Application, file & search bar
 
 # Install
 
-Recomended to use AlternixOS ([here](https://github.com/DansDesigns/AlternixOS))
-or manually:
+AlternixDE is available as the default Desktop for AlternixOS ([here](https://github.com/DansDesigns/AlternixOS))
+or you can install it manually:
 
-start with a fresh install of Debain 13 or Devuan (or any distro based on these) with NO desktop,
+start with a fresh install of Devuan Excalibur with NO desktop,
 
 install git:
 ```
