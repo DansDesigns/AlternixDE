@@ -14,10 +14,6 @@ echo " Setup can take a while, be sure to have a cuppa & some good music!"
 echo ""
 echo "--------------------------------------------------------------------"
 echo ""
-echo "         NOTE: You will be asked for input several times."
-echo ""
-echo "--------------------------------------------------------------------"
-echo ""
 echo ""
 
 
@@ -98,19 +94,9 @@ echo "[System] Removing nala Install Components.."
 sudo rm -f /etc/apt/sources.list.d/volian.list
 sudo rm -f /etc/apt/trusted.gpg.d/volian.gpg
 
-#echo "[System] Running nala server fetch.."
-#echo " "
-#echo "----------------------------------------"
-#echo " PLEASE ENTER 1, 2, 3, 4, WHEN PROMPTED"
-#echo "----------------------------------------"
-#echo " "
-# nala fetch is nala-specific; skip if using plain apt
-#if command -v nala >/dev/null 2>&1; then
-#    sudo nala fetch
-#fi
 
 echo "[System] Running nala update.."
-sudo nala update
+sudo apt  update
 
 echo "[System] Installing XLibre.."
 sudo nala install -y ca-certificates curl
