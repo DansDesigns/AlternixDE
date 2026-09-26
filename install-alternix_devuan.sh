@@ -96,7 +96,7 @@ sudo rm -f /etc/apt/trusted.gpg.d/volian.gpg
 
 
 echo "[System] Running nala update.."
-sudo apt  update
+sudo apt update
 
 echo "[System] Installing XLibre.."
 sudo nala install -y ca-certificates curl
