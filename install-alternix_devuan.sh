@@ -120,7 +120,7 @@ XLIBRESRC
 
 sudo nala update
 sudo nala install xlibre -y
-sudo dpkg --add-architecture i386
+#sudo dpkg --add-architecture i386
 
 echo "[System] Installing Required Components.."
 sudo nala install -y \
