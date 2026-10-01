@@ -99,7 +99,7 @@ echo "[System] Running nala update.."
 sudo apt update
 
 echo "[System] Installing XLibre.."
-sudo nala install -y ca-certificates curl
+sudo apt install -y ca-certificates curl
 
 sudo install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://xlibre-deb.github.io/key.asc | sudo tee /etc/apt/keyrings/xlibre-deb.asc
@@ -118,8 +118,8 @@ Architectures: ${ARCH}
 Signed-By: /etc/apt/keyrings/xlibre-deb.asc
 XLIBRESRC
 
-sudo nala update
-sudo nala install xlibre -y
+sudo apt update
+sudo apt install xlibre -y
 #sudo dpkg --add-architecture i386
 
 echo "[System] Installing Required Components.."
@@ -148,30 +148,30 @@ echo ""
 # ────────────────────────────────────────────────
 # Mobile Telephony Components (optional)
 # ────────────────────────────────────────────────
-echo ""
-echo "-------------------------------------------"
-echo "   Install Mobile Telephony Components?"
-echo "-------------------------------------------"
-echo " plasma-dialer & spacebar (KDE phone apps)"
-echo ""
-echo "  1) Install telephony components"
-echo "  2) Skip"
-echo ""
-
-while true; do
-    read -rp "Enter choice [1/2]: " TELEPHONY_CHOICE
-    if [[ "$TELEPHONY_CHOICE" == "1" ]]; then
-        echo "[System] Installing Mobile Telephony Components.."
-        sudo nala install -y --no-install-recommends plasma-dialer spacebar
-        echo "• Telephony components installed."
-        break
-    elif [[ "$TELEPHONY_CHOICE" == "2" ]]; then
-        echo "• Skipping telephony components."
-        break
-    else
-        echo "Invalid choice. Please enter 1 or 2."
-    fi
-done
+#echo ""
+#echo "-------------------------------------------"
+#echo "   Install Mobile Telephony Components?"
+#echo "-------------------------------------------"
+#echo " plasma-dialer & spacebar (KDE phone apps)"
+#echo ""
+#echo "  1) Install telephony components"
+#echo "  2) Skip"
+#echo ""
+#
+#while true; do
+#    read -rp "Enter choice [1/2]: " TELEPHONY_CHOICE
+#    if [[ "$TELEPHONY_CHOICE" == "1" ]]; then
+#        echo "[System] Installing Mobile Telephony Components.."
+#        sudo nala install -y --no-install-recommends plasma-dialer spacebar
+#        echo "• Telephony components installed."
+#        break
+#    elif [[ "$TELEPHONY_CHOICE" == "2" ]]; then
+#        echo "• Skipping telephony components."
+#        break
+#    else
+#        echo "Invalid choice. Please enter 1 or 2."
+#    fi
+#done
 
 
 # ────────────────────────────────────────────────
