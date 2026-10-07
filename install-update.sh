@@ -37,6 +37,13 @@ sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse ud
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
+echo "applying lockscreen fixes"
+sudo service osm-lockscreen stop
+sudo update-rc.d -f osm-lockscreen remove
+sudo rm /etc/init.d/osm-lockscreen
+sudo pkill -u lockscreen
+~/.qtile_venv/bin/pip install dbus-fast
+
 
 echo ""
 #===========================================================
