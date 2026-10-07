@@ -333,7 +333,10 @@ fi
 source "$HOME/.qtile_venv/bin/activate"
 
 echo "[3/10] Installing Python pip dependencies..."
-pip3 install qtile qtile-extras mypy --break-system-packages
+# dbus-fast is what lets qtile hear elogind's sleep/resume signals.
+# Without it @hook.subscribe.resume in config.py never fires, so the
+# screen would not lock after waking from a lid-close suspend.
+pip3 install qtile qtile-extras mypy dbus-fast --break-system-packages
 
 # Symlink qtile binary to where udev rules expect it
 sudo mkdir -p /usr/lib/udev
@@ -878,22 +881,29 @@ sudo service nmbd restart || true
 # 8. OSM-Lockscreen Security Layer
 # ────────────────────────────────────────────────
 echo " "
-echo "[X] Setting up secure lockscreen supervisor..."
+echo "[X] Setting up lockscreen supervisor..."
 
-# 1. Create dedicated lockscreen user (no login, no shell)
-if ! id "lockscreen" >/dev/null 2>&1; then
-    sudo adduser --disabled-password --gecos "" --shell /usr/sbin/nologin lockscreen
-fi
+# The lockscreen runs inside the user's own X session, started by
+# osm-lockd from Qtile (login and resume) and from osm-power (Lock and
+# Sleep). It used to also run as a system service under a separate
+# "lockscreen" user, but that user had no access to the X display and
+# `service` strips DISPLAY, so osm-lockscreen crashed on start and
+# osm-lockd relaunched it every 0.05 s, forever. The service is gone.
 
-# 2. Install supervisor daemon (osm-lockd)
+# Install supervisor daemon (osm-lockd)
 sudo tee /usr/local/bin/osm-lockd >/dev/null <<'LOCKD'
 #!/bin/bash
+
+# Only one lockscreen at a time. Waking and the Lock button can both
+# start this, and a second copy would stack another lockscreen on top.
+exec 9>"/tmp/osm-lockd-$(id -u).lock"
+flock -n 9 || exit 0
 
 FLAG="/tmp/osm_unlock_success"
 
 while true; do
     rm -f "$FLAG"
-    /usr/local/bin/osm-lockscreen
+    /usr/local/bin/osm-lockscreen 9>&-
 
     if [ -f "$FLAG" ]; then
         rm -f "$FLAG"
@@ -908,64 +918,7 @@ done
 LOCKD
 sudo chmod +x /usr/local/bin/osm-lockd
 
-# 3. Create a SysVinit init script for osm-lockscreen
-# ── This replaces the systemd .service unit ───────────────────────────────
-sudo tee /etc/init.d/osm-lockscreen >/dev/null <<'INITSCRIPT'
-#!/bin/sh
-### BEGIN INIT INFO
-# Provides:          osm-lockscreen
-# Required-Start:    $remote_fs $syslog $local_fs
-# Required-Stop:     $remote_fs $syslog
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: OSM-Phone Lockscreen Supervisor
-# Description:       Runs osm-lockd as the lockscreen user, restarting on crash.
-### END INIT INFO
-
-NAME="osm-lockscreen"
-DAEMON="/usr/local/bin/osm-lockd"
-DAEMON_USER="lockscreen"
-PIDFILE="/var/run/$NAME.pid"
-
-. /lib/lsb/init-functions
-
-case "$1" in
-  start)
-    log_daemon_msg "Starting $NAME"
-    start-stop-daemon --start --quiet --background \
-        --make-pidfile --pidfile "$PIDFILE" \
-        --chuid "$DAEMON_USER" \
-        --exec "$DAEMON"
-    log_end_msg $?
-    ;;
-  stop)
-    log_daemon_msg "Stopping $NAME"
-    start-stop-daemon --stop --quiet --pidfile "$PIDFILE"
-    rm -f "$PIDFILE"
-    log_end_msg $?
-    ;;
-  restart|force-reload)
-    $0 stop
-    sleep 1
-    $0 start
-    ;;
-  status)
-    status_of_proc -p "$PIDFILE" "$DAEMON" "$NAME" && exit 0 || exit $?
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart|force-reload|status}"
-    exit 1
-    ;;
-esac
-INITSCRIPT
-
-sudo chmod +x /etc/init.d/osm-lockscreen
-
-# Enable at runlevels 2-5, disable at 0/1/6
-sudo update-rc.d osm-lockscreen defaults
-sudo service osm-lockscreen start || true
-
-echo "[✓] Lockscreen security layer installed."
+echo "[✓] Lockscreen supervisor installed."
 
 
 # ────────────────────────────────────────────────

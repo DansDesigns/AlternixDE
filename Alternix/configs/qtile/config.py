@@ -55,14 +55,13 @@ bg = '28282899'
 def _osm_lockclean():
     subprocess.call(["/usr/local/bin/osm-launcher-lockclean"])
 
-# Lock on DPMS wake (screen turning back on)
-@hook.subscribe.screen_change
-def lock_on_screen_wake(event):
-    subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
-
+# Lock again after waking from sleep. Needs dbus-fast in the qtile venv
+# to hear elogind's resume signal. osm-lockd only allows one copy, so
+# it is safe if the screen was already locked before sleeping.
+# No screen_change hook: that fires on every auto-rotate too.
 @hook.subscribe.resume
 def lock_on_resume():
-    subprocess.Popen(["sudo", "service", "osm-lockscreen", "restart"])
+    subprocess.Popen(["osm-lockd"])
 
 @hook.subscribe.startup
 def autostart():
@@ -428,3 +427,34 @@ wl_xcursor_theme = None
 wl_xcursor_size = 24
 
 wmname = "LG3D"
+
+
+# ── STALL WATCH — temporary diagnostic, remove once the cause is found ──
+# If qtile's event loop stops for more than 3 seconds, every thread's
+# stack is written to ~/.local/share/qtile/stall.log, showing exactly
+# which line qtile is stuck on. Repeats every 5 seconds while stuck.
+import faulthandler
+_stall = {"beat": time.monotonic()}
+
+def _stall_beat():
+    _stall["beat"] = time.monotonic()
+    qtile.call_later(0.5, _stall_beat)
+
+def _stall_watch():
+    path = os.path.expanduser("~/.local/share/qtile/stall.log")
+    last_dump = 0.0
+    while True:
+        time.sleep(1)
+        now = time.monotonic()
+        lag = now - _stall["beat"]
+        if lag > 3 and now - last_dump > 5:
+            last_dump = now
+            with open(path, "a") as f:
+                f.write("\n=== qtile stuck for %.1fs at %s ===\n" % (lag, datetime.now()))
+                f.flush()
+                faulthandler.dump_traceback(file=f, all_threads=True)
+
+@hook.subscribe.startup_complete
+def _stall_start():
+    _stall_beat()
+    threading.Thread(target=_stall_watch, daemon=True).start()

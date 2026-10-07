@@ -695,8 +695,14 @@ private slots:
     }
 
     void doSleep() {
-
-        QProcess::startDetached("osm-sudo", QStringList() << "pm-suspend");
+        // Lock before sleeping. pm-suspend goes around elogind, so qtile's
+        // resume hook never hears about this sleep and cannot lock on wake.
+        // Same steps as osm-sudo, with the lock in between: authenticate
+        // first, because the lockscreen is fullscreen and on top and would
+        // hide osm-lock's prompt; then lock, give it a moment to appear,
+        // and suspend.
+        QProcess::startDetached("sh", QStringList() << "-c"
+            << "osm-lock --auth || exit 1; osm-lockd & sleep 1; sudo -S pm-suspend");
         close();
     }
 
