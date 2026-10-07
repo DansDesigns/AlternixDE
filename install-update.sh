@@ -37,12 +37,6 @@ sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse ud
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
-echo "applying lockscreen fixes"
-sudo service osm-lockscreen stop
-sudo update-rc.d -f osm-lockscreen remove
-sudo rm /etc/init.d/osm-lockscreen
-sudo pkill -u lockscreen
-~/.qtile_venv/bin/pip install dbus-fast
 
 
 echo ""
@@ -153,6 +147,54 @@ cd "$ALT_ROOT/Alternix/apps"
 echo "• Updating osm-power..."
 g++ -fPIC osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+echo "• Removing old lockscreen service..."
+# The old service ran the lockscreen as a separate user with no access
+# to the display, so it crashed and restarted endlessly. The lockscreen
+# now runs in the user's own session instead.
+if [ -f /etc/init.d/osm-lockscreen ]; then
+    sudo service osm-lockscreen stop
+    sudo update-rc.d -f osm-lockscreen remove
+    sudo rm -f /etc/init.d/osm-lockscreen
+fi
+if id lockscreen >/dev/null 2>&1; then
+    sudo pkill -u lockscreen
+fi
+
+echo "• Updating osm-lockd..."
+sudo tee /usr/local/bin/osm-lockd >/dev/null <<'LOCKD'
+#!/bin/bash
+
+# Only one lockscreen at a time. Waking and the Lock button can both
+# start this, and a second copy would stack another lockscreen on top.
+exec 9>"/tmp/osm-lockd-$(id -u).lock"
+flock -n 9 || exit 0
+
+FLAG="/tmp/osm_unlock_success"
+
+while true; do
+    rm -f "$FLAG"
+    /usr/local/bin/osm-lockscreen 9>&-
+
+    if [ -f "$FLAG" ]; then
+        rm -f "$FLAG"
+        # signal the user session (osm-status plays the boot sound once per boot)
+        touch /tmp/osm_boot_unlocked 2>/dev/null
+        chmod 666 /tmp/osm_boot_unlocked 2>/dev/null
+        exit 0
+    fi
+
+    sleep 0.05
+done
+LOCKD
+sudo chmod +x /usr/local/bin/osm-lockd
+
+echo "• Installing dbus-fast for Qtile..."
+"$HOME/.qtile_venv/bin/pip" install dbus-fast
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 osm-powerd.cpp -o osm-powerd
