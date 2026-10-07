@@ -16,6 +16,7 @@
 #include <QFontMetrics>
 #include <QCloseEvent>
 #include <QtMath>
+#include <QWindow>
 
 // Utility
 static QString readFirstLine(const QString &path) {
@@ -131,6 +132,23 @@ public:
         slideBackTimer = new QTimer(this);
         slideBackTimer->setInterval(16); // ~60fps
         connect(slideBackTimer, &QTimer::timeout, this, &LockScreenWidget::onSlideBackStep);
+
+        // KEYBOARD GRAB — DO NOT REMOVE
+        // Qtile's shortcuts (Win+Enter for a terminal and the rest) are
+        // grabbed on the root window, so they fire whichever window has
+        // focus. Swallowing keys in keyPressEvent cannot stop them. An
+        // active keyboard grab does: while this window holds it, every
+        // key comes here and Qtile's shortcuts cannot trigger. It also
+        // stops typing reaching the window underneath. The grab only
+        // works once the window is on screen, and fails while another
+        // program holds one, so keep retrying until it succeeds.
+        grabTimer = new QTimer(this);
+        grabTimer->setInterval(200);
+        connect(grabTimer, &QTimer::timeout, this, [this]() {
+            if (windowHandle() && windowHandle()->setKeyboardGrabEnabled(true))
+                grabTimer->stop();
+        });
+        grabTimer->start();
 
         adjustScaling();
     }
@@ -284,6 +302,7 @@ private:
     bool slidingBack;
     QPoint lastPos;
     QTimer *slideBackTimer;
+    QTimer *grabTimer;
 
     qreal scaleFactor = 1.0; // devicePixelRatio()
 
@@ -431,6 +450,12 @@ private:
     // SLIDER UNLOCK LOGIC
     // ──────────────────────────────────────
     void triggerUnlock() {
+        // Let go of the keyboard while osm-lock asks for the pattern or
+        // PIN, so it can take its own grab and receive typed PINs.
+        grabTimer->stop();
+        if (windowHandle())
+            windowHandle()->setKeyboardGrabEnabled(false);
+
         QProcess proc;
         proc.start("osm-lock", QStringList() << "--auth");
         proc.waitForFinished(-1);
@@ -445,6 +470,7 @@ private:
         } else {
             sliderOffset = 0;
             update();
+            grabTimer->start();   // locked again: take the keyboard back
         }
     }
 
