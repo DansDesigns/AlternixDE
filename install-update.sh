@@ -123,9 +123,31 @@ sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
 cd "$ALT_ROOT/Alternix/apps"
 
+echo "• Building osm-clock..."
+g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
+chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
+
 echo "• Updating osm-power..."
 g++ -fPIC osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
+
+echo "• Building osm-files..."
+g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-files && sudo mv osm-files /usr/local/bin/
+
+echo "• Building osm-viewer..."
+g++ -fPIC apps/osm-viewer.cpp -o osm-viewer $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core poppler-qt5) -Wno-deprecated-declarations
+chmod +x osm-viewer && sudo mv osm-viewer /usr/local/bin/
+
+echo "• Building osm-draw..."
+g++ -fPIC apps/osm-draw.cpp -o osm-draw -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
+chmod +x osm-draw && sudo mv osm-draw /usr/local/bin/
+
+echo "• Building osm-paper..."
+g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
+
+
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
