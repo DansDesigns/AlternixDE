@@ -125,7 +125,7 @@ sudo apt install xlibre -y
 echo "[System] Installing Required Components.."
 sudo nala install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
-    fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev \
+    fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
     python3-venv qtile python3-cffi python3-xcffib picom redshift onboard fake-hwclock \
     samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager \

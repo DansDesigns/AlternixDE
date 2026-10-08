@@ -34,7 +34,7 @@ sudo update-grub
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
-sudo nala install fonts-urw-base35
+sudo nala install fonts-urw-base35 fonts-freefont-ttf
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
