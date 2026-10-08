@@ -131,7 +131,7 @@ public:
         resize(w, h);
         move(avail.center() - rect().center());
 
-        setWindowTitle("Settings");
+        setWindowTitle("⚙️Settings");
 
         QApplication::setFont(QFont("Noto Color Emoji"));
         setStyleSheet("background:#282828;");

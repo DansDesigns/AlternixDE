@@ -34,7 +34,7 @@ public:
     explicit WallpaperBrowser(QWidget *parent = nullptr)
         : QWidget(parent)
     {
-        setWindowTitle("Wallpaper Selector");
+        setWindowTitle("🌄Wallpapers");
 
         // Slightly transparent background + global font (18pt)
         setStyleSheet("background-color: rgba(40,40,40,200); color:white; font-size:18pt;");

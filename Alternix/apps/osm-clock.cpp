@@ -244,7 +244,7 @@ public:
         resize(w, h);
         move(avail.center() - rect().center());
 
-        setWindowTitle("Clock");
+        setWindowTitle("🕑Clock");
         QApplication::setFont(QFont("Noto Color Emoji"));
         setStyleSheet("background:#282828;");
 

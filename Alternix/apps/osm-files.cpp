@@ -3553,7 +3553,7 @@ int main(int argc, char *argv[]) {
         start = QDir::homePath();
 
     FileBrowser fb(start);
-    fb.setWindowTitle("Alternix Files");
+    fb.setWindowTitle("📁Files");
 
     QScreen *s = QGuiApplication::primaryScreen();
     if (s) {
