@@ -734,6 +734,18 @@ Icon=htop
 Categories=System;
 EOF
 
+echo "• Creating fetch.desktop launcher..."
+sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=About
+Comment=System monitor
+Exec=alacritty -e fetch
+Terminal=false
+Icon=fetch
+Categories=System;
+EOF
+
 echo "• Creating bauh Shortcut..."
 sudo tee /usr/share/applications/bauh.desktop >/dev/null <<EOF
 [Desktop Entry]
@@ -1109,22 +1121,9 @@ chmod +x install.sh
 echo "[✓] Merlin Browser Installed..."
 
 
-# ──────────────────────────────────────────────── 
-# 16. install Ponder
-# ────────────────────────────────────────────────
-echo " "
-
-echo "• Installing Ponder..."
-cd ~
-git clone https://github.com/DansDesigns/Ponder
-cd Ponder
-chmod +x install.sh
-./install.sh
-echo "[✓] Ponder Installed..."
-
 
 # ────────────────────────────────────────────────
-# 17. auto-cpufreq
+# 16. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
 echo "- Installing auto-cpufreq..."

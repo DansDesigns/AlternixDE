@@ -45,6 +45,19 @@ echo ""
 #===========================================================
 echo ""
 # echo "No Apps need updating..."
+
+echo "• Creating fetch.desktop launcher..."
+sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=About
+Comment=System monitor
+Exec=alacritty -e fetch
+Terminal=false
+Icon=fetch
+Categories=System;
+EOF
+
 echo ""
 
 # ────────────────────────────────────────────────
