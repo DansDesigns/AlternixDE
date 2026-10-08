@@ -145,33 +145,7 @@ echo "NOTE: snapd is NOT available on Devuan (it depends on systemd)."
 echo "If snap packages are needed, use flatpak equivalents instead."
 echo ""
 echo ""
-# ────────────────────────────────────────────────
-# Mobile Telephony Components (optional)
-# ────────────────────────────────────────────────
-#echo ""
-#echo "-------------------------------------------"
-#echo "   Install Mobile Telephony Components?"
-#echo "-------------------------------------------"
-#echo " plasma-dialer & spacebar (KDE phone apps)"
-#echo ""
-#echo "  1) Install telephony components"
-#echo "  2) Skip"
-#echo ""
-#
-#while true; do
-#    read -rp "Enter choice [1/2]: " TELEPHONY_CHOICE
-#    if [[ "$TELEPHONY_CHOICE" == "1" ]]; then
-#        echo "[System] Installing Mobile Telephony Components.."
-#        sudo nala install -y --no-install-recommends plasma-dialer spacebar
-#        echo "• Telephony components installed."
-#        break
-#    elif [[ "$TELEPHONY_CHOICE" == "2" ]]; then
-#        echo "• Skipping telephony components."
-#        break
-#    else
-#        echo "Invalid choice. Please enter 1 or 2."
-#    fi
-#done
+
 
 
 # ────────────────────────────────────────────────
@@ -187,12 +161,12 @@ sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub
 echo "[System] Installing Flatpaks..."
 
 flatpak install -y flathub com.github.joseexposito.touche
-flatpak install -y flathub chat.delta.desktop
+#flatpak install -y flathub chat.delta.desktop
 flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
-flatpak install -y flathub net.retrodeck.retrodeck
+#flatpak install -y flathub net.retrodeck.retrodeck
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages

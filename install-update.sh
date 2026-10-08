@@ -328,6 +328,9 @@ chmod +x "$HOME/.local/share/applications/breakout.desktop"
 echo "• Breakout Game installed."
 
 
+echo "• Updating App Icons..."
+sudo install -Dm644 icons/*.png /usr/share/icons/hicolor/64x64/apps/
+
 
 echo "• App Update & Install Complete."
 echo ""
