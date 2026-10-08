@@ -174,7 +174,7 @@ public:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("OSM Viewer");
+        setWindowTitle("Viewer");
         resize(1000, 700);
 
         grabGesture(Qt::PinchGesture);

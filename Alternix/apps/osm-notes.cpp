@@ -475,7 +475,7 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("OSM Notes");
+        setWindowTitle("Notes");
 
         // Enable pinch gestures on this window
         grabGesture(Qt::PinchGesture);

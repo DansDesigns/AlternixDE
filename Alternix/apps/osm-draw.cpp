@@ -473,7 +473,7 @@ private:
 class MainWindow : public QMainWindow {
 public:
     MainWindow() {
-        setWindowTitle("OSM Draw");
+        setWindowTitle("Draw");
 
         // Enable pinch gesture for this window
         grabGesture(Qt::PinchGesture);
