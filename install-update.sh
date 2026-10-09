@@ -54,7 +54,7 @@ sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
 Type=Application
 Name=About
 Comment=System monitor
-Exec=alacritty -e fetch
+Exec=alacritty -e fastfetch
 Terminal=false
 Icon=fetch
 Categories=System;
