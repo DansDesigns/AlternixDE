@@ -148,6 +148,11 @@ g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widget
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
 
+echo "• Compiling osm-powerd..."
+sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
+sudo chmod +x osm-powerd && sudo mv osm-powerd /usr/local/bin/
+sudo chown root:root /usr/local/bin/osm-powerd
+sudo chmod 4755 /usr/local/bin/osm-powerd
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -197,11 +202,7 @@ echo "• Installing dbus-fast for Qtile..."
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-echo "• Compiling osm-powerd..."
-sudo g++ -O2 osm-powerd.cpp -o osm-powerd
-sudo chmod +x osm-powerd && sudo mv osm-powerd /usr/local/bin/
-sudo chown root:root /usr/local/bin/osm-powerd
-sudo chmod 4755 /usr/local/bin/osm-powerd
+
 
 echo "• Updating Icons..."
 cd "$ALT_ROOT/Alternix"
