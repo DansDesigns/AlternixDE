@@ -121,14 +121,14 @@ g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-c
 sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
 
-cd "$ALT_ROOT/Alternix/apps"
+cd "$ALT_ROOT/Alternix"
 
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
 echo "• Updating osm-power..."
-g++ -fPIC osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
 echo "• Building osm-files..."
