@@ -47,11 +47,11 @@ sudo apt install git
 ```
 clone repo:
 ```
-git clone https://github.com/DansDesigns/Alternix.git
+git clone https://github.com/DansDesigns/AlternixDE.git
 ```
 cd into the newly created repo folder
 ```
-cd Alternix
+cd AlternixDE
 ```
 give permission & run (Devuan version):
 ```
