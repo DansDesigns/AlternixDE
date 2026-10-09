@@ -264,8 +264,8 @@ layouts = [
 
 widget_defaults = dict(
     font="Comfortaa",
-    fontsize=20,
-    padding=5,
+    fontsize=18,
+    padding=3,
 )
 extension_defaults = widget_defaults.copy()
 
