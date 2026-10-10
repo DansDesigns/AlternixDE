@@ -166,7 +166,10 @@ flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
+
+# Flatpak Games:
 #flatpak install -y flathub net.retrodeck.retrodeck
+flatpak install -y flathub net.wz2100.wz2100
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages
