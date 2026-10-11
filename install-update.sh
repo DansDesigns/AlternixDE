@@ -50,6 +50,7 @@ echo ""
 # echo "No Apps need updating..."
 
 echo "• Creating fetch.desktop launcher..."
+sudo rm /usr/share/applications/fetch.desktop
 sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
