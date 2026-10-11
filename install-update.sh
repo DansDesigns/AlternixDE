@@ -39,6 +39,7 @@ sudo nala install fonts-urw-base35 fonts-freefont-ttf
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
+visor update
 
 
 echo ""
@@ -54,7 +55,7 @@ sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
 Type=Application
 Name=About
 Comment=System monitor
-Exec=alacritty -e fastfetch
+Exec=alacritty -e fetch
 Terminal=false
 Icon=fetch
 Categories=System;
