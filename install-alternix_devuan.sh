@@ -127,8 +127,8 @@ sudo nala install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils \
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
-    python3-venv qtile python3-cffi python3-xcffib picom redshift onboard fake-hwclock \
-    samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager \
+    python3-venv qtile python3-cffi python3-xcffib picom redshift onboard fake-hwclock libcamera-ipa\
+    samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager libcamera-tools \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh mobile-broadband-provider-info \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 x11-apps zip iio-sensor-proxy \
