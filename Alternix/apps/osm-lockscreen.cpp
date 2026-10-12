@@ -458,9 +458,18 @@ private:
 
         QProcess proc;
         proc.start("osm-lock", QStringList() << "--auth");
-        proc.waitForFinished(-1);
 
-        if (proc.exitCode() == 0) {
+        // BOUNDED WAIT — DO NOT GO BACK TO waitForFinished(-1)
+        // This blocks the lockscreen while osm-lock runs, so if the prompt
+        // never appeared (Qtile stuck after waking) the slider froze at
+        // the top for good. After 90 s give up and slide back, so the
+        // unlock can be tried again.
+        if (!proc.waitForFinished(90000)) {
+            proc.kill();
+            proc.waitForFinished(2000);
+        }
+
+        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
             QFile flag("/tmp/osm_unlock_success");
             flag.open(QIODevice::WriteOnly);
             flag.write("1");

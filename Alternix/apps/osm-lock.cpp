@@ -34,6 +34,7 @@ test with:
 #include <QtMath>
 #include <QCloseEvent>
 #include <QKeyEvent>
+#include <QWindow>
 
 struct ShapeItem {
     QString shape;
@@ -130,6 +131,23 @@ public:
             titleLabel->setText("Enter your pattern");
 
         generateGrid();
+
+        // KEYBOARD GRAB — DO NOT REMOVE
+        // Qtile's shortcuts (Win+Enter for a terminal and the rest) are
+        // grabbed on the root window, so they fire whichever window has
+        // focus. Swallowing keys in keyPressEvent cannot stop them. An
+        // active keyboard grab does: while this window holds it, every
+        // key comes here and Qtile's shortcuts cannot trigger. It also
+        // stops typing reaching the window underneath. The grab only
+        // works once the window is on screen, and fails while another
+        // program holds one, so keep retrying until it succeeds.
+        QTimer *grabTimer = new QTimer(this);
+        grabTimer->setInterval(200);
+        connect(grabTimer, &QTimer::timeout, this, [this, grabTimer]() {
+            if (windowHandle() && windowHandle()->setKeyboardGrabEnabled(true))
+                grabTimer->stop();
+        });
+        grabTimer->start();
     }
 
 protected:
@@ -561,7 +579,25 @@ private:
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     LockScreen lock;
+
+    // --auth: ON SCREEN WITHOUT THE WINDOW MANAGER — DO NOT REMOVE
+    // With --auth this is the unlock prompt for osm-lockscreen and
+    // osm-sudo. As an ordinary window it needed Qtile to put it on
+    // screen, so when Qtile was stuck after waking from sleep the prompt
+    // never appeared and the lockscreen's slider sat stuck at the top.
+    // Bypassing the window manager, as osm-lockscreen itself does, puts
+    // it on screen straight away and above the lockscreen. Typed PINs
+    // still arrive through the keyboard grab in the constructor.
+    if (app.arguments().contains(QStringLiteral("--auth"))) {
+        lock.setWindowFlags(lock.windowFlags()
+                            | Qt::BypassWindowManagerHint
+                            | Qt::WindowStaysOnTopHint);
+        if (QScreen *scr = QGuiApplication::primaryScreen())
+            lock.setGeometry(scr->geometry());
+    }
+
     lock.show();
+    lock.raise();
     return app.exec();
 }
 
