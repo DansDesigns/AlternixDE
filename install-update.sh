@@ -26,15 +26,15 @@ echo ""
 echo "[Config] Updating Grub Entry.."
 
 # Rename Grub entry from "Devuan GNU/Linux" to "Alternix"
-sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
-sudo update-grub
+#sudo sed -i 's/Devuan GNU\/Linux/Alternix/g' /boot/grub/grub.cfg
+# update-grub
 #sudo dpkg --add-architecture i386
 
 #sudo nala install xserver-xlibre-input-libinput ntfs-3g exfatprogs exfat-fuse udisks2 pmount /
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
-sudo nala install fonts-urw-base35 fonts-freefont-ttf
+sudo nala install fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++
 
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
