@@ -161,7 +161,6 @@ sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub
 echo "[System] Installing Flatpaks..."
 
 flatpak install -y flathub com.github.joseexposito.touche
-#flatpak install -y flathub chat.delta.desktop
 flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
