@@ -6,7 +6,6 @@
 #include <QLabel>
 #include <QFrame>
 #include <QScreen>
-#include <QScrollArea>
 #include <QTimer>
 #include <QPainter>
 #include <QMouseEvent>
@@ -17,10 +16,7 @@
 #include <QTime>
 #include <QLinearGradient>
 #include <QFileInfo>
-#include <QSet>
 #include <functional>
-#include <QScroller>
-#include <QPushButton>
 #include <QSlider>
 #include <QtGlobal>
 #include <cmath>
@@ -40,9 +36,6 @@
 #include <algorithm>
 #include <QPropertyAnimation>
 
-#include <QtDBus/QDBusConnection>
-#include <QtDBus/QDBusInterface>
-#include <QtDBus/QDBusReply>
 
 // ──────────────────────────────  Helper: read file
 static QString readFile(const QString &path) {
@@ -463,49 +456,6 @@ static void togglePowerSaver() {
         "else powerprofilesctl set power-saver; fi; fi"});
 }
 
-// ──────────────────────────────  Tray items
-struct TrayEntry {
-    QString serviceName;
-    QString label;
-};
-
-static QList<TrayEntry> listTrayItems() {
-    QList<TrayEntry> items;
-    QDBusConnection bus = QDBusConnection::sessionBus();
-    if (!bus.isConnected()) return items;
-
-    QDBusInterface dbusIface(
-        "org.freedesktop.DBus",
-        "/org/freedesktop/DBus",
-        "org.freedesktop.DBus",
-        bus
-    );
-
-    QDBusReply<QStringList> reply = dbusIface.call("ListNames");
-    if (!reply.isValid()) return items;
-
-    const QStringList names = reply.value();
-    for (const QString &name : names) {
-        if (!name.contains("StatusNotifierItem")) continue;
-
-        QDBusInterface sni(
-            name,
-            "/StatusNotifierItem",
-            "org.kde.StatusNotifierItem",
-            bus
-        );
-        if (!sni.isValid()) continue;
-
-        QString label = sni.property("Title").toString();
-        if (label.isEmpty()) label = sni.property("Id").toString();
-        if (label.isEmpty()) label = name;
-
-        items.append({ name, label });
-    }
-
-    return items;
-}
-
 // ──────────────────────────────  Clickable icon
 class ClickIcon : public QLabel {
 public:
@@ -529,27 +479,6 @@ protected:
         if (!cmd.isEmpty())
             QProcess::startDetached(cmd, QStringList());
         if (closeFunc) closeFunc();
-        QLabel::mousePressEvent(e);
-    }
-};
-
-// ──────────────────────────────  Clickable label (tray)
-class ClickLabel : public QLabel {
-public:
-    QString serviceName;
-    std::function<void()> onClick;
-
-    ClickLabel(const QString &text, const QString &service,
-               QWidget *parent = nullptr)
-        : QLabel(text, parent), serviceName(service) {
-        setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        setStyleSheet("color:white; font-size:14pt; padding:0px 4px;");
-        setFixedHeight(28);
-    }
-
-protected:
-    void mousePressEvent(QMouseEvent *e) override {
-        if (onClick) onClick();
         QLabel::mousePressEvent(e);
     }
 };
@@ -605,11 +534,9 @@ class NotificationOverlay;
 class NotificationOverlay : public QWidget {
 public:
     QLabel *clockLabel;
-    QScrollArea *notifScroll;
 
     QWidget *topCardWidget;
     QWidget *sysRowWidget;
-    QWidget *notifCardWidget;
     QWidget *brightnessCardWidget;
     QWidget *batteryCardWidget;
 
@@ -617,9 +544,6 @@ public:
     QLabel *batteryTimeLabel;
     QLabel *batteryStatusLabel;
     QLabel *batteryIconLabel;
-
-    QVBoxLayout *notifListLayout;
-    QMap<ClickLabel*, QList<QWidget*>> submenuMap;
 
     QList<QWidget*> orderedWidgets;
     QMap<QWidget*, QRect> finalGeomMap;
@@ -632,17 +556,14 @@ public:
     NotificationOverlay()
         : QWidget(),
           clockLabel(nullptr),
-          notifScroll(nullptr),
           topCardWidget(nullptr),
           sysRowWidget(nullptr),
-          notifCardWidget(nullptr),
           brightnessCardWidget(nullptr),
           batteryCardWidget(nullptr),
           batteryInfoLabel(nullptr),
           batteryTimeLabel(nullptr),
           batteryStatusLabel(nullptr),
           batteryIconLabel(nullptr),
-          notifListLayout(nullptr),
           closing(false),
           refreshTimer(nullptr),
           refreshEnabled(false)
@@ -958,67 +879,12 @@ public:
             main->addWidget(brightnessCard);
         }
 
-        // ───────── Notifications Card
-        {
-            QVBoxLayout *notifInner = new QVBoxLayout();
-            notifInner->setAlignment(Qt::AlignTop);
-
-            QLabel *title = new QLabel("Notifications", this);
-            title->setStyleSheet("color:white; font-size:18pt; font-weight:bold;");
-            title->setAlignment(Qt::AlignCenter);
-            notifInner->addWidget(title);
-
-            notifScroll = new QScrollArea(this);
-            notifScroll->setWidgetResizable(true);
-            notifScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            notifScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            notifScroll->setStyleSheet("background:transparent; border:none;");
-            QScroller::grabGesture(notifScroll->viewport(), QScroller::TouchGesture);
-
-            QWidget *scrollContent = new QWidget(this);
-            scrollContent->setAttribute(Qt::WA_TranslucentBackground);
-            scrollContent->setStyleSheet("background:transparent;");
-
-            notifListLayout = new QVBoxLayout(scrollContent);
-            notifListLayout->setContentsMargins(2,2,2,2);
-            notifListLayout->setSpacing(0);
-
-            notifScroll->setWidget(scrollContent);
-
-            QList<TrayEntry> trayItems = listTrayItems();
-            bool hasEntries = !trayItems.isEmpty();
-
-            for (const TrayEntry &te : trayItems) {
-                ClickLabel *row = new ClickLabel(
-                    QString("• %1").arg(te.label),
-                    te.serviceName,
-                    scrollContent
-                );
-
-                row->onClick = [this, row]() {
-                    toggleSubmenu(row);
-                };
-
-                notifListLayout->addWidget(row);
-            }
-
-            if (!hasEntries)
-                notifScroll->hide();
-
-            notifInner->addWidget(notifScroll);
-
-            QFrame *card = createCard(this, notifInner, true);
-            notifCardWidget = card;
-            main->addWidget(card);
-        }
-
         main->addStretch();
 
         orderedWidgets.clear();
         orderedWidgets << topCardWidget
                        << sysRowWidget
-                       << brightnessCardWidget
-                       << notifCardWidget;
+                       << brightnessCardWidget;
 
         for (QWidget *w : orderedWidgets) {
             if (w) w->setVisible(false);
@@ -1271,62 +1137,6 @@ public:
         }
     }
 
-    void toggleSubmenu(ClickLabel *label) {
-        if (!notifListLayout || !label) return;
-
-        if (submenuMap.contains(label)) {
-            QList<QWidget*> widgets = submenuMap.take(label);
-            for (QWidget *w : widgets) {
-                notifListLayout->removeWidget(w);
-                w->deleteLater();
-            }
-            return;
-        }
-
-        int idx = -1;
-        for (int i=0; i<notifListLayout->count(); ++i) {
-            if (notifListLayout->itemAt(i)->widget() == label) {
-                idx = i; break;
-            }
-        }
-        if (idx < 0) return;
-
-        QWidget *container = new QWidget(this);
-        QHBoxLayout *h = new QHBoxLayout(container);
-        h->setContentsMargins(32,4,4,4);
-        h->setSpacing(8);
-
-        QPushButton *btnMenu = new QPushButton("Open menu", container);
-        btnMenu->setMinimumHeight(32);
-        btnMenu->setStyleSheet(
-            "QPushButton { background:#80708099; border-radius:16px;"
-            " padding:6px 16px; color:white; font-size:12pt; }"
-            "QPushButton:hover { background:#282828; border:none; }"
-            "QPushButton:pressed { background:#282828; border:1px solid #ffffff; }"
-        );
-
-        h->addWidget(btnMenu);
-        h->addStretch();
-
-        notifListLayout->insertWidget(idx+1, container);
-        submenuMap[label] = { container };
-
-        QObject::connect(btnMenu, &QPushButton::clicked, this, [label]() {
-            QDBusConnection bus = QDBusConnection::sessionBus();
-            if (!bus.isConnected()) return;
-
-            QDBusInterface sni(
-                label->serviceName,
-                "/StatusNotifierItem",
-                "org.kde.StatusNotifierItem",
-                bus
-            );
-            if (!sni.isValid()) return;
-
-            sni.call("ContextMenu", 0, 0);
-        });
-    }
-
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
@@ -1355,8 +1165,7 @@ protected:
         if (c) {
             QWidget *w = c;
             while (w && w != this) {
-                if (w == notifCardWidget ||
-                    w == topCardWidget  ||
+                if (w == topCardWidget  ||
                     w == sysRowWidget   ||
                     w == brightnessCardWidget ||
                     w == batteryCardWidget) {
