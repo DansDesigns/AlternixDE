@@ -461,7 +461,7 @@ EOF
 chmod +x "$HOME/.local/share/applications/osm-paper.desktop"
 
 echo "• Installing osm-paper-restore..."
-sudo install -m 755 osm-paper-restore /usr/local/bin/
+sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
 
 echo "• Building osm-styling..."
 g++ -fPIC apps/osm-styling.cpp -o osm-styling $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
