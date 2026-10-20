@@ -341,8 +341,8 @@ chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-audio-fix.sh
 
-echo "• [Configuring AlternixOS audio]..."
-bash "$HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
+#echo "• [Configuring AlternixOS audio]..."
+#bash "$HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
 
 echo "• [Configuring AlternixOS touchscroll]..."
 chmod +x alternix-touchscroll.py
