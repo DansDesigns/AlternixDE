@@ -544,7 +544,7 @@ sudo install -m 755 osm-power /usr/local/bin/
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
-sudo install -m 755 apps/osm-powerd /usr/local/bin/
+sudo install -m 755 osm-powerd /usr/local/bin/
 sudo chown root:root /usr/local/bin/osm-powerd
 sudo chmod 4755 /usr/local/bin/osm-powerd
 
