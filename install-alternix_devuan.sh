@@ -390,7 +390,8 @@ g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs
 sudo install -m 755 osm-launcher /usr/local/bin/
 
 echo "• Building osm-launcher-lock-cleaner..."
-sudo install -m 755 osm-launcher-lockclean /usr/local/bin/
+chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/
+#sudo install -m 755 osm-launcher-lockclean /usr/local/bin/
 
 echo "• Building osm-lock..."
 g++ apps/osm-lock.cpp -o osm-lock -fPIC $(pkg-config --cflags --libs Qt5Widgets)
