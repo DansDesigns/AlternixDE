@@ -329,7 +329,7 @@ sudo udevadm control --reload-rules 2>/dev/null || true
 # 2a. Scripts
 # ────────────────────────────────────────────────
 echo " "
-echo "[2a/10] Installing Scrolling Layout for Qtile"
+echo "[2a/10] Installing Scrolling Layout for Qtile..."
 
 mkdir -p ~/.config/Alternix
 mkdir -p ~/.local/bin
@@ -339,15 +339,22 @@ cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
+chmod +x alternix-audio-fix.sh
 
+echo "• [Configuring AlternixOS audio]..."
+bash "$HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
+
+echo "• [Configuring AlternixOS touchscroll]..."
 chmod +x alternix-touchscroll.py
 cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
 
+echo "• [Configuring AlternixOS Android layer]..."
 chmod +x alternix-waydroid-session
-sudo cp alternix-waydroid-session /usr/local/bin
+sudo install -m 755 alternix-waydroid-session /usr/local/bin
 
+echo "• [Configuring AlternixOS Windows layer]..."
 chmod +x alternix-exe
-sudo cp alternix-exe /usr/local/bin
+sudo install -m 755 alternix-exe /usr/local/bin
 
 
 # ────────────────────────────────────────────────
