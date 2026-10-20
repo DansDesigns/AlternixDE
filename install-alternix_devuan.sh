@@ -387,26 +387,26 @@ cd "$ALT_ROOT/Alternix" || { echo "ERROR: $ALT_ROOT not found"; exit 1; }
 
 echo "• Building osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
-chmod +x osm-launcher && sudo mv osm-launcher /usr/local/bin/
+sudo install -m 755 apps/osm-launcher /usr/local/bin/
 
 echo "• Building osm-launcher-lock-cleaner..."
-chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/
+sudo install -m 755 apps/osm-launcher-lockclean /usr/local/bin/
 
 echo "• Building osm-lock..."
 g++ apps/osm-lock.cpp -o osm-lock -fPIC $(pkg-config --cflags --libs Qt5Widgets)
-chmod +x osm-lock && sudo mv osm-lock /usr/local/bin/
+sudo install -m 755 apps/osm-lock /usr/local/bin/
 
 echo "• Building osm-running..."
 g++ apps/osm-running.cpp -o osm-running -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
-chmod +x osm-running && sudo mv osm-running /usr/local/bin/
+sudo install -m 755 apps/osm-running /usr/local/bin/
 
 echo "• Building osm-notify..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
-chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
+sudo install -m 755 apps/osm-notify /usr/local/bin/
 
 echo "• Building osm-status..."
 g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11
-chmod +x osm-status && sudo mv osm-status /usr/local/bin/
+sudo install -m 755 apps/osm-status /usr/local/bin/
 
 echo "• Installing sounds..."
 # Drop notify.* and alarm.* (wav/ogg/flac/mp3) in ~/.config/Alternix/sounds/
@@ -416,7 +416,7 @@ cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
 
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
-chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
+sudo install -m 755 apps/osm-clock /usr/local/bin/
 
 cat <<EOF > "$HOME/.local/share/applications/osm-clock.desktop"
 [Desktop Entry]
@@ -433,7 +433,7 @@ chmod +x "$HOME/.local/share/applications/osm-clock.desktop"
 
 echo "• Building osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
+sudo install -m 755 apps/osm-paper /usr/local/bin/
 
 if [ -f "icons/osm-paper.png" ]; then
     sudo cp icons/osm-paper.png /usr/share/icons/hicolor/64x64/apps/osm-paper.png
@@ -453,15 +453,15 @@ EOF
 chmod +x "$HOME/.local/share/applications/osm-paper.desktop"
 
 echo "• Installing osm-paper-restore..."
-chmod +x apps/osm-paper-restore && sudo cp apps/osm-paper-restore /usr/local/bin/
+sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
 
 echo "• Building osm-styling..."
 g++ -fPIC apps/osm-styling.cpp -o osm-styling $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-styling && sudo mv osm-styling /usr/local/bin/
+sudo install -m 755 apps/osm-styling /usr/local/bin/
 
 echo "• Building osm-files..."
 g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-files && sudo mv osm-files /usr/local/bin/
+sudo install -m 755 apps/osm-files /usr/local/bin/
 
 if [ -f "icons/osm-files.png" ]; then
     sudo cp icons/osm-files.png /usr/share/icons/hicolor/64x64/apps/osm-files.png
@@ -482,7 +482,7 @@ chmod +x "$HOME/.local/share/applications/osm-files.desktop"
 
 echo "• Building osm-viewer..."
 g++ -fPIC apps/osm-viewer.cpp -o osm-viewer $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core poppler-qt5) -Wno-deprecated-declarations
-chmod +x osm-viewer && sudo mv osm-viewer /usr/local/bin/
+sudo install -m 755 apps/osm-viewer /usr/local/bin/
 
 if [ -f "icons/osm-viewer.png" ]; then
     sudo cp icons/osm-viewer.png /usr/share/icons/hicolor/64x64/apps/osm-viewer.png
@@ -504,7 +504,7 @@ chmod +x "$HOME/.local/share/applications/osm-viewer.desktop"
 
 echo "• Building osm-draw..."
 g++ -fPIC apps/osm-draw.cpp -o osm-draw -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
-chmod +x osm-draw && sudo mv osm-draw /usr/local/bin/
+sudo install -m 755 apps/osm-draw /usr/local/bin/
 
 if [ -f "icons/osm-draw.png" ]; then
     sudo cp icons/osm-draw.png /usr/share/icons/hicolor/64x64/apps/osm-draw.png
@@ -525,25 +525,24 @@ chmod +x "$HOME/.local/share/applications/osm-draw.desktop"
 
 echo "• Building osm-rocker..."
 g++ -fPIC apps/osm-rocker.cpp -o osm-rocker $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-rocker && sudo mv osm-rocker /usr/local/bin/
+sudo install -m 755 apps/osm-rocker /usr/local/bin/
 
 echo "• Installing osm-sudo..."
-sudo cp apps/osm-sudo /usr/local/bin/osm-sudo
-sudo chmod 755 /usr/local/bin/osm-sudo
+sudo install -m 755 apps/osm-sudo /usr/local/bin/
 
 echo "• Building osm-power..."
 g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-power && sudo mv osm-power /usr/local/bin/
+sudo install -m 755 apps/osm-power /usr/local/bin/
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
-sudo chmod +x osm-powerd && sudo mv osm-powerd /usr/local/bin/
+sudo install -m 755 apps/osm-powerd /usr/local/bin/
 sudo chown root:root /usr/local/bin/osm-powerd
 sudo chmod 4755 /usr/local/bin/osm-powerd
 
 echo "• Building osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-chmod +x osm-lockscreen && sudo mv osm-lockscreen /usr/local/bin/
+sudo install -m 755 apps/osm-lockscreen /usr/local/bin/
 
 echo "• Installing Wave Music Player.."
 cd ~
@@ -561,7 +560,7 @@ echo "[8/10] Building osm-settings..."
 cd "$ALT_ROOT/Alternix/apps/osm-settings" || { echo "ERROR: apps/osm-settings folder missing"; exit 1; }
 
 g++ osm-settings.cpp -o osm-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
-chmod +x osm-settings && sudo mv osm-settings /usr/local/bin/
+sudo install -m 755 osm-settings /usr/local/bin/
 
 if [ -f "$ALT_ROOT/Alternix/icons/osm-settings.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/icons/osm-settings.png" /usr/share/icons/hicolor/64x64/apps/osm-settings.png
@@ -582,67 +581,67 @@ chmod +x "$HOME/.local/share/applications/osm-settings.desktop"
 
 echo "• Building wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
-sudo mv wifi.so /usr/local/bin/
+sudo install -m755 wifi.so /usr/local/bin/
 
 echo "• Building bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
-sudo mv bluetooth.so /usr/local/bin/
+sudo install -m755 bluetooth.so /usr/local/bin/
 
 echo "• Building apps.so..."
 g++ -fPIC -shared apps.cpp -o apps.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv apps.so /usr/local/bin/
+sudo install -m755 apps.so /usr/local/bin/
 
 echo "• Building mobile.so..."
 g++ -fPIC -shared mobile.cpp -o mobile.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv mobile.so /usr/local/bin/
+sudo install -m755 mobile.so /usr/local/bin/
 
 echo "• Building location.so..."
 g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv location.so /usr/local/bin/
+sudo install -m755 location.so /usr/local/bin/
 
 echo "• Building battery.so..."
 g++ -fPIC -shared battery.cpp -o battery.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv battery.so /usr/local/bin/
+sudo install -m755 battery.so /usr/local/bin/
 
 echo "• Building emulation.so..."
 g++ emulation.cpp -o emulation.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv emulation.so /usr/local/bin/
+sudo install -m755 emulation.so /usr/local/bin/
 
 echo "• Building security.so..."
 g++ -shared -fPIC security.cpp -o security.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
-sudo mv security.so /usr/local/bin/
+sudo install -m755 security.so /usr/local/bin/
 
 echo "• Building ethernet.so..."
 g++ -fPIC -shared ethernet.cpp -o ethernet.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv ethernet.so /usr/local/bin/
+sudo install -m755 ethernet.so /usr/local/bin/
 
 echo "• Building display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv display.so /usr/local/bin/
+sudo install -m755 display.so /usr/local/bin/
 
 echo "• Building sound.so..."
 g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
-sudo mv sound.so /usr/local/bin/
+sudo install -m755 sound.so /usr/local/bin/
 
 echo "• Building kernel.so..."
 g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
-sudo mv kernel.so /usr/local/bin/
+sudo install -m755 kernel.so /usr/local/bin/
 
 echo "• Building storage.so..."
 g++ -fPIC -shared storage.cpp -o storage.so $(pkg-config --cflags --libs Qt5Widgets)
-sudo mv storage.so /usr/local/bin/
+sudo install -m755 storage.so /usr/local/bin/
 
 echo "• Building accounts.so..."
 g++ -std=c++11 accounts.cpp -o accounts.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv accounts.so /usr/local/bin/
+sudo install -m755 accounts.so /usr/local/bin/
 
 echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv system.so /usr/local/bin/
+sudo install -m755 system.so /usr/local/bin/
 
 echo "• Building ui.so..."
 g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo mv ui.so /usr/local/bin/
+sudo install -m755 ui.so /usr/local/bin/
 
 echo "• Building reticulum.so..."
 g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
@@ -659,11 +658,11 @@ cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets fold
 sudo mkdir -p /usr/local/lib/alternix/widgets
 
 g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext
-chmod +x osm-widgets && sudo mv osm-widgets /usr/local/bin/
+sudo install -m 755 osm-widgets /usr/local/bin/
 
 echo "• Building osm-widgets-settings..."
 g++ osm-widgets-settings.cpp -o osm-widgets-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
-chmod +x osm-widgets-settings && sudo mv osm-widgets-settings /usr/local/bin/
+sudo install -m 755 osm-widgets-settings  /usr/local/bin/
 
 echo "• Building clock.so widget..."
 g++ -I. -fPIC -shared widgets/clock.cpp -o clock.so $(pkg-config --cflags --libs Qt5Widgets)
@@ -734,13 +733,11 @@ Categories=System;
 EOF
 
 echo "• Installing Alternix Updater..."
-sudo chmod +x "$HOME/Alternix/update/os-check-update"
-sudo cp "$HOME/Alternix/update/os-check-update" /usr/bin/
-sudo mkdir -p /usr/share/alternix/
-sudo cp "$HOME/Alternix/update/version.txt" /usr/share/alternix/
+sudo install -m 755 "$HOME/Alternix/update/os-check-update" /usr/bin/
+sudo install -D -m 644 "$HOME/Alternix/update/version.txt" /usr/share/alternix/version.txt
+
 
 echo "• Creating Alternix Updater shortcut..."
-
 sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<EOF
 [Desktop Entry]
 Name=System Update
@@ -1102,12 +1099,25 @@ echo "[✓] Merlin Browser Installed..."
 # 16. auto-cpufreq
 # ────────────────────────────────────────────────
 echo " "
-echo "- Installing auto-cpufreq..."
+echo "• Installing auto-cpufreq..."
 cd "$HOME"
 git clone https://github.com/AdnanHodzic/auto-cpufreq.git
 cd auto-cpufreq
 sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
+
+
+# ────────────────────────────────────────────────
+# 17. Freehand Spatial Deskto
+# ────────────────────────────────────────────────
+echo " "
+echo "• Installing Freehand Spatial Desktop..."
+cd "$HOME"
+git clone https://github.com/DansDesigns/Hands.git
+cd hands
+chmod +x install_linux.sh
+./install_linux.sh
+echo "[✓] Freehand Spatial Desktop Installed..."
 
 
 # ────────────────────────────────────────────────
