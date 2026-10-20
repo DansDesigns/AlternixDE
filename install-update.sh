@@ -39,6 +39,37 @@ sudo nala install fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++
 echo "[Config] Installing updated configs..."
 cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
+# ────────────────────────────────────────────────
+# Devuan / elogind: stop unexpected tablet sleep
+# Applied on the reboot already required by this updater.
+# ────────────────────────────────────────────────
+echo "[Config] Updating elogind power management..."
+sudo mkdir -p /etc/elogind/logind.conf.d /etc/elogind/sleep.conf.d
+
+sudo tee /etc/elogind/logind.conf.d/alternix-power.conf >/dev/null <<'ELOGINDFILE'
+[Login]
+HandlePowerKey=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+ELOGINDFILE
+
+sudo tee /etc/elogind/sleep.conf.d/alternix-no-sleep.conf >/dev/null <<'SLEEPFILE'
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
+SLEEPFILE
+
+# Keep the power-button fallback for older elogind versions without drop-ins.
+sudo sed -i 's/^#*HandlePowerKey=.*/HandlePowerKey=ignore/' /etc/elogind/logind.conf 2>/dev/null || true
+
+echo "[✓] elogind sleep prevention configured (effective after restart)."
+
 visor update
 
 
