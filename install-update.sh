@@ -125,6 +125,12 @@ sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
 cd "$ALT_ROOT/Alternix"
 
+
+echo "• Building osm-notify..."
+g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
+chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
+
+
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
