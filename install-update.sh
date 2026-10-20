@@ -155,6 +155,9 @@ echo "• Building osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
+echo "• Building osm-launcher-lock-cleaner..."
+chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/
+
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
