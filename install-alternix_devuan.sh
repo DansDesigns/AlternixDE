@@ -434,7 +434,7 @@ chmod +x "$HOME/.local/share/applications/osm-clock.desktop"
 
 echo "• Building osm-paper..."
 g++ -fPIC osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo install -m 755 apps/osm-paper /usr/local/bin/
+sudo install -m 755 osm-paper /usr/local/bin/
 
 if [ -f "icons/osm-paper.png" ]; then
     sudo cp icons/osm-paper.png /usr/share/icons/hicolor/64x64/apps/osm-paper.png
