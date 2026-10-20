@@ -17,8 +17,15 @@ echo ""
 echo ""
 
 
-# Root of the Alternix repo
-ALT_ROOT="$HOME/Alternix"
+# Root of the Alternix build repository (not the eventual user's home).
+# Prefer the directory containing this installer; fall back to the original
+# live-build layout (/root/Alternix when the ISO build runs as root).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+if [ -d "$SCRIPT_DIR/Alternix" ]; then
+    ALT_ROOT="$SCRIPT_DIR"
+else
+    ALT_ROOT="$HOME/Alternix"
+fi
 
 if [ ! -d "$ALT_ROOT" ]; then
     echo "ERROR: $ALT_ROOT not found. Please place install.sh inside ~/Alternix."
@@ -63,7 +70,19 @@ echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-n
 sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 
 echo ""
+# Always use the selected account's actual home for user configuration,
+# even if the ISO build/installer itself is running as root.
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+TARGET_GROUP="$(id -gn "$TARGET_USER")"
+if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    echo "ERROR: Could not locate home directory for user '$TARGET_USER'."
+    exit 1
+fi
+as_target() { sudo -u "$TARGET_USER" -H "$@"; }
+
 echo "User setup complete. Username set to: $TARGET_USER"
+echo "• User home: $TARGET_HOME"
+echo "• Build source: $ALT_ROOT"
 echo ""
 
 
@@ -85,9 +104,16 @@ wget -qO - https://deb.volian.org/volian/volian.gpg | sudo tee /etc/apt/trusted.
 echo "[System] Installing nala.."
 if ! sudo apt install nala -y 2>/dev/null; then
     echo "[System] nala not available for this Devuan release — using apt instead."
-    # Define nala as an alias to apt for the rest of this script
-    nala() { sudo apt "$@"; }
-    export -f nala
+    # sudo nala does not use a shell alias/function; install commands below
+    # select the available package manager explicitly.
+    USE_NALA=false
+fi
+
+USE_NALA="${USE_NALA:-true}"
+if [ "$USE_NALA" = true ] && command -v nala >/dev/null 2>&1; then
+    NALA_INSTALL=(sudo nala)
+else
+    NALA_INSTALL=(sudo apt)
 fi
 
 echo "[System] Removing nala Install Components.."
@@ -123,7 +149,7 @@ sudo apt install xlibre -y
 #sudo dpkg --add-architecture i386
 
 echo "[System] Installing Required Components.."
-sudo nala install -y \
+"${NALA_INSTALL[@]}" install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
@@ -188,7 +214,7 @@ if [ -d "$INSTALLER_DIR" ]; then
     if [ "$DEB_COUNT" -gt 0 ]; then
         echo "• Found $DEB_COUNT installer package(s). Installing..."
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
-        sudo nala install -f -y
+        "${NALA_INSTALL[@]}" install -f -y
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
         echo "• Local installer packages installed."
     else
@@ -209,15 +235,15 @@ cd "$ALT_ROOT/Alternix"
 echo "[System] Installing Starship prompt..."
 curl -sS https://starship.rs/install.sh | sh -s -- --yes
 
-if ! grep -Fxq 'eval "$(starship init bash)"' "$HOME/.bashrc"; then
-    echo 'eval "$(starship init bash)"' >> "$HOME/.bashrc"
+if ! grep -Fxq 'eval "$(starship init bash)"' "$TARGET_HOME/.bashrc"; then
+    echo 'eval "$(starship init bash)"' >> "$TARGET_HOME/.bashrc"
 fi
 
 echo "[System] Installing Brave Browser..."
 curl -fsS https://dl.brave.com/install.sh | sh -s -- --yes
 
 #echo "[System] Updating bash aliases..."
-#echo 'alias sudo="osm-sudo sudo -S"' >> "$HOME/.bashrc"
+#echo 'alias sudo="osm-sudo sudo -S"' >> "$TARGET_HOME/.bashrc"
 
 # ────────────────────────────────────────────────
 # Copy ALL configs from ~/Alternix/configs → ~/.config
@@ -226,9 +252,9 @@ echo " "
 echo "[Config] Installing user configs..."
 
 CONFIG_SRC="$ALT_ROOT/Alternix/configs"
-CONFIG_DST="$HOME/.config"
+CONFIG_DST="$TARGET_HOME/.config"
 
-sudo cp "$ALT_ROOT/Alternix/configs/.alacritty.toml" ~/
+sudo cp "$ALT_ROOT/Alternix/configs/.alacritty.toml" "$TARGET_HOME/.alacritty.toml"
 
 mkdir -p "$CONFIG_DST"
 
@@ -265,7 +291,7 @@ fi
 echo " "
 echo "[Config] Installing Wallpapers..."
 
-WALL_DST="$HOME/Pictures/wallpapers"
+WALL_DST="$TARGET_HOME/Pictures/wallpapers"
 mkdir -p "$WALL_DST"
 
 if [ -d "$ALT_ROOT/Alternix/wallpapers" ]; then
@@ -283,10 +309,10 @@ fi
 # ────────────────────────────────────────────────
 echo " "
 echo "[Config] Installing Extras..."
-mkdir "$HOME/extras"
+mkdir -p "$TARGET_HOME/extras"
 
 if [ -d "$ALT_ROOT/Alternix/extras" ]; then
-    sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$HOME/extras/"
+    sudo cp -r "$ALT_ROOT/Alternix/extras/"* "$TARGET_HOME/extras/"
 
     echo "• Extras installed successfully."
 else
@@ -302,11 +328,11 @@ fi
 echo " "
 echo "[2/10] Creating virtual environment (qtile_venv)..."
 
-if [ ! -d "$HOME/.qtile_venv" ]; then
-    python3 -m venv "$HOME/.qtile_venv"
+if [ ! -d "$TARGET_HOME/.qtile_venv" ]; then
+    python3 -m venv "$TARGET_HOME/.qtile_venv"
 fi
 
-source "$HOME/.qtile_venv/bin/activate"
+source "$TARGET_HOME/.qtile_venv/bin/activate"
 
 echo "[3/10] Installing Python pip dependencies..."
 # dbus-fast is what lets qtile hear elogind's sleep/resume signals.
@@ -316,7 +342,7 @@ pip3 install qtile qtile-extras mypy dbus-fast --break-system-packages
 
 # Symlink qtile binary to where udev rules expect it
 sudo mkdir -p /usr/lib/udev
-sudo ln -sf "$HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
+sudo ln -sf "$TARGET_HOME/.qtile_venv/bin/qtile" /usr/lib/udev/qtile
 
 # Reloading udev rules only works against a running udevd — this script
 # may run inside a chroot (e.g. the installer) where there's no
@@ -331,22 +357,22 @@ sudo udevadm control --reload-rules 2>/dev/null || true
 echo " "
 echo "[2a/10] Installing Scrolling Layout for Qtile..."
 
-mkdir -p ~/.config/Alternix
-mkdir -p ~/.local/bin
-cp -r "$ALT_ROOT/Alternix/scripts" ~/.config/Alternix/
+mkdir -p "$TARGET_HOME/.config/Alternix"
+mkdir -p "$TARGET_HOME/.local/bin"
+cp -r "$ALT_ROOT/Alternix/scripts" "$TARGET_HOME/.config/Alternix/"
 
-cd ~/.config/Alternix/scripts
+cd "$TARGET_HOME/.config/Alternix/scripts"
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-audio-fix.sh
 
 #echo "• [Configuring AlternixOS audio]..."
-#bash "$HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
+#bash "$TARGET_HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
 
 echo "• [Configuring AlternixOS touchscroll]..."
 chmod +x alternix-touchscroll.py
-cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
+cp alternix-touchscroll.py "$TARGET_HOME/.local/bin/alternix-touchscroll.py"
 
 echo "• [Configuring AlternixOS Android layer]..."
 chmod +x alternix-waydroid-session
@@ -362,12 +388,12 @@ sudo install -m 755 alternix-exe /usr/local/bin
 # ────────────────────────────────────────────────
 echo " "
 echo "[4/10] Creating .xinitrc autostart..."
-cat <<EOF > "$HOME/.xinitrc"
+cat <<EOF > "$TARGET_HOME/.xinitrc"
 #!/bin/sh
-source "\$HOME/.qtile_venv/bin/activate"
+. "\$HOME/.qtile_venv/bin/activate"
 exec dbus-launch --exit-with-session "\$HOME/.qtile_venv/bin/qtile" start
 EOF
-chmod +x "$HOME/.xinitrc"
+chmod +x "$TARGET_HOME/.xinitrc"
 
 
 # ────────────────────────────────────────────────
@@ -375,7 +401,7 @@ chmod +x "$HOME/.xinitrc"
 # ────────────────────────────────────────────────
 echo " "
 echo "[6/10] Creating ~/.bash_profile auto-start..."
-cat <<EOF > "$HOME/.bash_profile"
+cat <<EOF > "$TARGET_HOME/.bash_profile"
 # auto-start X only on tty1 and only if not already running
 if [ -z "\$DISPLAY" ] && [ "\$(tty)" = "/dev/tty1" ]; then
     startx
@@ -388,7 +414,7 @@ EOF
 echo " "
 echo "• Creating .local/share/applications folder..."
 echo " "
-mkdir -p "$HOME/.local/share/applications"
+mkdir -p "$TARGET_HOME/.local/share/applications"
 echo "[7/10] Building Alternix apps..."
 cd "$ALT_ROOT/Alternix" || { echo "ERROR: $ALT_ROOT not found"; exit 1; }
 
@@ -418,15 +444,15 @@ sudo install -m 755 osm-status /usr/local/bin/
 
 echo "• Installing sounds..."
 # Drop notify.* and alarm.* (wav/ogg/flac/mp3) in ~/.config/Alternix/sounds/
-#mkdir -p "$HOME/.config/Alternix/sounds"
-cp -r "$ALT_ROOT/Alternix/sounds" ~/.config/Alternix/
+#mkdir -p "$TARGET_HOME/.config/Alternix/sounds"
+cp -r "$ALT_ROOT/Alternix/sounds" "$TARGET_HOME/.config/Alternix/"
 
 
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 sudo install -m 755 osm-clock /usr/local/bin/
 
-cat <<EOF > "$HOME/.local/share/applications/osm-clock.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-clock.desktop"
 [Desktop Entry]
 Type=Application
 Name=Clock
@@ -437,7 +463,7 @@ Terminal=false
 Categories=Utility;Clock;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-clock.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-clock.desktop"
 
 echo "• Building osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
@@ -447,7 +473,7 @@ if [ -f "icons/osm-paper.png" ]; then
     sudo cp icons/osm-paper.png /usr/share/icons/hicolor/64x64/apps/osm-paper.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-paper.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-paper.desktop"
 [Desktop Entry]
 Type=Application
 Name=Wallpapers
@@ -458,7 +484,7 @@ Terminal=false
 Categories=Utility;FileManager;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-paper.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-paper.desktop"
 
 echo "• Installing osm-paper-restore..."
 sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
@@ -475,7 +501,7 @@ if [ -f "icons/osm-files.png" ]; then
     sudo cp icons/osm-files.png /usr/share/icons/hicolor/64x64/apps/osm-files.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-files.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-files.desktop"
 [Desktop Entry]
 Type=Application
 Name=Files
@@ -486,7 +512,7 @@ Terminal=false
 Categories=Utility;FileManager;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-files.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-files.desktop"
 
 echo "• Building osm-viewer..."
 g++ -fPIC apps/osm-viewer.cpp -o osm-viewer $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core poppler-qt5) -Wno-deprecated-declarations
@@ -496,7 +522,7 @@ if [ -f "icons/osm-viewer.png" ]; then
     sudo cp icons/osm-viewer.png /usr/share/icons/hicolor/64x64/apps/osm-viewer.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-viewer.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-viewer.desktop"
 [Desktop Entry]
 Type=Application
 Name=File Editor/Viewer
@@ -508,7 +534,7 @@ MimeType=application/octet-stream;application/pdf;text/plain;image/*;inode/direc
 Categories=Utility;FileManager;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-viewer.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-viewer.desktop"
 
 echo "• Building osm-draw..."
 g++ -fPIC apps/osm-draw.cpp -o osm-draw -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
@@ -518,7 +544,7 @@ if [ -f "icons/osm-draw.png" ]; then
     sudo cp icons/osm-draw.png /usr/share/icons/hicolor/64x64/apps/osm-draw.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-draw.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-draw.desktop"
 [Desktop Entry]
 Type=Application
 Name=Draw
@@ -529,7 +555,7 @@ Terminal=false
 Categories=Utility;Drawing;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-draw.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-draw.desktop"
 
 echo "• Building osm-rocker..."
 g++ -fPIC apps/osm-rocker.cpp -o osm-rocker $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
@@ -568,7 +594,7 @@ if [ -f "$ALT_ROOT/Alternix/icons/osm-settings.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/icons/osm-settings.png" /usr/share/icons/hicolor/64x64/apps/osm-settings.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-settings.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-settings.desktop"
 [Desktop Entry]
 Type=Application
 Name=Settings
@@ -579,7 +605,7 @@ Terminal=false
 Categories=Utility;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-settings.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-settings.desktop"
 
 echo "• Building wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
@@ -676,7 +702,7 @@ if [ -f "$ALT_ROOT/Alternix/icons/osm-widgets.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/icons/osm-widgets.png" /usr/share/icons/hicolor/64x64/apps/osm-widgets.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/osm-widgets.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-widgets.desktop"
 [Desktop Entry]
 Type=Application
 Name=Widgets
@@ -687,7 +713,7 @@ Terminal=false
 Categories=Utility;
 StartupNotify=false
 EOF
-chmod +x "$HOME/.local/share/applications/osm-widgets.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/osm-widgets.desktop"
 
 # ────────────────────────────────────────────────
 #            Custom App Shortcuts & Icons
@@ -735,8 +761,8 @@ Categories=System;
 EOF
 
 echo "• Installing Alternix Updater..."
-sudo install -m 755 "$HOME/Alternix/update/os-check-update" /usr/bin/
-sudo install -D -m 644 "$HOME/Alternix/update/version.txt" /usr/share/alternix/version.txt
+sudo install -m 755 "$ALT_ROOT/update/os-check-update" /usr/bin/
+sudo install -D -m 644 "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 
 
 echo "• Creating Alternix Updater shortcut..."
@@ -758,7 +784,7 @@ EOF
 echo " "
 echo "[System] Installing Brave WebApps..."
 
-APP_DIR="$HOME/.local/share/applications"
+APP_DIR="$TARGET_HOME/.local/share/applications"
 mkdir -p "$APP_DIR"
 
 YOUTUBE_ICON="/usr/share/icons/hicolor/256x256/apps/youtube.png"
@@ -787,7 +813,7 @@ if [ -f "icons/alternitech-forum.png" ]; then
     sudo cp icons/alternitech-forum.png /usr/share/icons/hicolor/64x64/apps/alternitech-forum.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/alternitech-forums.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/alternitech-forums.desktop"
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -799,7 +825,7 @@ Terminal=false
 Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
-chmod +x "$HOME/.local/share/applications/alternitech-forums.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/alternitech-forums.desktop"
 echo "✓ Alternitech Forums WebApp installed."
 
 
@@ -808,19 +834,19 @@ if [ -f "extras/games/breakout.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.png" /usr/share/icons/hicolor/64x64/apps/breakout.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/breakout.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/breakout.desktop"
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Breakout
 Comment=Break the block game
-Exec=brave-browser --app=file://$HOME/extras/games/breakout.html --new-window --force-device-scale-factor=1.3
+Exec=brave-browser --app=file://$TARGET_HOME/extras/games/breakout.html --new-window --force-device-scale-factor=1.3
 Icon=breakout
 Terminal=false
 Categories=Game;
 StartupNotify=true
 EOF
-chmod +x "$HOME/.local/share/applications/breakout.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/breakout.desktop"
 echo "✓ Breakout Game installed."
 
 
@@ -831,7 +857,7 @@ if [ -f "icons/openmap.png" ]; then
     sudo cp icons/openmap.png /usr/share/icons/hicolor/64x64/apps/openmap.png
 fi
 
-cat <<EOF > "$HOME/.local/share/applications/openmap.desktop"
+cat <<EOF > "$TARGET_HOME/.local/share/applications/openmap.desktop"
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -843,10 +869,10 @@ Terminal=false
 Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
-chmod +x "$HOME/.local/share/applications/openmap.desktop"
+chmod +x "$TARGET_HOME/.local/share/applications/openmap.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "$HOME/.local/share/applications" || true
+    update-desktop-database "$TARGET_HOME/.local/share/applications" || true
 fi
 echo "• OpenStreetMap WebApp installed."
 
@@ -974,8 +1000,11 @@ if [ -f "$INITTAB" ]; then
         echo "• Autologin line appended to inittab."
     fi
 
-    # Signal init to re-read inittab (SysVinit equivalent of daemon-reload)
-    sudo kill -HUP 1 || true
+    # Changes will apply on next boot. Never HUP PID 1 from a live-build
+    # chroot, since it may refer to the build host's init process.
+    if [ ! -e /etc/debian_chroot ] && [ -e /run/initctl ]; then
+        sudo telinit q 2>/dev/null || true
+    fi
 else
     echo "WARNING: /etc/inittab not found."
     echo "If using OpenRC or runit, configure autologin in your getty service config."
@@ -990,8 +1019,40 @@ sudo usermod -aG video,input "$TARGET_USER"
 
 echo " "
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
-cd ~
-rm -rf "$ALT_ROOT"
+# Never remove the directory from which this shell is currently running.
+cd /
+rm -rf -- "$ALT_ROOT"
+
+# Prepare a user-owned source checkout area for the third-party app installers.
+# The old source repository and the new user checkout area are intentionally
+# separate locations, even when the builder is running as root.
+THIRD_PARTY_DIR="$TARGET_HOME/Alternix"
+mkdir -p "$THIRD_PARTY_DIR"
+chown "$TARGET_USER:$TARGET_GROUP" "$THIRD_PARTY_DIR"
+
+# Build-time writes above must not leave the installed desktop owned by root.
+for user_dir in "$TARGET_HOME/.config" "$TARGET_HOME/.local" \
+                "$TARGET_HOME/.qtile_venv" "$TARGET_HOME/Pictures/wallpapers" \
+                "$TARGET_HOME/extras"; do
+    [ ! -e "$user_dir" ] || chown -R "$TARGET_USER:$TARGET_GROUP" "$user_dir"
+done
+for user_file in "$TARGET_HOME/.alacritty.toml" "$TARGET_HOME/.xinitrc" \
+                 "$TARGET_HOME/.bash_profile" "$TARGET_HOME/.bashrc"; do
+    [ ! -e "$user_file" ] || chown "$TARGET_USER:$TARGET_GROUP" "$user_file"
+done
+
+# Preserve existing clones when this installer is re-run.
+clone_for_target() {
+    local repo_url="$1" destination="$2"
+    if [ -d "$destination/.git" ]; then
+        echo "• Existing checkout found: $destination"
+    elif [ -e "$destination" ]; then
+        echo "ERROR: $destination already exists but is not a Git checkout."
+        return 1
+    else
+        as_target git clone "$repo_url" "$destination"
+    fi
+}
 
 
 
@@ -1004,13 +1065,13 @@ rm -rf "$ALT_ROOT"
 echo " "
 echo "•[Picom] Checking GLX compatibility..."
 
-PICOM_CONF="$HOME/.config/picom/picom.conf"
+PICOM_CONF="$TARGET_HOME/.config/picom/picom.conf"
 GLX_OK=false
 
 # glxinfo must be available — install if missing
 if ! command -v glxinfo >/dev/null 2>&1; then
     echo "• glxinfo not found, installing mesa-utils..."
-    sudo nala install -y mesa-utils 2>/dev/null || sudo apt install -y mesa-utils 2>/dev/null || true
+    "${NALA_INSTALL[@]}" install -y mesa-utils 2>/dev/null || sudo apt install -y mesa-utils 2>/dev/null || true
 fi
 
 if command -v glxinfo >/dev/null 2>&1; then
@@ -1067,6 +1128,11 @@ PICOMCFG
     fi
 fi
 
+# The installer may have written picom.conf as root while in the ISO chroot.
+if [ -e "$PICOM_CONF" ]; then
+    chown "$TARGET_USER:$TARGET_GROUP" "$PICOM_CONF"
+fi
+
 # ────────────────────────────────────────────────
 # 13. 3D animated fetch (areofyl/fetch - used as "About")
 # ────────────────────────────────────────────────
@@ -1074,13 +1140,20 @@ echo " "
 echo "[SYSTEM] Starting 3rd Party Software Install... "
 echo " "
 echo "• Installing fetch (areofyl/fetch)..."
-cd "$HOME/Alternix"
-git clone https://github.com/areofyl/fetch.git
-cd fetch
-make
-sudo make install
-cd "$HOME/Alternix"
-rm -rf fetch
+# Build fetch in temporary space; no dependence on $HOME or ALT_ROOT.
+(
+    set -e
+    cd /
+    FETCH_BUILD="$(mktemp -d /tmp/alternix-fetch.XXXXXX)"
+    trap 'rm -rf -- "$FETCH_BUILD"' EXIT
+    git clone --depth 1 https://github.com/areofyl/fetch.git "$FETCH_BUILD/fetch"
+    make -C "$FETCH_BUILD/fetch"
+    if [ "$(id -u)" -eq 0 ]; then
+        make -C "$FETCH_BUILD/fetch" install
+    else
+        sudo make -C "$FETCH_BUILD/fetch" install
+    fi
+)
 echo "[✓] 3D fetch Installed..."
 
 
@@ -1090,9 +1163,8 @@ echo "[✓] 3D fetch Installed..."
 echo " "
 
 echo "• Installing rounded-corners..."
-cd "$HOME/Alternix"
-git clone https://github.com/DansDesigns/rounded_corners
-cd rounded_corners
+clone_for_target https://github.com/DansDesigns/rounded_corners "$THIRD_PARTY_DIR/rounded_corners"
+cd "$THIRD_PARTY_DIR/rounded_corners"
 chmod +x install_corners.sh
 sudo ./install_corners.sh
 echo "[✓] Rounded-Corers Installed..."
@@ -1104,11 +1176,10 @@ echo "[✓] Rounded-Corers Installed..."
 echo " "
 
 echo "• Installing Merlin Browser..."
-cd "$HOME/Alternix"
-git clone https://github.com/DansDesigns/merlin-browser
-cd merlin-browser
+clone_for_target https://github.com/DansDesigns/merlin-browser "$THIRD_PARTY_DIR/merlin-browser"
+cd "$THIRD_PARTY_DIR/merlin-browser"
 chmod +x install.sh
-./install.sh
+as_target ./install.sh
 echo "[✓] Merlin Browser Installed..."
 
 
@@ -1118,9 +1189,8 @@ echo "[✓] Merlin Browser Installed..."
 # ────────────────────────────────────────────────
 echo " "
 echo "• Installing auto-cpufreq..."
-cd "$HOME/Alternix"
-git clone https://github.com/AdnanHodzic/auto-cpufreq.git
-cd auto-cpufreq
+clone_for_target https://github.com/AdnanHodzic/auto-cpufreq.git "$THIRD_PARTY_DIR/auto-cpufreq"
+cd "$THIRD_PARTY_DIR/auto-cpufreq"
 sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
 echo "[✓] auto-cpufreq Installed..."
@@ -1131,11 +1201,11 @@ echo "[✓] auto-cpufreq Installed..."
 # ────────────────────────────────────────────────
 echo " "
 echo "• Installing Freehand Spatial Desktop..."
-cd "$HOME/Alternix"
-git clone https://github.com/DansDesigns/Hands.git
-cd hands
+# Clone explicitly into lowercase 'hands' (Git would otherwise use 'Hands').
+clone_for_target https://github.com/DansDesigns/Hands.git "$THIRD_PARTY_DIR/hands"
+cd "$THIRD_PARTY_DIR/hands"
 chmod +x install_linux.sh
-./install_linux.sh
+as_target ./install_linux.sh
 echo "[✓] Freehand Spatial Desktop Installed..."
 
 
@@ -1144,13 +1214,12 @@ echo "[✓] Freehand Spatial Desktop Installed..."
 # ────────────────────────────────────────────────
 echo " "
 echo "• Installing Wave Music Player.."
-cd ~
-git clone https://github.com/DansDesigns/music_player
-cd music_player
+clone_for_target https://github.com/DansDesigns/music_player "$TARGET_HOME/music_player"
+cd "$TARGET_HOME/music_player"
 chmod +x install_music_player.sh
-./install_music_player.sh
+as_target ./install_music_player.sh
 echo "[✓] Wave PLayer Installed..."
-
+cd /
 
 
 # ────────────────────────────────────────────────
