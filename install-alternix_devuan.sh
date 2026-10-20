@@ -545,12 +545,6 @@ echo "• Building osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-lockscreen /usr/local/bin/
 
-echo "• Installing Wave Music Player.."
-cd ~
-git clone https://github.com/DansDesigns/music_player
-cd music_player
-chmod +x install_music_player.sh
-./install_music_player.sh
 
 # ────────────────────────────────────────────────
 # 6. Build OSM Settings + modules
@@ -779,7 +773,7 @@ Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
 chmod +x "$APP_DIR/youtube-webapp.desktop"
-echo "• YouTube WebApp installed."
+echo "✓ YouTube WebApp installed."
 
 echo "[Apps] Installing AlterniTech Forum WebApp..."
 if [ -f "icons/alternitech-forum.png" ]; then
@@ -799,7 +793,7 @@ Categories=Network;WebBrowser;Utility;
 StartupNotify=true
 EOF
 chmod +x "$HOME/.local/share/applications/alternitech-forums.desktop"
-echo "• Alternitech Forums WebApp installed."
+echo "✓ Alternitech Forums WebApp installed."
 
 
 echo "[Apps] Installing Breakout Game..."
@@ -820,7 +814,7 @@ Categories=Game;
 StartupNotify=true
 EOF
 chmod +x "$HOME/.local/share/applications/breakout.desktop"
-echo "• Breakout Game installed."
+echo "✓ Breakout Game installed."
 
 
 
@@ -867,7 +861,7 @@ sudo service nmbd restart || true
 # 8. OSM-Lockscreen Security Layer
 # ────────────────────────────────────────────────
 echo " "
-echo "[X] Setting up lockscreen supervisor..."
+echo "• Setting up lockscreen supervisor..."
 
 # The lockscreen runs inside the user's own X session, started by
 # osm-lockd from Qtile (login and resume) and from osm-power (Lock and
@@ -908,19 +902,34 @@ echo "[✓] Lockscreen supervisor installed."
 
 
 # ────────────────────────────────────────────────
-# 9. logind / elogind power key handling
+# 9. logind / elogind power key and sleep handling
 # Devuan ships elogind as a drop-in for systemd-logind.
 # Its config lives in /etc/elogind/logind.conf (same format).
 # ────────────────────────────────────────────────
 echo " "
-echo "[X] Configuring elogind power key handling..."
+echo "[X] Configuring elogind power key and sleep handling..."
 
-sudo mkdir -p /etc/elogind/logind.conf.d
+sudo mkdir -p /etc/elogind/logind.conf.d /etc/elogind/sleep.conf.d
 
+# Prevent unwanted tablet sleep from power/suspend keys, lid events and idle.
 sudo tee /etc/elogind/logind.conf.d/alternix-power.conf >/dev/null <<'EOF'
 [Login]
 HandlePowerKey=ignore
-PowerKeyIgnoreInhibition=no
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+IdleAction=ignore
+EOF
+
+# Disable elogind-managed suspend and hibernation on Devuan.
+sudo tee /etc/elogind/sleep.conf.d/alternix-no-sleep.conf >/dev/null <<'EOF'
+[Sleep]
+AllowSuspend=no
+AllowHibernation=no
+AllowHybridSleep=no
+AllowSuspendThenHibernate=no
 EOF
 
 # Also update the main logind.conf as a fallback for older elogind versions
@@ -980,28 +989,13 @@ rm -rf "$ALT_ROOT"
 
 
 # ────────────────────────────────────────────────
-# 12. 3D animated fetch (areofyl/fetch — replaces fastfetch)
-# ────────────────────────────────────────────────
-echo " "
-echo "- Installing fetch (areofyl/fetch)..."
-cd "$HOME"
-git clone https://github.com/areofyl/fetch.git
-cd fetch
-make
-sudo make install
-cd "$HOME"
-rm -rf fetch
-
-
-
-# ────────────────────────────────────────────────
-# 13. GLX compatibility check → patch picom.conf
+# 12. GLX compatibility check → patch picom.conf
 # Detects whether the GPU supports GLX/OpenGL well
 # enough for picom's glx backend. If not, switches
 # picom.conf to xrender (safe on all hardware).
 # ────────────────────────────────────────────────
 echo " "
-echo "[Picom] Checking GLX compatibility..."
+echo "•[Picom] Checking GLX compatibility..."
 
 PICOM_CONF="$HOME/.config/picom/picom.conf"
 GLX_OK=false
@@ -1066,6 +1060,22 @@ PICOMCFG
     fi
 fi
 
+# ────────────────────────────────────────────────
+# 13. 3D animated fetch (areofyl/fetch - used as "About")
+# ────────────────────────────────────────────────
+echo " "
+echo "[SYSTEM] Starting 3rd Party Software Install... "
+echo " "
+echo "• Installing fetch (areofyl/fetch)..."
+cd "$HOME/Alternix"
+git clone https://github.com/areofyl/fetch.git
+cd fetch
+make
+sudo make install
+cd "$HOME/Alternix"
+rm -rf fetch
+echo "[✓] 3D fetch Installed..."
+
 
 # ──────────────────────────────────────────────── 
 # 14. install rounded-corners
@@ -1073,7 +1083,7 @@ fi
 echo " "
 
 echo "• Installing rounded-corners..."
-cd $HOME
+cd "$HOME/Alternix"
 git clone https://github.com/DansDesigns/rounded_corners
 cd rounded_corners
 chmod +x install_corners.sh
@@ -1087,7 +1097,7 @@ echo "[✓] Rounded-Corers Installed..."
 echo " "
 
 echo "• Installing Merlin Browser..."
-cd ~
+cd "$HOME/Alternix"
 git clone https://github.com/DansDesigns/merlin-browser
 cd merlin-browser
 chmod +x install.sh
@@ -1101,24 +1111,39 @@ echo "[✓] Merlin Browser Installed..."
 # ────────────────────────────────────────────────
 echo " "
 echo "• Installing auto-cpufreq..."
-cd "$HOME"
+cd "$HOME/Alternix"
 git clone https://github.com/AdnanHodzic/auto-cpufreq.git
 cd auto-cpufreq
 sudo ./auto-cpufreq-installer
 sudo auto-cpufreq --install
+echo "[✓] auto-cpufreq Installed..."
 
 
 # ────────────────────────────────────────────────
-# 17. Freehand Spatial Deskto
+# 17. Freehand Spatial Desktop
 # ────────────────────────────────────────────────
 echo " "
 echo "• Installing Freehand Spatial Desktop..."
-cd "$HOME"
+cd "$HOME/Alternix"
 git clone https://github.com/DansDesigns/Hands.git
 cd hands
 chmod +x install_linux.sh
 ./install_linux.sh
 echo "[✓] Freehand Spatial Desktop Installed..."
+
+
+# ────────────────────────────────────────────────
+# 18. Wave PLayer
+# ────────────────────────────────────────────────
+echo " "
+echo "• Installing Wave Music Player.."
+cd ~
+git clone https://github.com/DansDesigns/music_player
+cd music_player
+chmod +x install_music_player.sh
+./install_music_player.sh
+echo "[✓] Wave PLayer Installed..."
+
 
 
 # ────────────────────────────────────────────────
