@@ -149,9 +149,13 @@ echo "• Updating osm-settings..."
 g++ osm-settings.cpp -o osm-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-settings && sudo mv osm-settings /usr/local/bin/
 
+echo "• Building bluetooth.so..."
+g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m755 bluetooth.so /usr/local/bin/
+
 echo "• Updating reticulum.so..."
 g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
-sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
+sudo install -m755 reticulum.so /usr/local/bin/
 
 
 cd "$ALT_ROOT/Alternix"
