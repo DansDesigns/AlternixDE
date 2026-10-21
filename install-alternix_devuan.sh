@@ -17,9 +17,6 @@ echo ""
 echo ""
 
 
-# Root of the Alternix build repository (not the eventual user's home).
-# Prefer the directory containing this installer; fall back to the original
-# live-build layout (/root/Alternix when the ISO build runs as root).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 if [ -d "$SCRIPT_DIR/Alternix" ]; then
     ALT_ROOT="$SCRIPT_DIR"
