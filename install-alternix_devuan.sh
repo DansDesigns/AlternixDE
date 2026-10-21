@@ -93,35 +93,7 @@ echo ""
 # ────────────────────────────────────────────────
 echo "[1/10] Installing system dependencies..."
 
-# NOTE: nala's volian repo targets Debian codenames. On Devuan, the codename
-# (e.g. "daedalus") maps to Debian bookworm, so the repo entry should still
-# work — but if nala install fails, the script falls back to plain apt.
-
-echo "- Adding nala dependencies.."
-echo "deb http://deb.volian.org/volian/ nala main" | sudo tee /etc/apt/sources.list.d/volian.list
-wget -qO - https://deb.volian.org/volian/volian.gpg | sudo tee /etc/apt/trusted.gpg.d/volian.gpg
-
-echo "[System] Installing nala.."
-if ! sudo apt install nala -y 2>/dev/null; then
-    echo "[System] nala not available for this Devuan release — using apt instead."
-    # sudo nala does not use a shell alias/function; install commands below
-    # select the available package manager explicitly.
-    USE_NALA=false
-fi
-
-USE_NALA="${USE_NALA:-true}"
-if [ "$USE_NALA" = true ] && command -v nala >/dev/null 2>&1; then
-    NALA_INSTALL=(sudo nala)
-else
-    NALA_INSTALL=(sudo apt)
-fi
-
-echo "[System] Removing nala Install Components.."
-sudo rm -f /etc/apt/sources.list.d/volian.list
-sudo rm -f /etc/apt/trusted.gpg.d/volian.gpg
-
-
-echo "[System] Running nala update.."
+echo "[System] Updating APT package lists.."
 sudo apt update
 
 echo "[System] Installing XLibre.."
@@ -149,7 +121,7 @@ sudo apt install xlibre -y
 #sudo dpkg --add-architecture i386
 
 echo "[System] Installing Required Components.."
-"${NALA_INSTALL[@]}" install -y \
+sudo apt install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
@@ -214,7 +186,7 @@ if [ -d "$INSTALLER_DIR" ]; then
     if [ "$DEB_COUNT" -gt 0 ]; then
         echo "• Found $DEB_COUNT installer package(s). Installing..."
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
-        "${NALA_INSTALL[@]}" install -f -y
+        sudo apt -f install -y
         sudo dpkg -i "$INSTALLER_DIR"/*.deb || true
         echo "• Local installer packages installed."
     else
@@ -1071,7 +1043,7 @@ GLX_OK=false
 # glxinfo must be available — install if missing
 if ! command -v glxinfo >/dev/null 2>&1; then
     echo "• glxinfo not found, installing mesa-utils..."
-    "${NALA_INSTALL[@]}" install -y mesa-utils 2>/dev/null || sudo apt install -y mesa-utils 2>/dev/null || true
+    sudo apt install -y mesa-utils 2>/dev/null || true
 fi
 
 if command -v glxinfo >/dev/null 2>&1; then
