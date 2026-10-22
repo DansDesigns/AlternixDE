@@ -48,6 +48,11 @@
 #include <QStandardPaths>
 #include <QCheckBox>
 #include <QRegularExpression>
+#include <QMimeDatabase>
+#include <QMimeType>
+#include <QCryptographicHash>
+#include <QSaveFile>
+#include <QProgressDialog>
 #include <algorithm>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -872,14 +877,58 @@ private:
         return false;
     }
 
-    // A file worth offering to run: a script, or a program with no extension.
-    // An extension is required to be script-like so that a photo which happens
-    // to carry the execute bit still opens as a photo.
+    static bool isAppImageFile(const QString &filePath) {
+        return QFileInfo(filePath).isFile() &&
+               QFileInfo(filePath).fileName().endsWith(".appimage", Qt::CaseInsensitive);
+    }
+
+    // An ELF binary can have an extension, or be downloaded without its execute
+    // bit. Do not mistake a picture with the execute bit set for a program.
+    static bool looksLikeElfProgram(const QString &filePath) {
+        QFile f(filePath);
+        return f.open(QIODevice::ReadOnly) && f.read(4) == QByteArray("\x7f" "ELF", 4);
+    }
+
     static bool isRunnableFile(const QString &filePath) {
         QFileInfo fi(filePath);
         if (!fi.isFile()) return false;
-        if (looksLikeShellScript(filePath)) return true;
+        if (isAppImageFile(filePath) || looksLikeShellScript(filePath) ||
+            looksLikeElfProgram(filePath)) return true;
         return fi.isExecutable() && fi.suffix().isEmpty();
+    }
+
+    // Honor installed system file associations too, rather than assuming
+    // osm-files' own preferences are the only defaults. Stale desktop IDs do
+    // not count as an installed handler.
+    static bool hasSystemDefaultApp(const QString &filePath) {
+        if (QStandardPaths::findExecutable("xdg-mime").isEmpty() ||
+            QStandardPaths::findExecutable("xdg-open").isEmpty()) return false;
+
+        QMimeDatabase db;
+        const QString mime = db.mimeTypeForFile(filePath).name();
+        if (mime.isEmpty() || mime == "application/octet-stream") return false;
+
+        QProcess query;
+        query.start("xdg-mime", QStringList() << "query" << "default" << mime);
+        if (!query.waitForStarted(1500)) return false;
+        if (!query.waitForFinished(2500)) { query.kill(); query.waitForFinished(); return false; }
+        if (query.exitCode() != 0) return false;
+        const QString desktop = QString::fromUtf8(query.readAllStandardOutput()).trimmed();
+        if (desktop.isEmpty() || desktop.contains('/') || !desktop.endsWith(".desktop"))
+            return false;
+
+        QStringList bases;
+        const QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
+        if (QDir::isAbsolutePath(dataHome)) bases << dataHome;
+        bases << QDir::homePath() + "/.local/share";
+        const QString dataDirs = qEnvironmentVariable("XDG_DATA_DIRS",
+                                                    "/usr/local/share:/usr/share");
+        for (const QString &d : dataDirs.split(':', Qt::SkipEmptyParts))
+            if (QDir::isAbsolutePath(d) && !bases.contains(d)) bases << d;
+        for (const QString &base : bases)
+            if (QFileInfo::exists(QDir(base).filePath("applications/" + desktop)))
+                return true;
+        return false;
     }
 
     // Terminal emulator used for "run in terminal". x-terminal-emulator is
@@ -1004,10 +1053,11 @@ private:
     // application, sorted by name.
     //   UserRole     = Exec template
     //   UserRole + 1 = whether the entry wants a terminal window
-    static void populateAppList(QListWidget *list, const QString &preselectExec) {
+    static void populateAppList(QListWidget *list, const QString &preselectExec,
+                                bool runInTerminal = true) {
         QListWidgetItem *run = new QListWidgetItem("Run the file itself", list);
         run->setData(Qt::UserRole, "%f");
-        run->setData(Qt::UserRole + 1, true);   // scripts are worth watching
+        run->setData(Qt::UserRole + 1, runInTerminal);
         if (preselectExec == "%f" || preselectExec == "sh %f")
             list->setCurrentItem(run);
 
@@ -2055,17 +2105,141 @@ private:
         return QString();
     }
 
-    // Open a file with the application remembered for its type, offer to run
-    // scripts and programs, and otherwise fall back to osm-viewer.
+    // Desktop file Exec= uses the desktop-entry escaping rules, rather than
+    // shell escaping. %% prevents file names from becoming field-code tokens.
+    static QString desktopExecPath(const QString &path) {
+        QString p = path;
+        p.replace("\\", "\\\\");
+        p.replace("\"", "\\\"");
+        p.replace("$", "\\$");
+        p.replace("`", "\\`");
+        p.replace("%", "%%");
+        return "\"" + p + "\"";
+    }
+
+    // AppImages are portable programs: install here means a per-user copy and
+    // a .desktop launcher, not installing a system package or running as root.
+    void installAppImage(const QString &filePath) {
+        if (!isAppImageFile(filePath)) return;
+        const QFileInfo fi(filePath);
+        const QString dataHomeEnv = qEnvironmentVariable("XDG_DATA_HOME");
+        const QString dataHome = QDir::isAbsolutePath(dataHomeEnv)
+            ? dataHomeEnv : QDir::homePath() + "/.local/share";
+        const QString imageDir = QDir(dataHome).filePath("AppImages");
+        const QString desktopDir = QDir(dataHome).filePath("applications");
+        if (!QDir().mkpath(imageDir) || !QDir().mkpath(desktopDir)) {
+            QMessageBox::warning(this, "Install AppImage",
+                                 "Unable to create the application directories in " + dataHome);
+            return;
+        }
+
+        // Stable filenames let installing the same download update its launcher,
+        // while files of the same name from different directories remain distinct.
+        const QByteArray digest = QCryptographicHash::hash(
+            fi.absoluteFilePath().toUtf8(), QCryptographicHash::Sha256).toHex().left(12);
+        const QString id = QString::fromLatin1(digest);
+        QString base = fi.fileName();
+        base.replace(QRegularExpression("[\r\n]"), "_");
+        const QString target = QDir(imageDir).filePath(id + "-" + base);
+        const QString launcher = QDir(desktopDir).filePath("alternix-appimage-" + id + ".desktop");
+
+        if (QFileInfo(filePath).absoluteFilePath() != QFileInfo(target).absoluteFilePath()) {
+            QFile input(filePath);
+            if (!input.open(QIODevice::ReadOnly)) {
+                QMessageBox::warning(this, "Install AppImage", "Cannot read AppImage:\n" + input.errorString());
+                return;
+            }
+            QSaveFile output(target);
+            if (!output.open(QIODevice::WriteOnly)) {
+                QMessageBox::warning(this, "Install AppImage", "Cannot write AppImage:\n" + output.errorString());
+                return;
+            }
+
+            QProgressDialog progress("Installing " + fi.fileName() + "...", "Cancel", 0, 100, this);
+            progress.setWindowTitle("Install AppImage");
+            progress.setWindowModality(Qt::WindowModal);
+            progress.setMinimumDuration(0);
+            progress.setAutoClose(false);
+            const qint64 total = qMax<qint64>(1, input.size());
+            qint64 copied = 0;
+            bool failed = false;
+            while (!input.atEnd()) {
+                const QByteArray chunk = input.read(1024 * 1024);
+                if (chunk.isEmpty() || output.write(chunk) != chunk.size()) {
+                    failed = true;
+                    break;
+                }
+                copied += chunk.size();
+                progress.setValue(int((copied * 100) / total));
+                QCoreApplication::processEvents();
+                if (progress.wasCanceled()) {
+                    output.cancelWriting();
+                    return;
+                }
+            }
+            if (failed || !output.commit()) {
+                QMessageBox::warning(this, "Install AppImage", "Failed to copy the AppImage to:\n" + target);
+                return;
+            }
+            progress.setValue(100);
+        }
+
+        QFile installed(target);
+        const QFileDevice::Permissions executable =
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
+            QFileDevice::ReadUser | QFileDevice::ExeUser |
+            QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+            QFileDevice::ReadOther | QFileDevice::ExeOther;
+        if (!installed.setPermissions(executable) || !QFileInfo(target).isExecutable()) {
+            QMessageBox::warning(this, "Install AppImage",
+                "The AppImage was copied, but could not be made executable:\n" + target);
+            return;
+        }
+
+        QString name = fi.fileName();
+        name.chop(9);  // remove '.AppImage', regardless of case
+        name.replace(QRegularExpression("[\r\n]"), " ");
+        if (name.trimmed().isEmpty()) name = "AppImage";
+        const QString desktopText =
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=" + name + "\n"
+            "Exec=" + desktopExecPath(target) + "\n"
+            "Icon=application-x-executable\n"
+            "Terminal=false\n"
+            "Categories=Utility;\n"
+            "StartupNotify=true\n"
+            "Actions=RunWithoutFUSE;\n\n"
+            "[Desktop Action RunWithoutFUSE]\n"
+            "Name=Run without FUSE\n"
+            "Exec=env APPIMAGE_EXTRACT_AND_RUN=1 " + desktopExecPath(target) + "\n";
+        QSaveFile desktop(launcher);
+        if (!desktop.open(QIODevice::WriteOnly) ||
+            desktop.write(desktopText.toUtf8()) != desktopText.toUtf8().size() ||
+            !desktop.commit()) {
+            QMessageBox::warning(this, "Install AppImage",
+                "The AppImage was copied, but its application-menu launcher could not be saved:\n" + launcher);
+            return;
+        }
+
+        QMessageBox::information(this, "AppImage installed",
+            name + " has been added to your applications menu.\n\n"
+            "AppImage: " + target + "\nLauncher: " + launcher + "\n\n"
+            "This is a per-user installation and does not require administrator privileges.");
+    }
+
+    // Remembered choices take priority; otherwise ask before running code,
+    // honor installed MIME defaults, or offer a choice for unassociated files.
     void openFilePath(const QString &filePath) {
         const QString ext  = extensionKeyFor(filePath);
         const QString tmpl = defaultExecFor(ext);
 
         if (!tmpl.isEmpty()) {
             QString runTemplate = tmpl;
-            if (runTemplate == "%f") {
-                runTemplate = directRunTemplate(filePath);
-                if (runTemplate.isEmpty()) { warnNotRunnable(filePath); return; }
+            if (runTemplate == "%f" || runTemplate == "APPIMAGE_EXTRACT_AND_RUN=1 %f") {
+                const QString direct = directRunTemplate(filePath);
+                if (direct.isEmpty()) { warnNotRunnable(filePath); return; }
+                runTemplate = (runTemplate == "%f") ? direct : "APPIMAGE_EXTRACT_AND_RUN=1 " + direct;
             }
             launchCommand(buildExecCommand(runTemplate, filePath),
                           defaultTerminalFor(ext));
@@ -2074,7 +2248,56 @@ private:
 
         if (isRunnableFile(filePath)) { showRunFileDialog(filePath); return; }
 
-        QProcess::startDetached("osm-viewer", QStringList() << filePath);
+        if (hasSystemDefaultApp(filePath) &&
+            QProcess::startDetached("xdg-open", QStringList() << filePath)) return;
+
+        showUnknownFileDialog(filePath);
+    }
+
+    // Like the script prompt, but without offering to execute arbitrary data.
+    // Users can choose an application, use osm-viewer, or remember that choice.
+    void showUnknownFileDialog(const QString &filePath) {
+        const QString ext = extensionKeyFor(filePath);
+        QDialog dlg(this);
+        dlg.setWindowTitle("Open file");
+        dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+        dlg.setMinimumWidth(520);
+        QVBoxLayout *lay = new QVBoxLayout(&dlg);
+        lay->setSpacing(14);
+
+        QLabel *heading = new QLabel(QFileInfo(filePath).fileName());
+        heading->setWordWrap(true);
+        heading->setStyleSheet(themed("QLabel { color:white; font-size:24px; }"));
+        lay->addWidget(heading);
+        QLabel *sub = new QLabel("No default application is set for this file. What would you like to do?");
+        sub->setWordWrap(true);
+        sub->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:17px; }"));
+        lay->addWidget(sub);
+
+        QCheckBox *always = new QCheckBox(QString("Always open .%1 files in the viewer").arg(ext));
+        always->setEnabled(!ext.isEmpty());
+        if (ext.isEmpty()) always->setText("Files without an extension cannot have a type-wide default");
+        always->setStyleSheet(themed(checkBoxStyle()));
+        lay->addWidget(always);
+
+        QPushButton *chooseBtn = bigDialogButton("Choose application...", true);
+        QPushButton *viewerBtn = bigDialogButton("Open in viewer");
+        QPushButton *cancelBtn = bigDialogButton("Cancel");
+        for (QPushButton *b : { chooseBtn, viewerBtn, cancelBtn })
+            lay->addWidget(b);
+        connect(chooseBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(21); });
+        connect(viewerBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(22); });
+        connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
+
+        const int choice = dlg.exec();
+        if (choice == 21) {
+            openWithFilePath(filePath);
+        } else if (choice == 22) {
+            if (always->isChecked() && !ext.isEmpty())
+                setDefaultAppFor(ext, "osm-viewer", "osm-viewer %f", false);
+            if (!QProcess::startDetached("osm-viewer", QStringList() << filePath))
+                QMessageBox::warning(this, "Open file", "Could not launch osm-viewer.");
+        }
     }
 
     // Tapping a script or program asks what to do rather than running it
@@ -2096,39 +2319,57 @@ private:
         heading->setStyleSheet(themed("QLabel { color:white; font-size:24px; }"));
         lay->addWidget(heading);
 
+        const bool appImage = isAppImageFile(filePath);
         QLabel *sub = new QLabel(
-            fi.isExecutable()
-                ? QString("This is a program you can run.")
-                : QString("This is a script. Running it will set the execute "
-                          "permission first."));
+            appImage ? QString("This is a portable AppImage application. You can run it, "
+                               "run it without FUSE, or install it into your applications menu.")
+                     : fi.isExecutable()
+                         ? QString("This is a program you can run.")
+                         : QString("This is a script or executable. Running it will first try "
+                                   "to set the execute permission."));
         sub->setWordWrap(true);
         sub->setStyleSheet(themed("QLabel { color:#CCCCCC; font-size:17px; }"));
         lay->addWidget(sub);
 
         QCheckBox *always = new QCheckBox(
             ext.isEmpty() ? QString("Always do this for files like this")
-                          : QString("Always do this for .%1 files").arg(ext));
+                          : appImage ? QString("Always use the selected run/open action for .%1 files").arg(ext)
+                                     : QString("Always do this for .%1 files").arg(ext));
         always->setEnabled(!ext.isEmpty());
         always->setStyleSheet(themed(checkBoxStyle()));
         lay->addWidget(always);
 
         // Stacked full-width buttons: easier to hit than a row on a tablet
-        QPushButton *termBtn   = bigDialogButton("Run in terminal", true);
-        QPushButton *runBtn    = bigDialogButton("Run");
-        QPushButton *editBtn   = bigDialogButton("Open in editor");
+        QPushButton *termBtn   = bigDialogButton("Run in terminal", !appImage);
+        QPushButton *runBtn    = bigDialogButton("Run", appImage);
+        QPushButton *fuseBtn   = appImage ? bigDialogButton("Run without FUSE") : nullptr;
+        QPushButton *installBtn = appImage ? bigDialogButton("Install AppImage") : nullptr;
+        QPushButton *editBtn   = bigDialogButton(appImage ? "Open with..." : "Open in editor");
         QPushButton *cancelBtn = bigDialogButton("Cancel");
-        for (QPushButton *b : { termBtn, runBtn, editBtn, cancelBtn }) {
-            b->setMinimumHeight(76);
-            lay->addWidget(b);
-        }
+        termBtn->setMinimumHeight(76);
+        runBtn->setMinimumHeight(76);
+        if (appImage) { lay->addWidget(runBtn); lay->addWidget(termBtn); }
+        else { lay->addWidget(termBtn); lay->addWidget(runBtn); }
+        if (fuseBtn) { fuseBtn->setMinimumHeight(76); lay->addWidget(fuseBtn); }
+        if (installBtn) { installBtn->setMinimumHeight(76); lay->addWidget(installBtn); }
+        editBtn->setMinimumHeight(76);
+        cancelBtn->setMinimumHeight(76);
+        lay->addWidget(editBtn);
+        lay->addWidget(cancelBtn);
 
         connect(termBtn,   &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(11); });
         connect(runBtn,    &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(12); });
         connect(editBtn,   &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(13); });
+        if (fuseBtn)
+            connect(fuseBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(16); });
+        if (installBtn)
+            connect(installBtn, &QPushButton::clicked, &dlg, [&dlg]() { dlg.done(14); });
         connect(cancelBtn, &QPushButton::clicked, &dlg, &QDialog::reject);
 
         const int choice = dlg.exec();
-        if (choice != 11 && choice != 12 && choice != 13) return;
+        if (choice == 14) { installAppImage(filePath); return; }
+        if (appImage && choice == 13) { openWithFilePath(filePath); return; }
+        if (choice != 11 && choice != 12 && choice != 13 && choice != 16) return;
 
         QString storedTemplate, runTemplate, name;
         bool inTerminal = false;
@@ -2142,6 +2383,13 @@ private:
             name           = "Run the file itself";
             runTemplate    = directRunTemplate(filePath);
             if (runTemplate.isEmpty()) { warnNotRunnable(filePath); return; }
+            if (choice == 16) {
+                // Type 2 AppImages can extract themselves when libfuse2 is absent.
+                // This is slower than normal execution but works on many live ISOs.
+                storedTemplate = "APPIMAGE_EXTRACT_AND_RUN=1 %f";
+                runTemplate = "APPIMAGE_EXTRACT_AND_RUN=1 " + runTemplate;
+                name = "Run AppImage without FUSE";
+            }
         }
 
         if (always->isChecked() && !ext.isEmpty())
@@ -2359,8 +2607,10 @@ private:
 
     void openWithSelection() {
         if (selectedPaths.size() != 1) return;
+        openWithFilePath(*selectedPaths.begin());
+    }
 
-        QString filePath = *selectedPaths.begin();
+    void openWithFilePath(const QString &filePath) {
         if (!QFileInfo(filePath).isFile()) return;
 
         const QString ext = extensionKeyFor(filePath);
@@ -2402,7 +2652,7 @@ private:
         QScroller::ungrabGesture(list);
         list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-        populateAppList(list, defaultExecFor(ext));
+        populateAppList(list, defaultExecFor(ext), !isAppImageFile(filePath));
 
         QLineEdit *cmdEdit = new QLineEdit;
         cmdEdit->setPlaceholderText("Custom command (e.g. gimp %f)");
