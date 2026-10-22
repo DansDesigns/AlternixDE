@@ -1168,14 +1168,14 @@ echo "[✓] auto-cpufreq Installed..."
 # ────────────────────────────────────────────────
 # 17. Freehand Spatial Desktop
 # ────────────────────────────────────────────────
-echo " "
-echo "• Installing Freehand Spatial Desktop..."
+#echo " "
+#echo "• Installing Freehand Spatial Desktop..."
 # Clone explicitly into lowercase 'hands' (Git would otherwise use 'Hands').
-clone_for_target https://github.com/DansDesigns/Hands.git "$THIRD_PARTY_DIR/hands"
-cd "$THIRD_PARTY_DIR/hands"
-chmod +x install_linux.sh
-as_target ./install_linux.sh
-echo "[✓] Freehand Spatial Desktop Installed..."
+#clone_for_target https://github.com/DansDesigns/Hands.git "$THIRD_PARTY_DIR/hands"
+#cd "$THIRD_PARTY_DIR/hands"
+#chmod +x install_linux.sh
+#as_target ./install_linux.sh
+#echo "[✓] Freehand Spatial Desktop Installed..."
 
 
 # ────────────────────────────────────────────────
