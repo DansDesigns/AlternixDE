@@ -628,6 +628,27 @@ echo "• Building osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-lockscreen /usr/local/bin/
 
+echo "• Building osm-kernels..."
+g++ -fPIC apps/osm-kernels.cpp -o osm-kernels $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 osm-kernels /usr/local/bin/
+
+if [ -f "icons/osm-kernels.png" ]; then
+    sudo cp icons/osm-kernels.png /usr/share/icons/hicolor/64x64/apps/osm-kernels.png
+fi
+
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+[Desktop Entry]
+Type=Application
+Name=Kernels
+Comment=Install, remove and choose Linux kernels
+Exec=osm-kernels
+Icon=osm-kernels
+Terminal=false
+Categories=System;Settings;
+Keywords=kernel;linux;mainline;liquorix;xanmod;grub;
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+
 
 # ────────────────────────────────────────────────
 # 6. Build OSM Settings + modules

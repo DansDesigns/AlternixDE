@@ -168,6 +168,27 @@ sudo install -m755 system.so /usr/local/bin/
 
 cd "$ALT_ROOT/Alternix"
 
+echo "• Building osm-kernels..."
+g++ -fPIC apps/osm-kernels.cpp -o osm-kernels $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 osm-kernels /usr/local/bin/
+
+if [ -f "icons/osm-kernels.png" ]; then
+    sudo cp icons/osm-kernels.png /usr/share/icons/hicolor/64x64/apps/osm-kernels.png
+fi
+
+cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+[Desktop Entry]
+Type=Application
+Name=Kernels
+Comment=Install, remove and choose Linux kernels
+Exec=osm-kernels
+Icon=osm-kernels
+Terminal=false
+Categories=System;Settings;
+Keywords=kernel;linux;mainline;liquorix;xanmod;grub;
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+
 
 echo "• Building osm-notify..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
@@ -280,6 +301,8 @@ sudo cp alternix-waydroid-session /usr/local/bin
 
 chmod +x alternix-exe
 sudo cp alternix-exe /usr/local/bin
+
+
 
 
 
