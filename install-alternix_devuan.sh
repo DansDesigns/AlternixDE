@@ -132,6 +132,87 @@ sudo apt install -y \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
 
+
+# ------------------------------------------------
+# AlternixOS clock stability (Devuan / SysVinit)
+# Chrony corrects running-clock drift; util-linux-extra supplies hwclock.
+# Do not change the configured timezone or RTC UTC/LOCAL setting.
+# ------------------------------------------------
+echo "[System] Configuring automatic time synchronisation..."
+sudo apt install -y chrony util-linux-extra
+
+# Configure Chrony even when this installer is run inside the ISO build chroot.
+# Keep any existing servers, authentication and RTC configuration intact.
+sudo /bin/sh <<'ALT_TIME_CONFIG'
+set -eu
+CONF=/etc/chrony/chrony.conf
+mkdir -p /etc/chrony /var/lib/chrony
+if [ ! -f "$CONF" ]; then
+    cat > "$CONF" <<'EOF'
+pool pool.ntp.org iburst
+driftfile /var/lib/chrony/chrony.drift
+makestep 1.0 3
+rtcsync
+EOF
+else
+    grep -Eq '^[[:space:]]*(pool|server|peer|refclock)[[:space:]]+' "$CONF" || \
+        printf '\n# AlternixOS: time sources\npool pool.ntp.org iburst\n' >> "$CONF"
+    grep -Eq '^[[:space:]]*driftfile[[:space:]]+' "$CONF" || \
+        printf '\n# AlternixOS: clock drift calibration\ndriftfile /var/lib/chrony/chrony.drift\n' >> "$CONF"
+    grep -Eq '^[[:space:]]*makestep[[:space:]]+' "$CONF" || \
+        printf '\n# AlternixOS: correct large startup errors\nmakestep 1.0 3\n' >> "$CONF"
+    if ! grep -Eq '^[[:space:]]*(rtcfile|rtcsync)([[:space:]]|$)' "$CONF"; then
+        printf '\n# AlternixOS: update hardware RTC after synchronisation\nrtcsync\n' >> "$CONF"
+    fi
+fi
+
+# Enable Chrony for subsequent boots (works with SysVinit, not systemctl).
+if command -v update-rc.d >/dev/null 2>&1; then
+    update-rc.d chrony defaults >/dev/null 2>&1 || true
+    update-rc.d chrony enable >/dev/null 2>&1 || true
+fi
+
+# RTC checks have to run on the installed machine, not the ISO build host.
+# Keep fake-hwclock for devices whose RTC cannot actually be read.
+cat > /etc/init.d/alternix-rtc-check <<'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          alternix-rtc-check
+# Required-Start:    $local_fs
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: Prefer a usable hardware RTC over fake-hwclock
+### END INIT INFO
+case "${1:-}" in
+    start)
+        if command -v hwclock >/dev/null 2>&1 && hwclock --show >/dev/null 2>&1; then
+            if [ -x /etc/init.d/fake-hwclock ] && command -v update-rc.d >/dev/null 2>&1; then
+                update-rc.d fake-hwclock disable >/dev/null 2>&1 || true
+            fi
+        fi
+        ;;
+    stop|restart|force-reload) ;;
+esac
+exit 0
+EOF
+chmod 755 /etc/init.d/alternix-rtc-check
+if command -v update-rc.d >/dev/null 2>&1; then
+    update-rc.d alternix-rtc-check defaults 99 >/dev/null 2>&1 || true
+fi
+ALT_TIME_CONFIG
+
+# Avoid starting daemons and probing RTC devices inside an ISO-build chroot.
+ALT_TIME_ROOT_ID="$(sudo stat -Lc '%d:%i' / 2>/dev/null || true)"
+ALT_TIME_INIT_ROOT_ID="$(sudo stat -Lc '%d:%i' /proc/1/root/ 2>/dev/null || true)"
+if [ ! -e /etc/debian_chroot ] && \
+   [ -n "$ALT_TIME_INIT_ROOT_ID" ] && \
+   [ "$ALT_TIME_ROOT_ID" = "$ALT_TIME_INIT_ROOT_ID" ]; then
+    sudo service chrony restart || echo "WARNING: Chrony will start automatically at next boot."
+else
+    echo "[Time] Chrony enabled for the installed system; live checks deferred until boot."
+fi
+
 echo ""
 echo "[System] Installing Qtile, Qtile-Extras & mypy"
 pip3 install qtile qtile-extras mypy --break-system-packages
