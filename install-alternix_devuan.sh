@@ -1080,6 +1080,21 @@ THIRD_PARTY_DIR="$TARGET_HOME/Alternix"
 mkdir -p "$THIRD_PARTY_DIR"
 chown "$TARGET_USER:$TARGET_GROUP" "$THIRD_PARTY_DIR"
 
+# Download the AlternixOS release version into the selected user's home.
+# Always replace an existing version on success; preserve it if download fails.
+echo "• Downloading AlternixOS version..."
+ALT_OS_VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixOS/main/version"
+ALT_OS_VERSION_TMP="$(as_target mktemp "$THIRD_PARTY_DIR/.version.XXXXXX")"
+if as_target curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+        -o "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_URL" && [ -s "$ALT_OS_VERSION_TMP" ]; then
+    as_target chmod 644 "$ALT_OS_VERSION_TMP"
+    as_target mv -f "$ALT_OS_VERSION_TMP" "$THIRD_PARTY_DIR/version"
+    echo "• AlternixOS version saved to $THIRD_PARTY_DIR/version"
+else
+    as_target rm -f "$ALT_OS_VERSION_TMP"
+    echo "WARNING: Could not download AlternixOS version; installation will continue."
+fi
+
 # Build-time writes above must not leave the installed desktop owned by root.
 for user_dir in "$TARGET_HOME/.config" "$TARGET_HOME/.local" \
                 "$TARGET_HOME/.qtile_venv" "$TARGET_HOME/Pictures/wallpapers" \
