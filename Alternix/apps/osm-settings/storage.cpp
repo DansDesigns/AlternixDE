@@ -13,14 +13,19 @@
 #include <QFile>
 #include <QDir>
 #include <QStackedWidget>
-#include <QTextStream>
 #include <QSlider>
 #include <QCoreApplication>
 #include <QResizeEvent>
 #include <QMessageBox>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QJsonValue>
+#include <QJsonParseError>
+#include <QHash>
+#include <functional>
 
 #include <sys/statvfs.h>
-#include <dirent.h>
 #include <unistd.h>
 
 // -----------------------------------------------------
@@ -34,132 +39,199 @@ static QString humanSize(qulonglong bytes) {
     return QString::number(b, 'f', (i==0?0:1)) + " " + u[i];
 }
 
-static bool runCmdWithOutput(const QString &cmd, QString &output)
+// The same desktop-session mount order as osm-files: udisksctl, then pmount.
+// Commands always receive arguments separately (never interpolate device names in sh).
+static bool runUtility(const QString &program, const QStringList &args,
+                       QString &output, int timeoutMs = 15000)
 {
     QProcess p;
-    p.start("/bin/sh", {"-c", cmd});
-    if (!p.waitForFinished())
+    p.setProcessChannelMode(QProcess::MergedChannels);
+    p.start(program, args);
+    if (!p.waitForStarted(2000)) {
+        output = "Could not start " + program + ". Is it installed?";
         return false;
-    output = QString::fromLocal8Bit(p.readAllStandardOutput())
-           + QString::fromLocal8Bit(p.readAllStandardError());
-    return (p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0);
+    }
+    if (!p.waitForFinished(timeoutMs)) {
+        p.kill();
+        p.waitForFinished(1000);
+        output = QString::fromLocal8Bit(p.readAll()) + "\n" + program + " timed out.";
+        return false;
+    }
+    output = QString::fromLocal8Bit(p.readAll());
+    return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
 }
 
+// lsblk is also the mountpoint source for osm-files. It resolves device aliases
+// and returns unescaped paths, unlike naive string matching in /proc/mounts.
 static QString findMount(const QString &dev)
 {
-    QFile f("/proc/mounts");
-    if (!f.open(QIODevice::ReadOnly))
-        return "";
-    QTextStream in(&f);
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        QStringList parts = line.split(' ');
-        if (parts.size() < 2)
-            continue;
-        if (parts[0] == dev)
-            return parts[1];
+    QString output;
+    if (!runUtility("lsblk", {"-n", "-o", "MOUNTPOINT", dev}, output, 3000))
+        return QString();
+    for (const QString &line : output.split('\n')) {
+        QString mp = line.trimmed();
+        if (!mp.isEmpty()) return mp;
     }
-    return "";
+    return QString();
 }
 
-// Mount a removable partition the way a desktop session does.
-//
-// Plain "mount" is not permitted for an ordinary user, and "sudo mount" on its
-// own leaves FAT/exFAT volumes owned by root, so the user cannot write to their
-// own SD card or USB stick. Try the privileged helpers first (udisks2 through
-// polkit, then pmount) and only fall back to sudo, passing the ownership
-// options that FAT-family filesystems need.
-//
-// The mount point is always read back from /proc/mounts rather than assumed,
-// because udisks2 and pmount both choose it themselves.
 static bool mountDevice(const QString &dev, QString &mountPoint, QString &output)
 {
+    mountPoint = findMount(dev);
     output.clear();
-    mountPoint.clear();
-
-    QString out;
-
-    // 1) udisks2 + polkit: mounts to /run/media/<user>/<label>
-    runCmdWithOutput(QString("udisksctl mount -b %1").arg(dev), out);
-    output += out;
-    mountPoint = findMount(dev);
     if (!mountPoint.isEmpty()) return true;
 
-    // 2) pmount: mounts under /media as the calling user
-    runCmdWithOutput(QString("pmount %1").arg(dev), out);
-    output += out;
+    QString step;
+    const bool udisksOk = runUtility("udisksctl", {"mount", "-b", dev}, step);
+    output += step;
     mountPoint = findMount(dev);
-    if (!mountPoint.isEmpty()) return true;
-
-    // 3) sudo: an ordinary user cannot create a directory in /media, so the
-    //    mount point has to be made with sudo as well
-    const QString tgt = "/media/" + QFileInfo(dev).fileName();
-
-    QString fsType;
-    runCmdWithOutput(QString("lsblk -no FSTYPE %1").arg(dev), fsType);
-    fsType = fsType.trimmed();
-
-    QString opts;
-    if (fsType == "vfat" || fsType == "msdos" || fsType == "exfat" ||
-        fsType == "ntfs" || fsType == "ntfs3") {
-        opts = QString("-o uid=%1,gid=%2,umask=0022 ")
-                   .arg((uint)getuid())
-                   .arg((uint)getgid());
+    if (mountPoint.isEmpty() && udisksOk) {
+        // Same fallback used in osm-files for a just-created udisks mount.
+        int at = step.lastIndexOf(" at ");
+        if (at >= 0) {
+            QString parsed = step.mid(at + 4).trimmed();
+            if (parsed.endsWith('.')) parsed.chop(1);
+            if (QDir(parsed).exists()) mountPoint = parsed;
+        }
     }
-
-    const QString mountCmd =
-        "mkdir -p '" + tgt + "' && mount " + opts + dev + " '" + tgt + "'";
-
-    // -n first: without a terminal, a missing NOPASSWD rule must fail straight
-    // away instead of blocking on a password prompt nobody can answer
-    runCmdWithOutput("sudo -n sh -c \"" + mountCmd + "\"", out);
-    output += out;
-    mountPoint = findMount(dev);
     if (!mountPoint.isEmpty()) return true;
 
-    if (qEnvironmentVariableIsSet("SUDO_ASKPASS")) {
-        runCmdWithOutput("sudo -A sh -c \"" + mountCmd + "\"", out);
-        output += out;
-        mountPoint = findMount(dev);
-        if (!mountPoint.isEmpty()) return true;
+    const bool pmountOk = runUtility("pmount", {dev}, step);
+    if (!step.trimmed().isEmpty()) output += "\n" + step;
+    mountPoint = findMount(dev);
+    if (mountPoint.isEmpty() && pmountOk) {
+        const QString expected = "/media/" + QFileInfo(dev).fileName();
+        if (QDir(expected).exists()) mountPoint = expected;
     }
-
-    return false;
+    return !mountPoint.isEmpty();
 }
 
-// Unmount a removable partition, using the same escalation ladder as
-// mountDevice. Success is confirmed against /proc/mounts, not exit codes,
-// because udisksctl reports an error for a volume it did not mount itself.
 static bool unmountDevice(const QString &dev, const QString &mountPoint, QString &output)
 {
+    Q_UNUSED(mountPoint);
     output.clear();
-
-    QString out;
-
-    runCmdWithOutput(QString("udisksctl unmount -b %1").arg(dev), out);
-    output += out;
     if (findMount(dev).isEmpty()) return true;
 
-    runCmdWithOutput(QString("pumount %1").arg(dev), out);
-    output += out;
+    QString step;
+    runUtility("udisksctl", {"unmount", "-b", dev}, step);
+    output = step;
     if (findMount(dev).isEmpty()) return true;
 
-    const QString target = mountPoint.isEmpty() ? dev : mountPoint;
+    runUtility("pumount", {dev}, step);
+    if (!step.trimmed().isEmpty()) output += "\n" + step;
+    return findMount(dev).isEmpty();
+}
 
-    runCmdWithOutput("umount '" + target + "'", out);
-    output += out;
-    if (findMount(dev).isEmpty()) return true;
+// Match the USB/SD classification from osm-files. A SATA disk named sda must
+// not be classified as removable simply because its name begins with 'sd'.
+static bool isUsbOrRemovableDisk(const QString &diskName)
+{
+    const QString sysPath = "/sys/block/" + diskName;
+    if (diskName.contains("boot") || diskName.contains("rpmb")) return false;
 
-    runCmdWithOutput("sudo -n umount '" + target + "'", out);
-    output += out;
-    if (findMount(dev).isEmpty()) return true;
-
-    if (qEnvironmentVariableIsSet("SUDO_ASKPASS")) {
-        runCmdWithOutput("sudo -A umount '" + target + "'", out);
-        output += out;
-        if (findMount(dev).isEmpty()) return true;
+    if (diskName.startsWith("mmcblk")) {
+        QFile type(sysPath + "/device/type");
+        if (type.open(QIODevice::ReadOnly))
+            return QString::fromLatin1(type.readAll()).trimmed()
+                       .compare("SD", Qt::CaseInsensitive) == 0;
+        return QFile::exists(sysPath + "/device/scr");
     }
 
+    QFile flag(sysPath + "/removable");
+    if (flag.open(QIODevice::ReadOnly) && flag.readAll().trimmed() == "1")
+        return true;
+
+    return QFileInfo(sysPath).canonicalFilePath().contains("/usb");
+}
+
+struct StorageVolume {
+    QString dev, label, size, fstype, mountPoint;
+};
+
+struct StorageDisk {
+    QString dev, size;
+    bool removable = false;
+    QVector<StorageVolume> volumes;
+};
+
+static bool readStorageDisks(QVector<StorageDisk> &disks, QString &rootDisk,
+                             QString &rootPartition, QString &error)
+{
+    QString output;
+    if (!runUtility("lsblk", {"-J", "-o", "NAME,SIZE,LABEL,MOUNTPOINT,TYPE,FSTYPE"},
+                    output, 5000)) {
+        error = "Unable to list drives with lsblk:\n" + output;
+        return false;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument json = QJsonDocument::fromJson(output.toUtf8(), &parseError);
+    if (!json.isObject() || parseError.error != QJsonParseError::NoError) {
+        error = "Unable to read lsblk JSON: " + parseError.errorString();
+        return false;
+    }
+
+    disks.clear();
+    rootDisk.clear();
+    rootPartition.clear();
+    const QJsonArray blockdevices = json.object().value("blockdevices").toArray();
+    for (const QJsonValue &entry : blockdevices) {
+        const QJsonObject diskJson = entry.toObject();
+        if (diskJson.value("type").toString() != "disk") continue;
+        const QString name = diskJson.value("name").toString();
+        if (name.isEmpty() || name.contains("boot") || name.contains("rpmb")) continue;
+
+        StorageDisk disk;
+        disk.dev = "/dev/" + name;
+        disk.size = diskJson.value("size").toString();
+        disk.removable = isUsbOrRemovableDisk(name);
+
+        std::function<void(const QJsonObject&)> collect = [&](const QJsonObject &node) {
+            const QString nodeName = node.value("name").toString();
+            const QString fs = node.value("fstype").toString();
+            const QString mp = node.value("mountpoint").toString();
+            const QString type = node.value("type").toString();
+            const QString devicePath = "/dev/" + nodeName;
+
+            if (mp == "/") {
+                rootDisk = disk.dev;
+                rootPartition = devicePath;
+            }
+
+            // Mirrors osm-files: only expose mountable filesystems, not raw
+            // partition table containers, swap, or eMMC boot/RPMB devices.
+            if (!nodeName.isEmpty() && !fs.isEmpty() && fs.compare("swap", Qt::CaseInsensitive) != 0 &&
+                !fs.startsWith("crypto", Qt::CaseInsensitive) &&
+                fs != "LVM2_member" && fs != "linux_raid_member" &&
+                type != "crypto" && !nodeName.contains("boot0") &&
+                !nodeName.contains("boot1") && !nodeName.contains("rpmb")) {
+                StorageVolume volume;
+                volume.dev = devicePath;
+                volume.label = node.value("label").toString();
+                volume.size = node.value("size").toString();
+                volume.fstype = fs;
+                volume.mountPoint = mp;
+                disk.volumes.append(volume);
+            }
+
+            for (const QJsonValue &child : node.value("children").toArray())
+                collect(child.toObject());
+        };
+        collect(diskJson); // also supports a filesystem directly on a whole disk
+        disks.append(disk);
+    }
+    return true;
+}
+
+static bool protectedSystemMount(const QString &mountPoint)
+{
+    if (mountPoint == "/") return true;
+    static const QStringList protectedPaths = {
+        "/boot", "/home", "/usr", "/var", "/etc", "/opt", "/srv",
+        "/run", "/proc", "/sys", "/dev", "/tmp"
+    };
+    for (const QString &path : protectedPaths)
+        if (mountPoint == path || mountPoint.startsWith(path + "/")) return true;
     return false;
 }
 
@@ -171,51 +243,6 @@ static bool getSpace(const QString &mp, qulonglong &total, qulonglong &free)
     total = (qulonglong)st.f_blocks * st.f_frsize;
     free  = (qulonglong)st.f_bavail * st.f_frsize;
     return true;
-}
-
-static qulonglong partBytes(const QString &dev)
-{
-    QFile f("/sys/class/block/" + QFileInfo(dev).fileName() + "/size");
-    if (!f.open(QIODevice::ReadOnly)) return 0;
-    bool ok = false;
-    qulonglong sectors = f.readAll().trimmed().toULongLong(&ok);
-    return ok ? sectors * 512ULL : 0;
-}
-
-// root device for "/"
-static QString detectRootDev()
-{
-    QFile f("/proc/mounts");
-    if (!f.open(QIODevice::ReadOnly))
-        return "";
-    QTextStream in(&f);
-    while (!in.atEnd()) {
-        QString line = in.readLine();
-        QStringList parts = line.split(' ');
-        if (parts.size() < 2)
-            continue;
-        if (parts[1] == "/")
-            return parts[0];
-    }
-    return "";
-}
-
-// base device name from partition path
-static QString baseDeviceName(const QString &devPath)
-{
-    QString name = QFileInfo(devPath).fileName();
-
-    if (name.startsWith("mmcblk")) {
-        int idx = name.indexOf('p');
-        if (idx > 0)
-            return name.left(idx);
-        return name;
-    }
-
-    if (name.startsWith("sd") && name.size() >= 3)
-        return name.left(3);
-
-    return name;
 }
 
 // -----------------------------------------------------
@@ -360,8 +387,8 @@ public:
 
         QPushButton *openInt = makeBtn("Open");
         intLay->addWidget(openInt, 0, Qt::AlignCenter);
-        connect(openInt, &QPushButton::clicked, this, []() {
-            QProcess::startDetached("osm-files", {"/"});
+        connect(openInt, &QPushButton::clicked, this, [this]() {
+            launchFiles("/");
         });
 
         outerLay->addWidget(intCard);
@@ -393,10 +420,12 @@ public:
 
         if (m_stack) {
             connect(m_stack, &QStackedWidget::currentChanged, this, [this](int idx){
-                if (m_stack->widget(idx) == this)
+                if (m_stack->widget(idx) == this) {
+                    refreshAll();
                     m_timer->start();
-                else
+                } else {
                     m_timer->stop();
+                }
             });
             if (m_stack->currentWidget() == this)
                 m_timer->start();
@@ -433,6 +462,7 @@ private:
 
     QString m_rootDev;
     QString m_rootBase;
+    QVector<StorageDisk> m_disks;
 
     // -----------------------------------------------------
     // Width helper
@@ -448,46 +478,115 @@ private:
     // -----------------------------------------------------
     // DEV scanning
     // -----------------------------------------------------
-    QStringList scanBaseDevices()
+    QStringList scanPartitions(const QString &baseDevPath) const
     {
-        QStringList devs;
-        DIR *d = opendir("/dev");
-        if (!d) return devs;
-
-        while (auto *e = readdir(d)) {
-            QString n = e->d_name;
-
-            // eMMC boot0/boot1/rpmb are not user storage, only mmcblkN is
-            if (n.startsWith("mmcblk") && !n.contains('p')
-                && !n.contains("boot") && !n.contains("rpmb"))
-                devs << "/dev/" + n;
-
-            if (n.size() == 3 && n.startsWith("sd"))
-                devs << "/dev/" + n;
+        QStringList parts;
+        for (const StorageDisk &disk : m_disks) {
+            if (disk.dev != baseDevPath) continue;
+            for (const StorageVolume &volume : disk.volumes)
+                parts << volume.dev;
+            break;
         }
-        closedir(d);
-        devs.sort();
-        return devs;
+        return parts;
     }
 
-    QStringList scanPartitions(const QString &baseDevPath)
+    const StorageVolume *volumeFor(const QString &device) const
     {
-        QString baseName = QFileInfo(baseDevPath).fileName();
-        QStringList parts;
-        DIR *d = opendir("/dev");
-        if (!d) return parts;
+        for (const StorageDisk &disk : m_disks)
+            for (const StorageVolume &volume : disk.volumes)
+                if (volume.dev == device) return &volume;
+        return nullptr;
+    }
 
-        while (auto *e = readdir(d)) {
-            QString n = e->d_name;
-            // eMMC boot0/boot1/rpmb areas are not usable partitions
-            if (n.contains("boot") || n.contains("rpmb"))
-                continue;
-            if (n != baseName && n.startsWith(baseName))
-                parts << "/dev/" + n;
+    const StorageDisk *diskFor(const QString &device) const
+    {
+        for (const StorageDisk &disk : m_disks)
+            if (disk.dev == device) return &disk;
+        return nullptr;
+    }
+
+    void launchFiles(const QString &path)
+    {
+        if (!QDir(path).exists()) {
+            QMessageBox::warning(this, "Open drive", "The folder is no longer available:\n" + path);
+            return;
         }
-        closedir(d);
-        parts.sort();
-        return parts;
+        if (!QProcess::startDetached("osm-files", QStringList() << path)) {
+            QMessageBox::warning(this, "Open drive",
+                                 "Could not start osm-files. Make sure it is installed and on PATH.");
+        }
+    }
+
+    // A mounted drive opens immediately. On an unmounted drive, Open mounts it
+    // using the same path as the Mount button, then launches osm-files there.
+    void openVolume(const QString &device)
+    {
+        QString mp = findMount(device);
+        if (mp.isEmpty()) {
+            QString output;
+            if (!mountDevice(device, mp, output)) {
+                QMessageBox::warning(this, "Mount failed",
+                    "Could not mount:\n" + device + "\n\n" + output.trimmed() +
+                    "\n\nInstall udisks2 (with elogind) or pmount, and check your "
+                    "desktop session's mounting permissions.");
+                refreshAll();
+                return;
+            }
+        }
+        launchFiles(mp);
+        refreshAll();
+    }
+
+    void toggleMount(const QString &device)
+    {
+        const QString mp = findMount(device);
+        QString output;
+        if (mp.isEmpty()) {
+            QString newMountPoint;
+            if (!mountDevice(device, newMountPoint, output))
+                QMessageBox::warning(this, "Mount failed",
+                    "Could not mount:\n" + device + "\n\n" + output.trimmed() +
+                    "\n\nInstall udisks2 (with elogind) or pmount, and check your "
+                    "desktop session's mounting permissions.");
+        } else if (!protectedSystemMount(mp)) {
+            if (!unmountDevice(device, mp, output))
+                QMessageBox::warning(this, "Unmount failed",
+                    "Could not unmount:\n" + mp + "\n\n" + output.trimmed() +
+                    "\n\nClose files or applications using this drive and try again.");
+        }
+        refreshAll();
+    }
+
+    void ejectDisk(const QString &device)
+    {
+        const StorageDisk *disk = diskFor(device);
+        if (!disk || !disk->removable) return;
+        const QStringList partitions = scanPartitions(device);
+        QString errors;
+        for (const QString &partition : partitions) {
+            const QString mp = findMount(partition);
+            if (mp.isEmpty()) continue;
+            if (protectedSystemMount(mp)) {
+                errors += "System mount cannot be ejected: " + mp + "\n";
+                continue;
+            }
+            QString output;
+            if (!unmountDevice(partition, mp, output))
+                errors += partition + ": " + output.trimmed() + "\n";
+        }
+        // Power off only after every filesystem is confirmed unmounted.
+        if (errors.isEmpty()) {
+            bool stillMounted = false;
+            for (const QString &partition : partitions)
+                if (!findMount(partition).isEmpty()) stillMounted = true;
+            if (!stillMounted) {
+                QString ignored;
+                runUtility("udisksctl", {"power-off", "-b", device}, ignored, 8000);
+            }
+        }
+        if (!errors.isEmpty())
+            QMessageBox::warning(this, "Eject failed", errors.trimmed());
+        refreshAll();
     }
 
     // -----------------------------------------------------
@@ -581,46 +680,49 @@ private:
     // -----------------------------------------------------
     void updatePartitionCard(PartitionCard *pc, bool internalRoot)
     {
+        const StorageVolume *volume = volumeFor(pc->dev);
+        const QString mp = volume ? volume->mountPoint : findMount(pc->dev);
+        pc->mountPoint = mp;
         if (internalRoot) {
-            qulonglong total=0, free=0;
+            qulonglong total = 0, free = 0;
             getSpace("/", total, free);
             pc->mountPoint = "/";
-
             pc->info->setText(
                 QString("<span style='color:#7CFC00;'>Mounted at /</span><br>"
                         "%1 free / %2 total")
-                .arg(humanSize(free))
-                .arg(humanSize(total))
-            );
-
+                        .arg(humanSize(free), humanSize(total)));
             if (pc->btnMount) pc->btnMount->hide();
-            if (pc->btnOpen)  pc->btnOpen->hide();
+            if (pc->btnOpen) pc->btnOpen->hide(); // use Internal Storage Open
             if (pc->btnEject) pc->btnEject->hide();
             return;
         }
 
-        QString mp = findMount(pc->dev);
-        pc->mountPoint = mp;
-
+        const QString detail = volume
+            ? QString("%1%2 (%3)").arg(
+                  volume->label.isEmpty() ? "" : volume->label.toHtmlEscaped() + "<br>",
+                  volume->size.toHtmlEscaped(), volume->fstype.toHtmlEscaped())
+            : QString();
         if (mp.isEmpty()) {
-            qulonglong size = partBytes(pc->dev);
-            pc->info->setText(QString("Size: %1\nNot mounted").arg(humanSize(size)));
+            pc->info->setText(detail + "<br>Not mounted");
             pc->btnMount->setText("Mount");
             pc->btnMount->setStyleSheet(altBtnStyle("white"));
-            pc->btnOpen->hide();
         } else {
-            qulonglong t=0, f=0;
-            getSpace(mp, t, f);
+            qulonglong total = 0, free = 0;
+            const bool hasSpace = getSpace(mp, total, free);
             pc->info->setText(
-                QString("<span style='color:#7CFC00;'>Mounted</span><br>"
-                        "%1 free / %2 total")
-                .arg(humanSize(f))
-                .arg(humanSize(t))
-            );
+                QString("<span style='color:#7CFC00;'>Mounted</span><br>%1<br>%2")
+                    .arg(mp.toHtmlEscaped(),
+                         hasSpace ? QString("%1 free / %2 total")
+                                        .arg(humanSize(free), humanSize(total))
+                                  : detail));
             pc->btnMount->setText("Unmount");
             pc->btnMount->setStyleSheet(altBtnStyle("#CC6666"));
-            pc->btnOpen->show();
         }
+        // Never let Storage tear down critical OS mount points. All other
+        // mounted and unmounted filesystems retain a working Open button.
+        pc->btnMount->setVisible(mp.isEmpty() || !protectedSystemMount(mp));
+        pc->btnOpen->show();
+        if (pc->btnEject && protectedSystemMount(mp)) pc->btnEject->hide();
     }
 
     // -----------------------------------------------------
@@ -645,81 +747,26 @@ private:
     void buildInternalGrid()
     {
         clearInternalParts();
+        if (m_rootBase.isEmpty()) return;
 
-        if (m_rootBase.isEmpty())
-            return;
+        const QString baseDevPath = "/dev/" + m_rootBase;
+        const QStringList parts = scanPartitions(baseDevPath);
+        const int cols = qMax(2, effectiveWidth() / 225);
+        int row = 0, col = 0;
 
-        QString baseDevPath = "/dev/" + m_rootBase;
-        QStringList parts = scanPartitions(baseDevPath);
-
-        if (parts.isEmpty() && !m_rootDev.isEmpty())
-            parts << m_rootDev;
-
-        if (parts.isEmpty())
-            return;
-
-        PartitionCard *tmp = createPartitionCard(parts.first(), true);
-        tmp->frame->adjustSize();
-        int cardW = tmp->frame->sizeHint().width();
-        if (cardW < 200) cardW = 200;
-        tmp->frame->deleteLater();
-        delete tmp;
-
-        int avail = effectiveWidth();
-        int cols = qMax(2, avail / cardW);
-
-        int row = 0;
-        int col = 0;
-
-        for (const QString &p : parts) {
-            bool isRootPart = (!m_rootDev.isEmpty() && p == m_rootDev);
-
-            PartitionCard *pc = createPartitionCard(p, true);
-            updatePartitionCard(pc, isRootPart);
-
-            if (!isRootPart) {
-                if (pc->btnMount) {
-                    connect(pc->btnMount, &QPushButton::clicked, this, [this, pc]() {
-                        if (pc->mountPoint.isEmpty()) {
-                            QString mp, out;
-                            if (!mountDevice(pc->dev, mp, out)) {
-                                QMessageBox::warning(
-                                    this, "Mount failed",
-                                    "Could not mount:\n" + pc->dev + "\n\n" + out.trimmed() +
-                                    "\n\nInstall udisks2 or pmount, and make sure this "
-                                    "user is in the 'plugdev' group."
-                                );
-                            }
-                        } else {
-                            QString out;
-                            if (!unmountDevice(pc->dev, pc->mountPoint, out)) {
-                                QMessageBox::warning(
-                                    this, "Unmount failed",
-                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out.trimmed() +
-                                    "\n\nMake sure no files on the drive are open."
-                                );
-                            }
-                        }
-                        QCoreApplication::processEvents();
-                        refreshAll();
-                    });
-                }
-                if (pc->btnOpen) {
-                    connect(pc->btnOpen, &QPushButton::clicked, this, [pc]() {
-                        if (!pc->mountPoint.isEmpty())
-                            QProcess::startDetached("osm-files", {pc->mountPoint});
-                    });
-                }
+        for (const QString &partition : parts) {
+            const bool root = (partition == m_rootDev);
+            PartitionCard *pc = createPartitionCard(partition, true);
+            updatePartitionCard(pc, root);
+            if (!root) {
+                connect(pc->btnMount, &QPushButton::clicked, this,
+                        [this, partition]() { toggleMount(partition); });
+                connect(pc->btnOpen, &QPushButton::clicked, this,
+                        [this, partition]() { openVolume(partition); });
             }
-
             m_internalGrid->addWidget(pc->frame, row, col);
             m_internalParts.append(pc);
-
-            col++;
-            if (col >= cols) {
-                col = 0;
-                row++;
-            }
+            if (++col >= cols) { col = 0; ++row; }
         }
     }
 
@@ -729,164 +776,95 @@ private:
     void buildDeviceCards()
     {
         clearDeviceCards();
-
-        QStringList devs = scanBaseDevices();
-        if (devs.isEmpty()) {
-            QLabel *none = new QLabel("No storage devices found");
-            none->setAlignment(Qt::AlignCenter);
-            none->setStyleSheet("font-size:24px;");
-            m_devicesLayout->addWidget(none);
-            m_devicesLayout->addStretch();
-            return;
-        }
-
-        for (const QString &dev : devs) {
-            QString base = QFileInfo(dev).fileName();
-
-            if (!m_rootBase.isEmpty() && base == m_rootBase)
-                continue;
+        bool anyDisks = false;
+        for (const StorageDisk &disk : m_disks) {
+            const QString dev = disk.dev;
+            const QString base = QFileInfo(dev).fileName();
+            if (!m_rootBase.isEmpty() && base == m_rootBase) continue;
+            anyDisks = true;
 
             DeviceCard *dc = new DeviceCard();
             dc->dev = dev;
-
-            if (base.startsWith("mmcblk")) dc->type = "SD Card";
-            else if (base.startsWith("sd")) dc->type = "USB Drive";
-            else dc->type = "Device";
+            if (!disk.removable) dc->type = "Internal Drive";
+            else if (base.startsWith("mmcblk")) dc->type = "SD Card";
+            else if (QFileInfo("/sys/block/" + base).canonicalFilePath().contains("/usb"))
+                dc->type = "USB Drive";
+            else dc->type = "Removable Drive";
 
             QFrame *card = new QFrame();
             card->setStyleSheet("QFrame { background:#3a3a3a; border-radius:26px; }");
             QVBoxLayout *devLay = new QVBoxLayout(card);
             devLay->setContentsMargins(24, 20, 24, 20);
             devLay->setSpacing(14);
-
             QLabel *title = new QLabel(dc->type + ": " + base);
             title->setAlignment(Qt::AlignCenter);
             title->setStyleSheet("font-size:26px; font-weight:bold;");
             devLay->addWidget(title);
 
-            QLabel *space = new QLabel("Not mounted");
+            QLabel *space = new QLabel("Not mounted — " + disk.size);
             space->setAlignment(Qt::AlignCenter);
+            space->setWordWrap(true);
             space->setStyleSheet("font-size:18px;");
             devLay->addWidget(space);
             dc->space = space;
 
             QGridLayout *grid = new QGridLayout();
             grid->setSpacing(14);
-            grid->setContentsMargins(0,0,0,0);
-
-            QStringList parts = scanPartitions(dev);
-            if (parts.isEmpty())
-                parts << dev;
-
-            PartitionCard *tmp = createPartitionCard(parts.first(), false);
-            tmp->frame->adjustSize();
-            int cardW = tmp->frame->sizeHint().width();
-            if (cardW < 200) cardW = 200;
-            tmp->frame->deleteLater();
-            delete tmp;
-
-            int avail = effectiveWidth();
-            int cols = qMax(2, avail / cardW);
-
+            grid->setContentsMargins(0, 0, 0, 0);
+            const int cols = qMax(2, effectiveWidth() / 225);
             int row = 0, col = 0;
             bool anyMounted = false;
 
-            for (const QString &p : parts) {
-                PartitionCard *pc = createPartitionCard(p, false);
-                updatePartitionCard(pc, false);
+            for (const StorageVolume &volume : disk.volumes) {
+                const QString partition = volume.dev;
+                PartitionCard *pc = createPartitionCard(partition, !disk.removable);
+                updatePartitionCard(pc, partition == m_rootDev);
+                if (!pc->mountPoint.isEmpty()) anyMounted = true;
 
-                if (!pc->mountPoint.isEmpty())
-                    anyMounted = true;
-
-                // mount/unmount
-                if (pc->btnMount) {
-                    connect(pc->btnMount, &QPushButton::clicked, this, [this, pc]() {
-                        if (pc->mountPoint.isEmpty()) {
-                            QString mp, out;
-                            if (!mountDevice(pc->dev, mp, out)) {
-                                QMessageBox::warning(
-                                    this, "Mount failed",
-                                    "Could not mount:\n" + pc->dev + "\n\n" + out.trimmed() +
-                                    "\n\nInstall udisks2 or pmount, and make sure this "
-                                    "user is in the 'plugdev' group."
-                                );
-                            }
-                        } else {
-                            QString out;
-                            if (!unmountDevice(pc->dev, pc->mountPoint, out)) {
-                                QMessageBox::warning(
-                                    this, "Unmount failed",
-                                    "Could not unmount:\n" + pc->mountPoint + "\n\n" + out.trimmed() +
-                                    "\n\nMake sure no files on the drive are open."
-                                );
-                            }
-                        }
-                        QCoreApplication::processEvents();
-                        refreshAll();
-                    });
-                }
-
-                if (pc->btnOpen) {
-                    connect(pc->btnOpen, &QPushButton::clicked, this, [pc]() {
-                        if (!pc->mountPoint.isEmpty())
-                            QProcess::startDetached("osm-files", {pc->mountPoint});
-                    });
-                }
+                connect(pc->btnMount, &QPushButton::clicked, this,
+                        [this, partition]() { toggleMount(partition); });
+                connect(pc->btnOpen, &QPushButton::clicked, this,
+                        [this, partition]() { openVolume(partition); });
 
                 if (pc->btnEject) {
-                    connect(pc->btnEject, &QPushButton::clicked, this, [this, dc]() {
-                        QString errors;
-                        for (PartitionCard *pCard : dc->parts) {
-                            if (pCard->mountPoint.isEmpty())
-                                continue;
-                            QString out;
-                            if (!unmountDevice(pCard->dev, pCard->mountPoint, out))
-                                errors += out.trimmed() + "\n";
-                        }
-                        if (!errors.isEmpty()) {
-                            QMessageBox::warning(
-                                this, "Eject failed",
-                                "Some partitions could not be ejected:\n\n" + errors
-                            );
-                        }
-                        QCoreApplication::processEvents();
-                        refreshAll();
-                    });
+                    connect(pc->btnEject, &QPushButton::clicked, this,
+                            [this, dev]() { ejectDisk(dev); });
                 }
-
                 grid->addWidget(pc->frame, row, col);
                 dc->parts.append(pc);
-
-                col++;
-                if (col >= cols) {
-                    col = 0;
-                    row++;
-                }
+                if (++col >= cols) { col = 0; ++row; }
             }
 
-            if (anyMounted) {
+            if (disk.volumes.isEmpty()) {
+                QLabel *noFs = new QLabel("No mountable filesystem found");
+                noFs->setAlignment(Qt::AlignCenter);
+                noFs->setStyleSheet("font-size:18px;");
+                devLay->addWidget(noFs);
+            } else if (anyMounted) {
                 for (PartitionCard *pc : dc->parts) {
-                    if (!pc->mountPoint.isEmpty()) {
-                        qulonglong t=0, f=0;
-                        if (getSpace(pc->mountPoint, t, f)) {
-                            dc->space->setText(
-                                QString("<span style='color:#7CFC00;'>Mounted</span> — "
-                                        "%1 free / %2 total")
-                                .arg(humanSize(f))
-                                .arg(humanSize(t))
-                            );
-                        }
-                        break;
+                    if (pc->mountPoint.isEmpty()) continue;
+                    qulonglong total = 0, free = 0;
+                    if (getSpace(pc->mountPoint, total, free)) {
+                        space->setText(QString("<span style='color:#7CFC00;'>Mounted</span> — "
+                                               "%1 free / %2 total")
+                                           .arg(humanSize(free), humanSize(total)));
+                    } else {
+                        space->setText("Mounted");
                     }
+                    break;
                 }
             }
-
             devLay->addLayout(grid);
             m_devicesLayout->addWidget(card);
             dc->frame = card;
             m_deviceCards.append(dc);
         }
-
+        if (!anyDisks) {
+            QLabel *none = new QLabel("No additional storage devices found");
+            none->setAlignment(Qt::AlignCenter);
+            none->setStyleSheet("font-size:24px;");
+            m_devicesLayout->addWidget(none);
+        }
         m_devicesLayout->addStretch();
     }
 
@@ -895,18 +873,23 @@ private:
     // -----------------------------------------------------
     void refreshAll()
     {
-        m_rootDev  = detectRootDev();
-        m_rootBase = m_rootDev.isEmpty() ? QString() : baseDeviceName(m_rootDev);
+        QVector<StorageDisk> disks;
+        QString rootDisk, rootPartition, error;
+        if (!readStorageDisks(disks, rootDisk, rootPartition, error)) {
+            m_info->setText("Storage scan failed: " + error.toHtmlEscaped());
+            return;
+        }
 
-        if (!m_rootBase.isEmpty())
-            m_internalTitle->setText("Internal Storage (" + m_rootBase + ")");
-        else
-            m_internalTitle->setText("Internal Storage");
-
+        m_disks = disks;
+        m_rootDev = rootPartition;
+        m_rootBase = rootDisk.isEmpty() ? QString() : QFileInfo(rootDisk).fileName();
+        m_internalTitle->setText(m_rootBase.isEmpty()
+            ? "Internal Storage" : "Internal Storage (" + m_rootBase + ")");
         updateInternalUsage();
         buildInternalGrid();
         buildDeviceCards();
     }
+
 };
 
 // -----------------------------------------------------
