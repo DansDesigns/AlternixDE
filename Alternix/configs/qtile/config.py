@@ -377,7 +377,7 @@ screens = [
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
                              mouse_callbacks={'Button1': lazy.spawn("onboard")}),
                 widget.Spacer(length=15),
-            ], size=35, margin=[0, 0, 0, 0], background=bg,
+            ], size=40, margin=[0, 0, 0, 0], background=bg,
         ),
         # x11_drag_polling_rate = 60,
     ),
