@@ -520,169 +520,127 @@ static bool sntpBestTime(qint64 *unixMsOut, QString *serverOut, QString *logOut)
 }
 
 // ---------------------------------------------------------
-// Battery-backed clock (RTC)
-//
-// `hwclock --systohc` alone is not enough on these tablets: the plain call
-// can fail while writing through an explicit /dev/rtc node or the direct ISA
-// path still works. The earlier version sent hwclock's error to /dev/null,
-// so a failure was reported with no reason attached. This keeps the reason.
+// Hardware clock (RTC) write-back after a manual clock change.
+// RTC presence, RTC read access and RTC write access are DIFFERENT states.
+// A failed hwclock command must never be reported as "no clock chip".
+// Preserve the configured RTC time scale (LOCAL or UTC); never blindly
+// rewrite a LOCAL/dual-boot RTC as UTC just because the first attempt fails.
+// Normal continuous synchronisation is handled by chrony, not this helper.
 // ---------------------------------------------------------
 
 static const char *RTC_WRITE_SH = R"SH(
 RTCLOG=""
 FAKELOG=""
-RTC_SEEN=0
+RTC_PRESENT=0
 HW=""
+RTC_MODE=UTC
+[ -f /etc/adjtime ] && [ "$(sed -n '3p' /etc/adjtime 2>/dev/null)" = LOCAL ] && RTC_MODE=LOCAL
 
-# Read the chip back and see whether it now agrees with the system clock.
-# This does not trust hwclock's exit status, which can be non-zero for a
-# warning even when the write actually landed.
+rtc_detect() {
+  for r in /sys/class/rtc/rtc*; do
+    [ -d "$r" ] || continue
+    RTC_PRESENT=1
+    RTCLOG="$RTCLOG
+Detected $r ($(cat "$r/name" 2>/dev/null))"
+  done
+  for r in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$r" ] && RTC_PRESENT=1
+  done
+  [ -r /proc/driver/rtc ] && RTC_PRESENT=1
+  RTCLOG="$RTCLOG
+RTC time scale from /etc/adjtime: $RTC_MODE"
+}
+
 rtc_readback_ok() {
-  # The chip may be kept in UTC or in local time; /etc/adjtime says which.
-  MODE=UTC
-  if [ -f /etc/adjtime ]; then
-    T=$(sed -n '3p' /etc/adjtime 2>/dev/null)
-    [ "$T" = "LOCAL" ] && MODE=LOCAL
-  fi
-
-  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
+  for r in /sys/class/rtc/rtc*; do
     [ -r "$r/date" ] && [ -r "$r/time" ] || continue
-    RTC_SEEN=1
     RD=$(cat "$r/date" 2>/dev/null)
     RT=$(cat "$r/time" 2>/dev/null)
     [ -n "$RD" ] && [ -n "$RT" ] || continue
-    if [ "$MODE" = LOCAL ]; then
+    if [ "$RTC_MODE" = LOCAL ]; then
       RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
     else
       RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
     fi
     NOW=$(date +%s)
     D=$((RE - NOW))
-    [ "$D" -lt 0 ] && D=$((0 - D))
+    [ "$D" -lt 0 ] && D=$((-D))
     [ "$D" -le 5 ] && return 0
     RTCLOG="$RTCLOG
-$r holds $RD $RT ($MODE), which is ${D}s from the system clock"
+$r reads $RD $RT ($RTC_MODE); ${D}s away from system time"
   done
   return 1
 }
 
-# One hwclock attempt. Counts as success if hwclock says so OR if the chip
-# reads back correct afterwards regardless of what hwclock claimed.
 rtc_try() {
   O=$("$HW" "$@" 2>&1)
-  if [ $? -eq 0 ]; then return 0; fi
+  RC=$?
+  if [ "$RC" -eq 0 ]; then return 0; fi
   RTCLOG="$RTCLOG
 $HW $*: $O"
   if rtc_readback_ok; then
     RTCLOG="$RTCLOG
-  ...but the chip reads back correct after this attempt, so it did work"
+RTC read-back agrees with the corrected system time"
     return 0
   fi
   return 1
 }
 
-rtc_diag() {
-  RTCLOG="$RTCLOG
---- what this machine has ---"
-  L=$(ls -l /dev/rtc* 2>&1 | tr '\n' '; ')
-  RTCLOG="$RTCLOG
-device nodes: $L"
-  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
-    [ -d "$r" ] || continue
-    N=$(cat "$r/name" 2>/dev/null)
-    RTCLOG="$RTCLOG
-$r name: $N"
-  done
-  if [ -f /etc/adjtime ]; then
-    A=$(tr '\n' ' ' < /etc/adjtime)
-    RTCLOG="$RTCLOG
-/etc/adjtime: $A"
-  else
-    RTCLOG="$RTCLOG
-/etc/adjtime: missing (hwclock has never successfully run here)"
-  fi
-  M=$(lsmod 2>/dev/null | grep -i '^rtc' | awk '{print $1}' | tr '\n' ' ')
-  [ -z "$M" ] && M="none"
-  RTCLOG="$RTCLOG
-rtc kernel modules loaded: $M
---- attempts ---"
-}
-
 rtc_write() {
-  for c in /sbin/hwclock /usr/sbin/hwclock /bin/hwclock /usr/bin/hwclock; do
+  rtc_detect
+  for c in /usr/sbin/hwclock /sbin/hwclock /usr/bin/hwclock /bin/hwclock; do
     if [ -x "$c" ]; then HW="$c"; break; fi
   done
   if [ -z "$HW" ]; then
-    RTCLOG="hwclock is not installed (it comes from the util-linux package)"
+    RTCLOG="$RTCLOG
+hwclock utility is missing (on Devuan Excalibur install util-linux-extra). This does not mean the RTC chip is missing."
     return 1
   fi
 
-  rtc_diag
-
+  # First use the machine's existing /etc/adjtime mode.
   rtc_try --systohc && return 0
-  rtc_try --systohc --utc && return 0
-  # --noadjfile skips /etc/adjtime entirely, which is what fails when that
-  # file is missing or was written by a different tool.
-  rtc_try --systohc --noadjfile --utc && return 0
-
-  for d in /dev/rtc0 /dev/rtc /dev/rtc1; do
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
     [ -e "$d" ] || continue
-    rtc_try --systohc -f "$d" && return 0
-    rtc_try --systohc --noadjfile --utc -f "$d" && return 0
+    rtc_try --systohc --rtc "$d" && return 0
   done
 
-  rtc_try --systohc --directisa && return 0
+  # Bypass a broken/missing adjtime file, but KEEP its LOCAL/UTC mode.
+  rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" && return 0
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$d" ] || continue
+    rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" --rtc "$d" && return 0
+  done
 
-  # busybox is a completely separate implementation and sometimes succeeds
-  # where util-linux does not.
-  if command -v busybox >/dev/null 2>&1; then
-    O=$(busybox hwclock -w -u 2>&1)
-    if [ $? -eq 0 ]; then return 0; fi
-    RTCLOG="$RTCLOG
-busybox hwclock -w -u: $O"
-    rtc_readback_ok && return 0
-  fi
-
-  V=$("$HW" --systohc --verbose 2>&1 | head -n 30)
+  # Never use direct ISA writes on modern tablets as a blind fallback.
   RTCLOG="$RTCLOG
-
---- hwclock --systohc --verbose (says which access method it tried) ---
-$V"
-
-  if [ "$RTC_SEEN" = 0 ] && [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ] && [ ! -e /dev/rtc1 ]; then
-    RTCLOG="$RTCLOG
-
-There is no clock chip registered by the kernel on this machine at all."
-  fi
+Linux could not WRITE the RTC. The hardware may still be present and readable.
+$($HW --show --verbose 2>&1 | head -n 16)"
   return 1
 }
 
-# When the chip cannot be written, keep the time across a reboot anyway by
-# storing it on disk. This is what fake-hwclock is for and it is the normal
-# answer for hardware with no usable RTC.
 fake_clock_save() {
   if command -v fake-hwclock >/dev/null 2>&1; then
     O=$(fake-hwclock save 2>&1)
     if [ $? -eq 0 ]; then
-      FAKELOG="The time was written to disk with fake-hwclock instead, so it
-will be restored at the next boot."
+      FAKELOG="Saved an approximate boot timestamp to disk (not a real RTC)."
       return 0
     fi
     FAKELOG="fake-hwclock save failed: $O"
     return 1
   fi
-  FAKELOG="fake-hwclock is not installed. Installing that package would let
-the time survive a reboot even without a working clock chip."
+  FAKELOG="No RTC is exposed to Linux and fake-hwclock is not installed."
   return 1
 }
 
-# Write the clock chip, falling back to on-disk storage. Sets RTC to one of
-# ok / fake / failed.
 rtc_store() {
   RTC=ok
   if ! rtc_write; then
-    RTC=failed
-    fake_clock_save && RTC=fake
+    if [ "$RTC_PRESENT" -eq 1 ]; then
+      RTC=unwritable
+    else
+      RTC=unavailable
+      fake_clock_save && RTC=fake
+    fi
   fi
 }
 )SH";
@@ -1552,7 +1510,7 @@ public:
             " border-radius:40px;"
             "}"
         );
-        timeFrame->setFixedHeight(520);
+        timeFrame->setMinimumHeight(650);
 
         QVBoxLayout *timeLayout = new QVBoxLayout(timeFrame);
         timeLayout->setContentsMargins(30, 30, 30, 30);
@@ -1580,6 +1538,22 @@ public:
         tzInfoLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         tzInfoLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
         timeLayout->addWidget(tzInfoLabel);
+
+        rtcStatusLabel = new QLabel("Hardware clock: checking...", timeFrame);
+        rtcStatusLabel->setAlignment(Qt::AlignCenter);
+        rtcStatusLabel->setWordWrap(true);
+        rtcStatusLabel->setMinimumWidth(1);
+        rtcStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        rtcStatusLabel->setStyleSheet("QLabel { font-size:20px; color:#BBBBBB; }");
+        timeLayout->addWidget(rtcStatusLabel);
+
+        autoSyncLabel = new QLabel("Automatic sync: checking...", timeFrame);
+        autoSyncLabel->setAlignment(Qt::AlignCenter);
+        autoSyncLabel->setWordWrap(true);
+        autoSyncLabel->setMinimumWidth(1);
+        autoSyncLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        autoSyncLabel->setStyleSheet("QLabel { font-size:20px; color:#BBBBBB; }");
+        timeLayout->addWidget(autoSyncLabel);
 
         // Zone selector: Local / UTC / GMT
         QHBoxLayout *zoneRow = new QHBoxLayout();
@@ -1869,6 +1843,9 @@ private:
     QLabel *clockLabel      = nullptr;
     QLabel *tzInfoLabel     = nullptr;
     QLabel *timeStatusLabel = nullptr;
+    QLabel *rtcStatusLabel  = nullptr;
+    QLabel *autoSyncLabel   = nullptr;
+    QElapsedTimer timeHealthAge;
 
     QPushButton *localZoneButton = nullptr;
     QPushButton *utcZoneButton   = nullptr;
@@ -2039,6 +2016,76 @@ private:
                                  .arg((a % 3600) / 60, 2, 10, QChar('0'));
             tzInfoLabel->setText(QString("System time zone: %1  (UTC%2)")
                                      .arg(QString::fromUtf8(tz.id()), offStr));
+        }
+        // Clock readout is every second; hardware/service probes are not.
+        if (!timeHealthAge.isValid() || timeHealthAge.elapsed() >= 20000) {
+            timeHealthAge.restart();
+            updateTimeHealth();
+        }
+    }
+
+    void updateTimeHealth()
+    {
+        if (rtcStatusLabel) {
+            QDir d("/sys/class/rtc");
+            QStringList nodes = d.entryList(QStringList() << "rtc*",
+                QDir::Dirs | QDir::NoDotAndDotDot | QDir::System);
+            QStringList found;
+            for (const QString &node : nodes) {
+                QString name = readSysFile(d.filePath(node + "/name"));
+                const bool readable = !readSysFile(d.filePath(node + "/time")).isEmpty();
+                QString description = node;
+                if (!name.isEmpty()) description += " (" + name + ")";
+                if (!readable) description += " [not readable]";
+                found << description;
+            }
+            if (found.isEmpty()) {
+                for (const QString &node : QStringList({"/dev/rtc", "/dev/rtc0", "/dev/rtc1"})) {
+                    if (QFile::exists(node)) found << node;
+                }
+            }
+            const bool hwclockInstalled = QFile::exists("/usr/sbin/hwclock") ||
+                                          QFile::exists("/sbin/hwclock") ||
+                                          QFile::exists("/usr/bin/hwclock") ||
+                                          QFile::exists("/bin/hwclock");
+            QString status = found.isEmpty()
+                ? "Hardware clock: not exposed to Linux (BIOS RTC may still exist)"
+                : "Hardware clock detected: " + found.join(", ");
+            if (!hwclockInstalled)
+                status += "\nhwclock tool missing (install util-linux-extra)";
+            rtcStatusLabel->setText(status);
+            rtcStatusLabel->setStyleSheet(QString("QLabel { font-size:20px; color:%1; }")
+                .arg(found.isEmpty() ? "#FFC24B" : "#7CFC00"));
+        }
+
+        if (autoSyncLabel) {
+            QString text;
+            QString colour = "#FFC24B";
+            if (!QFile::exists("/usr/bin/chronyc") && !QFile::exists("/bin/chronyc")) {
+                text = "Automatic sync: Chrony not installed (Sync now is manual only)";
+            } else {
+                QProcess probe;
+                probe.start("chronyc", {"-n", "tracking"});
+                if (probe.waitForStarted(300) && probe.waitForFinished(1200) &&
+                    probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0) {
+                    QString report = QString::fromLocal8Bit(probe.readAllStandardOutput());
+                    if (report.contains(QRegularExpression("Leap status\\s*:\\s*Normal"))) {
+                        text = "Automatic sync: Chrony synchronised";
+                        colour = "#7CFC00";
+                    } else {
+                        text = "Automatic sync: Chrony running, waiting for a valid time source";
+                    }
+                } else {
+                    if (probe.state() != QProcess::NotRunning) {
+                        probe.kill();
+                        probe.waitForFinished(150);
+                    }
+                    text = "Automatic sync: Chrony not responding";
+                }
+            }
+            autoSyncLabel->setText(text);
+            autoSyncLabel->setStyleSheet(QString("QLabel { font-size:20px; color:%1; }")
+                .arg(colour));
         }
     }
 
@@ -2234,23 +2281,19 @@ private:
             return;
         }
 
+        timeHealthAge.invalidate();
         updateClock();
 
         if (out.contains("OSMSET_OK:fake")) {
-            // Chip unusable, but the time is stored on disk and comes back
-            // at boot, so the user's actual problem is solved.
-            setTimeStatus("Clock changed. This machine has no usable clock chip, "
-                          "so the time was saved to disk and will be restored "
-                          "at the next start up.",
-                          "#FFC24B");
-        } else if (out.contains("OSMSET_OK:failed")) {
-            setTimeStatus("Clock changed, but the battery-backed clock could not be "
-                          "updated. The time may be wrong again after a shutdown.",
-                          "#FFC24B");
-            showDetail("Battery-backed clock",
-                       "The time on screen is now correct, but it could not be "
-                       "written to the clock chip that keeps time while the "
-                       "machine is switched off. The reason is below.",
+            setTimeStatus("Clock changed. Linux could not access an RTC; an approximate "
+                          "boot timestamp was saved to disk.", "#FFC24B");
+        } else if (out.contains("OSMSET_OK:unwritable") ||
+                   out.contains("OSMSET_OK:unavailable")) {
+            setTimeStatus("Clock changed; RTC write-back was unavailable. "
+                          "See the hardware-clock diagnostics.", "#FFC24B");
+            showDetail("Hardware-clock write problem",
+                       "Linux could not write the hardware clock. This does NOT mean "
+                       "that the BIOS clock is absent. See the diagnostics below.",
                        out, QMessageBox::Warning);
         } else {
             setTimeStatus("Clock changed by hand at " +
@@ -2259,8 +2302,52 @@ private:
         }
     }
 
+    // If Chrony is running, ask IT to refresh rather than force-setting the
+    // system clock behind the synchronisation daemon's back.
+    bool syncViaChrony()
+    {
+        if (!QFile::exists("/usr/bin/chronyc") && !QFile::exists("/bin/chronyc"))
+            return false;
+        QProcess probe;
+        probe.start("chronyc", {"-n", "tracking"});
+        if (!probe.waitForStarted(250) || !probe.waitForFinished(900) ||
+            probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.kill(); probe.waitForFinished(150);
+            }
+            return false;
+        }
+
+        bool reached = false;
+        QString out;
+        const QString script = QStringLiteral(
+            "echo CHRONY_REACHED\n"
+            "chronyc -a online 2>&1\n"
+            "chronyc -a 'burst 4/4' 2>&1\n"
+            "chronyc -n waitsync 10 1 100 2 2>&1\n"
+            "RES=$?\n"
+            "chronyc -n tracking 2>&1\n"
+            "if [ \"$RES\" -eq 0 ]; then echo CHRONY_SYNC_OK; "
+            "else echo CHRONY_SYNC_WAIT; fi\n");
+        runWithSpinner(syncTimeButton, "Sync now", [&]() {
+            out = runAsRootShell(script, "CHRONY_REACHED", 30000, &reached);
+        });
+        if (reached && out.contains("CHRONY_SYNC_OK")) {
+            setTimeStatus("Chrony has refreshed the automatic network time sync.", "#7CFC00");
+        } else {
+            setTimeStatus("Chrony could not confirm a network time source. "
+                          "It will retry when connectivity returns.", "#FFC24B");
+            showDetail("Automatic time sync", "Chrony did not synchronise yet.",
+                       out, QMessageBox::Warning);
+        }
+        timeHealthAge.invalidate();
+        updateClock();
+        return true;
+    }
+
     void syncTimeFromInternet()
     {
+        if (syncViaChrony()) return;
         qint64 unixMs = 0;
         QString server;
         QString sntpLog;
@@ -2367,6 +2454,7 @@ exit 0
             return;
         }
 
+        timeHealthAge.invalidate();
         updateClock();
 
         QString source;
@@ -2376,27 +2464,24 @@ exit 0
         bool rtcFake = false;
         if (okM.hasMatch()) {
             QString state = okM.captured(1).trimmed();
-            rtcFailed = (state == "failed");
+            rtcFailed = (state == "unwritable" || state == "unavailable");
             rtcFake   = (state == "fake");
             source = okM.captured(2).trimmed();
         }
 
         QString when = QDateTime::currentDateTime().toString("HH:mm:ss");
         if (rtcFake) {
-            setTimeStatus(QString("Clock synced at %1. This machine has no usable "
-                                  "clock chip, so the time was saved to disk and "
-                                  "will be restored at the next start up.").arg(when),
+            setTimeStatus(QString("Clock synced at %1. No RTC was accessible to "
+                                  "Linux; an approximate boot time was saved to disk.").arg(when),
                           "#FFC24B");
         } else if (rtcFailed) {
-            setTimeStatus(QString("Clock synced at %1, but the battery-backed clock "
-                                  "could not be updated. The time may be wrong again "
-                                  "after a shutdown.").arg(when),
+            setTimeStatus(QString("Clock synced at %1, but Linux could not write "
+                                  "the RTC. The hardware may still be present.").arg(when),
                           "#FFC24B");
-            showDetail("Battery-backed clock",
-                       "The time was fetched successfully and the clock on screen "
-                       "is now correct. It could not be written to the clock chip "
-                       "that keeps time while the machine is switched off, so it "
-                       "may be wrong again after a reboot. The reason is below.",
+            showDetail("Hardware-clock write problem",
+                       "The system time was corrected, but Linux could not write "
+                       "the RTC. This does not establish that the BIOS clock "
+                       "is missing. The actual error follows.",
                        detail, QMessageBox::Warning);
         } else if (!source.isEmpty()) {
             setTimeStatus(QString("Clock synced at %1 from %2.").arg(when, source),
