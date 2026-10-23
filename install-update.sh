@@ -157,6 +157,14 @@ echo "• Updating reticulum.so..."
 g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 reticulum.so /usr/local/bin/
 
+echo "• Building storage.so..."
+g++ -fPIC -shared storage.cpp -o storage.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m755 storage.so /usr/local/bin/
+
+echo "• Building system.so..."
+g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 system.so /usr/local/bin/
+
 
 cd "$ALT_ROOT/Alternix"
 
