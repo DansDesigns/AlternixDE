@@ -199,17 +199,27 @@ static QString getDPKGCount()
     return out.trimmed().isEmpty() ? "0" : out.trimmed();
 }
 
-// Alternix version — read from the same file install-update.sh writes to
-// (sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt),
-// so this always reflects whatever the last update actually installed.
-static QString getAlternixVersion()
+// Read installed versions locally (do not depend on a network connection).
+static QString readInstalledVersion(const QString &path)
 {
-    QFile f("/usr/share/alternix/version.txt");
+    QFile f(path);
     if (!f.open(QIODevice::ReadOnly))
         return "Unknown";
 
     QString v = QString::fromUtf8(f.readAll()).trimmed();
     return v.isEmpty() ? "Unknown" : v;
+}
+
+// AlternixDE version — written by the AlternixDE updater.
+static QString getAlternixDEVersion()
+{
+    return readInstalledVersion("/usr/share/alternix/version.txt");
+}
+
+// AlternixOS version — installed from the AlternixOS GitHub version file.
+static QString getAlternixOSVersion()
+{
+    return readInstalledVersion(QDir::home().filePath("Alternix/version"));
 }
 
 // -----------------------------------------------------
@@ -351,9 +361,10 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
             "Alternix",
             "",
             {
-                { "Version", getAlternixVersion() }
+                { "AlternixDE", getAlternixDEVersion() },
+                { "AlternixOS", getAlternixOSVersion() }
             },
-            { "alt_version" }
+            { "alt_de_version", "alt_os_version" }
         )
     );
 
@@ -429,8 +440,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     refresh->setInterval(2000);
 
     QObject::connect(refresh, &QTimer::timeout, [=]() {
-        if (liveValues.contains("alt_version"))
-            liveValues["alt_version"]->setText(getAlternixVersion());
+        if (liveValues.contains("alt_de_version"))
+            liveValues["alt_de_version"]->setText(getAlternixDEVersion());
+
+        if (liveValues.contains("alt_os_version"))
+            liveValues["alt_os_version"]->setText(getAlternixOSVersion());
 
         if (liveValues.contains("kernel"))
             liveValues["kernel"]->setText(getKernel());
