@@ -11,6 +11,7 @@
 #include <QScroller>
 #include <QProcess>
 #include <QInputDialog>
+#include <QDialog>
 #include <QMessageBox>
 #include <QFont>
 #include <QList>
@@ -306,6 +307,10 @@ static const char *const BT_FRAMES[] = {
 
 static QString bluetoothErrorBT(const QString &raw)
 {
+    if (raw.contains("pairing agent did not register", Qt::CaseInsensitive) ||
+        raw.contains("Agent registration failed", Qt::CaseInsensitive) ||
+        raw.contains("Failed to register agent", Qt::CaseInsensitive))
+        return "Could not start the Bluetooth passkey agent. Check the BlueZ service and try again.";
     if (raw.contains("AuthenticationFailed", Qt::CaseInsensitive) ||
         raw.contains("AuthenticationRejected", Qt::CaseInsensitive))
         return "The device rejected the pairing or the code was incorrect.";
@@ -479,6 +484,7 @@ public:
             // Worker owns itself until finished (see finished->deleteLater).
             queryThread = nullptr;
         }
+        closePasskeyDialog();
         if (scanProcess) scanProcess->kill();
         if (pairProcess) pairProcess->kill();
     }
@@ -506,6 +512,10 @@ private:
     QPointer<BluetoothQueryThread> queryThread;
     QPointer<QProcess> scanProcess;
     QPointer<QProcess> pairProcess;
+    QPointer<QDialog> passkeyDialog;
+    QPointer<QLabel> passkeyLabel;
+    QString shownPasskey;
+    bool pairingCancelled = false;
     QPointer<QPushButton> activeDeviceButton;
     BluetoothSnapshot state;
     PairStage pairStage = PairStage::Idle;
@@ -870,8 +880,11 @@ private:
         pairTranscript.clear();
         recentPairText.clear();
         lastPrompt.clear();
-        // Keep active LE advertising reports fresh while preparing the agent.
-        // Discovery ends only immediately before initiating the connection.
+        shownPasskey.clear();
+        pairingCancelled = false;
+        closePasskeyDialog();
+        // Keep active LE advertising reports fresh during keyboard pairing.
+        // LE devices may require an active scan report to initiate pairing.
         updateButtons();
         pairSpinTimer->start();
         pairProcess = new QProcess(this);
@@ -885,8 +898,11 @@ private:
         });
         connect(p, &QProcess::started, this, [this, p] {
             if (pairProcess != p) return;
-            sendPairLine("agent KeyboardDisplay");
-            fallbackPairStage(PairStage::RegisterAgent, 4000);
+            // -a registers the requested IO capability *before* entering the
+            // interactive shell. Issuing `agent KeyboardDisplay` afterwards can
+            // fail with "Agent is already registered" while the shell still has
+            // a NoInputNoOutput agent, silently suppressing keyboard passkeys.
+            fallbackPairStage(PairStage::RegisterAgent, 6000);
         });
         connect(p, &QProcess::errorOccurred, this, [this, p](QProcess::ProcessError error) {
             if (pairProcess == p && error == QProcess::FailedToStart) {
@@ -903,8 +919,10 @@ private:
         });
         pairedBefore = dev.paired;
         trustedBefore = dev.trusted;
-        p->start("bluetoothctl");
-        QTimer::singleShot(60000, this, [this, p] {
+        // Explicitly register a passkey-capable BlueZ agent. This is required
+        // by Microsoft Designer and many other Bluetooth keyboard devices.
+        p->start("bluetoothctl", {"-a", "KeyboardDisplay"});
+        QTimer::singleShot(90000, this, [this, p] {
             if (pairProcess == p && pairStage != PairStage::Idle &&
                 pairStage != PairStage::Verifying) {
                 pairTranscript += "\nConnection timed out.";
@@ -925,7 +943,13 @@ private:
     void fallbackPairStage(PairStage expected, int afterMs)
     {
         QTimer::singleShot(afterMs, this, [this, expected] {
-            if (pairStage == expected && pairProcess) advancePairSetup();
+            if (pairStage != expected || !pairProcess) return;
+            if (expected == PairStage::RegisterAgent) {
+                pairTranscript += "\nKeyboardDisplay pairing agent did not register.";
+                finishPair();
+                return;
+            }
+            advancePairSetup();
         });
     }
 
@@ -945,8 +969,11 @@ private:
             fallbackPairStage(PairStage::Pairable, 3500);
             break;
         case PairStage::Pairable:
-            stopScan(); // Fresh BLE scan reports are now available for pair/connect.
+            // Do not stop discovery before pairing a new LE keyboard: BlueZ
+            // may need its current advertisement to reach the device. Once
+            // bonded, we can stop scanning before the connect request.
             if (pairedBefore) {
+                stopScan();
                 if (trustedBefore) {
                     startConnectCommand();
                 } else {
@@ -975,13 +1002,17 @@ private:
         recentPairText += text;
         if (recentPairText.size() > 1600) recentPairText = recentPairText.right(1600);
 
-        // Prompt answers are sent only AFTER the agent actually asks, never
-        // blindly as stdin lines. These checks allow prompts without newlines.
+        // Prompt answers are sent only after the agent asks. BlueZ's
+        // DisplayPasskey events also arrive here, often *without* a question;
+        // the user must type the code on the remote keyboard.
         handleAgentPrompt();
         if (pairStage == PairStage::RegisterAgent &&
-            (recentPairText.contains("Agent registered", Qt::CaseInsensitive) ||
-             recentPairText.contains("Agent is already registered", Qt::CaseInsensitive) ||
-             recentPairText.contains("Agent registration failed", Qt::CaseInsensitive))) {
+            (recentPairText.contains("Agent registration failed", Qt::CaseInsensitive) ||
+             recentPairText.contains("Failed to register agent", Qt::CaseInsensitive))) {
+            pairTranscript += "\nCould not register the Bluetooth keyboard pairing agent.";
+            finishPair();
+        } else if (pairStage == PairStage::RegisterAgent &&
+                   recentPairText.contains("Agent registered", Qt::CaseInsensitive)) {
             advancePairSetup();
         } else if (pairStage == PairStage::DefaultAgent &&
                    (recentPairText.contains("Default agent", Qt::CaseInsensitive) ||
@@ -997,12 +1028,15 @@ private:
                 recentPairText.contains("AlreadyExists", Qt::CaseInsensitive) ||
                 recentPairText.contains("Already paired", Qt::CaseInsensitive) ||
                 recentPairText.contains("Paired: yes", Qt::CaseInsensitive)) {
+                closePasskeyDialog();
+                stopScan();
                 pairStage = PairStage::Trusting;
                 pairMessage = "Trusting";
                 recentPairText.clear();
                 sendPairLine("trust " + pairMac);
                 fallbackPairStage(PairStage::Trusting, 3500);
             } else if (recentPairText.contains("Failed to pair", Qt::CaseInsensitive)) {
+                closePasskeyDialog();
                 finishPair();
             }
         } else if (pairStage == PairStage::Trusting) {
@@ -1030,39 +1064,123 @@ private:
         sendPairLine("connect " + pairMac);
     }
 
+    void closePasskeyDialog()
+    {
+        if (passkeyDialog) {
+            // Hiding the dialog (rather than rejecting it) must not be treated
+            // as the user cancelling after successful pairing.
+            QDialog *dialog = passkeyDialog;
+            passkeyDialog = nullptr;
+            passkeyLabel = nullptr;
+            dialog->hide();
+            dialog->deleteLater();
+        }
+    }
+
+    void showPasskeyOnKeyboard(const QString &code)
+    {
+        if (pairStage != PairStage::Pairing || !pairProcess || code.isEmpty())
+            return;
+        if (passkeyDialog && shownPasskey == code) return;
+        shownPasskey = code;
+        if (passkeyDialog) {
+            if (passkeyLabel) passkeyLabel->setText(code);
+            return;
+        }
+
+        auto *dialog = new QDialog(this);
+        passkeyDialog = dialog;
+        dialog->setWindowTitle("Bluetooth keyboard pairing");
+        dialog->setWindowModality(Qt::WindowModal);
+        dialog->setMinimumWidth(440);
+        dialog->setStyleSheet(
+            "QDialog { background:#282828; border-radius:16px; }"
+            "QLabel { color:white; background:transparent; }"
+            "QPushButton { background:#444444; color:white; border:1px solid #222222; "
+            "border-radius:12px; font-size:20px; padding:12px 22px; }"
+            "QPushButton:hover { background:#555555; }");
+        auto *layout = new QVBoxLayout(dialog);
+        layout->setContentsMargins(30, 28, 30, 24);
+        layout->setSpacing(18);
+        auto *heading = new QLabel("Enter this code on your Bluetooth keyboard", dialog);
+        heading->setAlignment(Qt::AlignCenter);
+        heading->setWordWrap(true);
+        heading->setStyleSheet("font-size:23px; font-weight:bold;");
+        layout->addWidget(heading);
+
+        auto *digits = new QLabel(code, dialog);
+        passkeyLabel = digits;
+        digits->setAlignment(Qt::AlignCenter);
+        digits->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        digits->setStyleSheet("font-size:52px; font-weight:bold; color:#7CFC00; "
+                              "letter-spacing:5px; padding:14px;");
+        layout->addWidget(digits);
+
+        auto *instructions = new QLabel(
+            QString("On %1, type all six digits shown above, then press "
+                    "Enter <b>on that same Bluetooth keyboard</b>.\n\n"
+                    "Do not enter the code into this window. Keep the keyboard "
+                    "in pairing mode until the connection completes.")
+                .arg(pairName.toHtmlEscaped()), dialog);
+        instructions->setAlignment(Qt::AlignCenter);
+        instructions->setWordWrap(true);
+        instructions->setStyleSheet("font-size:19px; color:#dddddd;");
+        instructions->setTextFormat(Qt::RichText);
+        layout->addWidget(instructions);
+
+        auto *cancel = new QPushButton("Cancel pairing", dialog);
+        layout->addWidget(cancel, 0, Qt::AlignHCenter);
+        connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
+        connect(dialog, &QDialog::rejected, this, [this, dialog] {
+            if (passkeyDialog != dialog || pairStage != PairStage::Pairing) return;
+            pairingCancelled = true;
+            pairTranscript += "\nPairing cancelled by the user.";
+            finishPair();
+        });
+        // open() is non-blocking: the agent remains able to receive Bluetooth
+        // keypress progress events, pairing success and errors while visible.
+        dialog->open();
+    }
+
     void handleAgentPrompt()
     {
         if (!pairProcess || pairStage == PairStage::Verifying) return;
-        // Only inspect the last prompt; bluetoothctl frequently redraws its prompt.
-        const QString tail = recentPairText.right(550);
+        // Retain enough output for prompts split across process read chunks.
+        const QString tail = recentPairText.right(1200);
+        const auto ci = QRegularExpression::CaseInsensitiveOption;
+
+        // BlueZ writes "[agent] Passkey: 123456", not "Display passkey:".
+        // The agent DisplayPasskey callback may repeat this line for every
+        // keystroke. Use the latest complete code and open the dialog once.
+        if (pairStage == PairStage::Pairing) {
+            QRegularExpression displayed(QStringLiteral(
+                "(?:\\[agent\\]\\s*)?(?:Passkey|PIN code)\\s*:\\s*\\[?([0-9]{6})\\]?(?![0-9])"), ci);
+            auto it = displayed.globalMatch(tail);
+            QString displayedCode;
+            while (it.hasNext()) displayedCode = it.next().captured(1);
+            if (!displayedCode.isEmpty()) showPasskeyOnKeyboard(displayedCode);
+        }
+
         QRegularExpression confirm(QStringLiteral(
-            "(?:Confirm passkey|Request confirmation)\\s*([0-9]{4,8})?\\s*\\(yes/no\\)\\s*:") ,
-            QRegularExpression::CaseInsensitiveOption);
+            "(?:Confirm passkey|Request confirmation)\\s*([0-9]{4,8})?\\s*\\(yes/no\\)\\s*:"), ci);
         QRegularExpression input(QStringLiteral(
-            "Enter\\s+(?:PIN code|passkey)[^:]*:") ,
-            QRegularExpression::CaseInsensitiveOption);
+            "Enter\\s+(?:PIN code|passkey)[^:]*:"), ci);
         QRegularExpression authorize(QStringLiteral(
-            "Authorize service[^:]*\\(yes/no\\)\\s*:") ,
-            QRegularExpression::CaseInsensitiveOption);
-        QRegularExpression display(QStringLiteral(
-            "Display\\s+(?:PIN code|passkey)[^:]*:\\s*([0-9]+)"),
-            QRegularExpression::CaseInsensitiveOption);
-        auto c = confirm.match(tail);
-        auto a = authorize.match(tail);
-        auto i = input.match(tail);
-        auto d = display.match(tail);
+            "(?:Authorize service|Request authorization)[^:]*\\(yes/no\\)\\s*:"), ci);
+        const auto c = confirm.match(tail);
+        const auto a = authorize.match(tail);
+        const auto i = input.match(tail);
         QString prompt;
         if (c.hasMatch()) prompt = c.captured(0);
         else if (a.hasMatch()) prompt = a.captured(0);
         else if (i.hasMatch()) prompt = i.captured(0);
-        else if (d.hasMatch()) prompt = d.captured(0);
         if (prompt.isEmpty() || prompt == lastPrompt) return;
-        lastPrompt = prompt; // Must happen BEFORE opening a modal dialog.
+        lastPrompt = prompt;
         if (c.hasMatch()) {
             const QString number = c.captured(1);
             const bool accepted = QMessageBox::question(this, "Confirm Bluetooth pairing",
                 number.isEmpty() ? QString("Approve the pairing request from %1?").arg(pairName)
-                                 : QString("Does %1 show this same code?\n\n%2")
+                                 : QString("Does %1 show the same code?\n\n%2")
                                        .arg(pairName, number),
                 QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
             sendPairLine(accepted ? "yes" : "no");
@@ -1073,14 +1191,10 @@ private:
             sendPairLine(accepted ? "yes" : "no");
         } else if (i.hasMatch()) {
             bool ok = false;
-            QString code = QInputDialog::getText(this, "Bluetooth PIN / passkey",
-                QString("Enter the PIN or passkey for %1:").arg(pairName),
+            const QString code = QInputDialog::getText(this, "Bluetooth PIN / passkey",
+                QString("Enter the PIN or passkey shown on %1:").arg(pairName),
                 QLineEdit::Normal, {}, &ok).trimmed();
-            // Only submit user-supplied data to the live agent prompt.
             sendPairLine(ok ? code : QString());
-        } else if (d.hasMatch()) {
-            QMessageBox::information(this, "Bluetooth PIN",
-                QString("Enter this code on %1:\n\n%2").arg(pairName, d.captured(1)));
         }
     }
 
@@ -1088,6 +1202,8 @@ private:
     {
         if (pairStage == PairStage::Idle || pairStage == PairStage::Verifying) return;
         pairStage = PairStage::Verifying;
+        closePasskeyDialog();
+        stopScan();
         if (pairProcess) {
             QProcess *p = pairProcess;
             pairProcess = nullptr;
@@ -1098,8 +1214,10 @@ private:
         const QString mac = pairMac;
         const QString name = pairName;
         const QString log = pairTranscript;
+        const bool wasCancelled = pairingCancelled;
+        const bool codeWasShown = !shownPasskey.isEmpty();
         runAsync("bluetoothctl", {"info", mac},
-                 [this, name, log](const QString &info, bool) {
+                 [this, name, log, wasCancelled, codeWasShown](const QString &info, bool) {
             const bool connected = yesPropertyBT(info, "Connected");
             const bool paired = yesPropertyBT(info, "Paired");
             pairStage = PairStage::Idle;
@@ -1107,17 +1225,27 @@ private:
             pairSpinTimer->stop();
             activeDeviceButton = nullptr;
             updateButtons();
-            if (connected) {
+            if (wasCancelled) {
+                // User deliberately cancelled the passkey prompt.
+            } else if (connected) {
                 QMessageBox::information(this, "Bluetooth", "Connected to " + name + ".");
             } else if (paired) {
                 QMessageBox::information(this, "Bluetooth",
-                    name + " is paired, but it isn't currently connected.\n\n"
-                    "Some devices connect only when a supported service is used. "
-                    "For audio, make sure PipeWire/WirePlumber or the appropriate "
-                    "PulseAudio Bluetooth module is installed. You can tap the device to retry.");
+                    name + " is paired but is not currently connected.\n\n"
+                    "For keyboards, press a key to wake the device, then tap "
+                    "it in the list to reconnect. Other devices may require "
+                    "a supported Bluetooth service/profile.");
             } else {
-                QMessageBox::warning(this, "Bluetooth",
-                    "Couldn't pair or connect to " + name + ".\n\n" + bluetoothErrorBT(log));
+                QString message = "Couldn't pair or connect to " + name + ".\n\n" +
+                                  bluetoothErrorBT(log);
+                if (!codeWasShown)
+                    message += "\n\nNo keyboard passkey was displayed by BlueZ. "
+                               "Put the device back into pairing mode, remove "
+                               "any saved incomplete pairing and try again.";
+                QMessageBox box(QMessageBox::Warning, "Bluetooth", message,
+                                QMessageBox::Ok, this);
+                box.setDetailedText(log); // Raw BlueZ output for diagnostics.
+                box.exec();
             }
             pendingRefresh = false;
             refreshDevices();
