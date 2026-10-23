@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # AlternixOS / Devuan Excalibur audio repair and hardware diagnosis
-# Runs as the logged-in desktop user (never with sudo). Compatible with SysVinit.
+# Runtime repair runs as the desktop user. Root/image builds defer hardware
+# and user-session repair rather than failing live-build. Compatible with SysVinit.
 set -u
 set -o pipefail
 
@@ -8,16 +9,26 @@ MODE=repair
 case "${1:-}" in
   ''|--repair) ;;
   --diagnose|--diagnostics) MODE=diagnose ;;
+  --session-only) MODE=session ;;
+  --image-prep) MODE=image ;;
   -h|--help)
-    printf 'Usage: bash %s [--repair|--diagnose]\n' "$0"
+    printf 'Usage: bash %s [--repair|--diagnose|--session-only|--image-prep]\n' "$0"
     exit 0 ;;
   *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
 esac
 
+# live-build runs the Alternix installer as root in a chroot, before a real
+# logged-in desktop user, ALSA hardware, or a PulseAudio D-Bus session exists.
+# The image should contain the packages and script; runtime configuration must
+# happen on first user login, not during ISO construction.
+if [ "$MODE" = image ]; then
+  echo '[Alternix Audio] Image build: runtime audio repair deferred until first user login.'
+  exit 0
+fi
 if [ "$(id -u)" -eq 0 ]; then
-  echo 'Run this as the normal Alternix desktop user, WITHOUT sudo.' >&2
-  echo 'The script will use sudo only for required package installation.' >&2
-  exit 1
+  echo '[Alternix Audio] Root/ISO installer detected: skipping user-session audio configuration.'
+  echo '[Alternix Audio] Configure the audio script to run --session-only at the first desktop login.'
+  exit 0
 fi
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/alternix"
@@ -97,13 +108,16 @@ if ! has apt-get || ! has dpkg-query; then
   show_diagnostics
   exit 1
 fi
-if ! has sudo; then
+if [ "$MODE" != session ] && ! has sudo; then
   warn 'sudo is missing; cannot install packages. Run with --diagnose to collect a report.'
   show_diagnostics
   exit 1
 fi
 
-say 'Checking required ALSA and audio-server packages'
+if [ "$MODE" = session ]; then
+  say 'Session-only mode: not running APT or sudo (safe for first desktop login)'
+else
+  say 'Checking required ALSA and audio-server packages'
 # Alternix has traditionally used PulseAudio. Keep a working PipeWire-Pulse
 # installation intact: installing both competing servers can break audio.
 PACKAGES=(alsa-utils alsa-ucm-conf alsa-topology-conf pavucontrol)
@@ -155,6 +169,7 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
 else
   say 'All selected audio packages are already installed.'
 fi
+fi  # end of package installation; --session-only skips all APT operations
 
 say 'Checking user audio-server state'
 if has pactl && pactl info >/dev/null 2>&1; then
