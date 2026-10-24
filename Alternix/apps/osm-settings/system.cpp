@@ -1,6 +1,7 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -11,17 +12,27 @@
 #include <QFile>
 #include <QDir>
 #include <QTextStream>
-#include <QStringList>
 #include <QFont>
-#include <QScreen>
-#include <QGuiApplication>
 #include <QSizePolicy>
 #include <QTimer>
 #include <QMap>
+#include <QProgressBar>
+#include <QResizeEvent>
+#include <QtGlobal>
 
-// -----------------------------------------------------
-// Shell helper
-// -----------------------------------------------------
+// AlternixOS System page. Only the appearance and refresh organisation of
+// this page have been changed. No external assets or new packages are needed.
+
+namespace {
+
+static const char *BG       = "#282828";
+static const char *TEXT     = "#F3F4F4";
+static const char *MUTED    = "#B9BFC0";
+static const char *ACCENT   = "#70DAC5";
+
+// ---------------------------------------------------------------------------
+// Existing system information sources
+// ---------------------------------------------------------------------------
 static QString runCmd(const QString &cmd)
 {
     QProcess p;
@@ -30,53 +41,39 @@ static QString runCmd(const QString &cmd)
     return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
 }
 
-// -----------------------------------------------------
-// Alternix compact button style (same as Display/Security)
-// -----------------------------------------------------
-static QString altBtnStyle(const QString &txtColor)
+static QString readInstalledVersion(const QString &path)
 {
-    return QString(
-        "QPushButton {"
-        " background:#444444;"
-        " color:%1;"
-        " border:1px solid #222222;"
-        " border-radius:16px;"
-        " font-size:22px;"
-        " font-weight:bold;"
-        " padding:6px 16px;"
-        "}"
-        "QPushButton:hover { background:#555555; }"
-        "QPushButton:pressed { background:#333333; }"
-    ).arg(txtColor);
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly))
+        return "Unknown";
+    const QString v = QString::fromUtf8(f.readAll()).trimmed();
+    return v.isEmpty() ? "Unknown" : v;
 }
 
-static QPushButton* makeBtn(const QString &txt, const QString &color = "white")
+static QString getAlternixDEVersion()
 {
-    QPushButton *b = new QPushButton(txt);
-    b->setStyleSheet(altBtnStyle(color));
-    b->setMinimumSize(140, 54);
-    b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    return b;
+    return readInstalledVersion("/usr/share/alternix/version.txt");
 }
 
-// -----------------------------------------------------
-// SYSTEM INFO HELPERS
-// -----------------------------------------------------
-static QString getKernel() { return runCmd("uname -r"); }
+static QString getAlternixOSVersion()
+{
+    return readInstalledVersion(QDir::home().filePath("Alternix/version"));
+}
 
 static QString getOSName()
 {
     QFile f("/etc/os-release");
     if (!f.open(QIODevice::ReadOnly)) return "Unknown";
-
     QTextStream ts(&f);
     while (!ts.atEnd()) {
         QString line = ts.readLine();
         if (line.startsWith("PRETTY_NAME="))
-            return line.section("=",1).replace("\"","").trimmed();
+            return line.section('=', 1).remove('"').trimmed();
     }
     return "Unknown";
 }
+
+static QString getKernel() { return runCmd("uname -r"); }
 
 static QString getCPUModel()
 {
@@ -85,409 +82,450 @@ static QString getCPUModel()
         QTextStream ts(&f);
         QString best;
         while (!ts.atEnd()) {
-            QString line = ts.readLine();
-            QString low = line.toLower();
-
+            const QString line = ts.readLine();
+            const QString low = line.toLower();
             if (low.startsWith("model name"))
-                return line.section(":",1).trimmed();
-            if (low.startsWith("model"))
-                best = line.section(":",1).trimmed();
-            if (low.startsWith("cpu model"))
-                best = line.section(":",1).trimmed();
-            if (low.startsWith("hardware"))
-                best = line.section(":",1).trimmed();
+                return line.section(':', 1).trimmed();
+            if (low.startsWith("model") || low.startsWith("cpu model") ||
+                low.startsWith("hardware"))
+                best = line.section(':', 1).trimmed();
         }
-        if (!best.isEmpty())
-            return best;
+        if (!best.isEmpty()) return best;
     }
 
     QFile f2("/proc/device-tree/model");
     if (f2.open(QIODevice::ReadOnly)) {
-        QString model = QString::fromUtf8(f2.readAll()).trimmed();
-        if (!model.isEmpty())
-            return model;
+        QString model = QString::fromUtf8(f2.readAll()).remove(QChar('\0')).trimmed();
+        if (!model.isEmpty()) return model;
     }
-
-    QString m = runCmd("LC_ALL=C lscpu | awk -F: '/Model name/ {print $2; exit}'");
-    if (!m.isEmpty())
-        return m.trimmed();
-
-    return "Unknown";
+    const QString m = runCmd("LC_ALL=C lscpu | awk -F: '/Model name/ {print $2; exit}'");
+    return m.isEmpty() ? "Unknown" : m.trimmed();
 }
 
 static QString getCPUCores()
 {
-    QString n = runCmd("nproc");
-    return n.isEmpty() ? "1" : n.trimmed();
+    const QString n = runCmd("nproc");
+    return n.isEmpty() ? "1" : n;
 }
 
 static QString getCPUSpeedGHz()
 {
     QString mhz = runCmd("LC_ALL=C lscpu | awk -F: '/max MHz/ {print $2; exit}'");
-
-    if (mhz.trimmed().isEmpty())
+    if (mhz.isEmpty())
         mhz = runCmd("LC_ALL=C lscpu | awk -F: '/CPU MHz/ {print $2; exit}'");
-
     bool ok = false;
-    double v = mhz.toDouble(&ok);
-    if (!ok || v <= 0.0)
-        return "Unknown";
-
-    return QString::number(v / 1000.0, 'f', 2) + " GHz";
+    const double v = mhz.trimmed().toDouble(&ok);
+    return (ok && v > 0) ? QString::number(v / 1000.0, 'f', 2) + " GHz" : "Unknown";
 }
 
-// RAM
-static QString getRAMTotal()
-{
-    QString kb = runCmd("grep MemTotal /proc/meminfo | awk '{print $2}'");
-    bool ok = false;
-    int v = kb.toInt(&ok);
-    return ok ? QString::number(v / 1024) + " MB" : "Unknown";
-}
-
-static QString getRAMFree()
-{
-    QString kb = runCmd("grep MemAvailable /proc/meminfo | awk '{print $2}'");
-    bool ok = false;
-    int v = kb.toInt(&ok);
-    return ok ? QString::number(v / 1024) + " MB" : "Unknown";
-}
-
-static QString getRAMUsed()
-{
-    QString t = runCmd("grep MemTotal /proc/meminfo | awk '{print $2}'");
-    QString a = runCmd("grep MemAvailable /proc/meminfo | awk '{print $2}'");
-
-    bool ok1=false, ok2=false;
-    int total = t.toInt(&ok1);
-    int avail = a.toInt(&ok2);
-
-    if (!ok1 || !ok2) return "Unknown";
-    return QString::number((total - avail) / 1024) + " MB";
-}
-
-// Uptime
 static QString getUptime()
 {
     QFile f("/proc/uptime");
     if (!f.open(QIODevice::ReadOnly)) return "Unknown";
-
     QTextStream ts(&f);
-    double secs = ts.readLine().split(" ").first().toDouble();
-    int hrs = int(secs) / 3600;
-    int mins = (int(secs) % 3600) / 60;
-
-    return QString("%1h %2m").arg(hrs).arg(mins);
+    const qint64 seconds = static_cast<qint64>(ts.readLine().section(' ', 0, 0).toDouble());
+    return QString("%1h %2m").arg(seconds / 3600).arg((seconds % 3600) / 60);
 }
 
-// Packages
 static QString getFlatpakCount()
 {
-    QString out = runCmd("flatpak list --app --columns=application 2>/dev/null | wc -l");
-    return out.trimmed().isEmpty() ? "0" : out.trimmed();
+    const QString n = runCmd("flatpak list --app --columns=application 2>/dev/null | wc -l");
+    return n.isEmpty() ? "0" : n;
 }
 
 static QString getSnapCount()
 {
-    QString out = runCmd("snap list 2>/dev/null | tail -n +2 | wc -l");
-    return out.trimmed().isEmpty() ? "0" : out.trimmed();
+    const QString n = runCmd("snap list 2>/dev/null | tail -n +2 | wc -l");
+    return n.isEmpty() ? "0" : n;
 }
 
 static QString getDPKGCount()
 {
-    QString out = runCmd("dpkg -l | grep '^ii' | wc -l");
-    return out.trimmed().isEmpty() ? "0" : out.trimmed();
+    const QString n = runCmd("dpkg -l | grep '^ii' | wc -l");
+    return n.isEmpty() ? "0" : n;
 }
 
-// Read installed versions locally (do not depend on a network connection).
-static QString readInstalledVersion(const QString &path)
-{
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return "Unknown";
+struct MemoryInfo {
+    qint64 totalKB = 0;
+    qint64 availableKB = 0;
+    bool valid = false;
+};
 
-    QString v = QString::fromUtf8(f.readAll()).trimmed();
-    return v.isEmpty() ? "Unknown" : v;
+// Read both values together so the RAM tiles and usage bar stay in sync.
+static MemoryInfo getMemoryInfo()
+{
+    MemoryInfo m;
+    QFile f("/proc/meminfo");
+    if (!f.open(QIODevice::ReadOnly)) return m;
+    QTextStream ts(&f);
+    while (!ts.atEnd()) {
+        const QString line = ts.readLine();
+        if (line.startsWith("MemTotal:"))
+            m.totalKB = line.mid(9).simplified().section(' ', 0, 0).toLongLong();
+        else if (line.startsWith("MemAvailable:"))
+            m.availableKB = line.mid(13).simplified().section(' ', 0, 0).toLongLong();
+    }
+    m.valid = m.totalKB > 0 && m.availableKB >= 0;
+    if (m.valid)
+        m.availableKB = qBound(qint64(0), m.availableKB, m.totalKB);
+    return m;
 }
 
-// AlternixDE version — written by the AlternixDE updater.
-static QString getAlternixDEVersion()
+static QString memoryMB(qint64 kb, bool valid)
 {
-    return readInstalledVersion("/usr/share/alternix/version.txt");
+    return valid ? QString::number(kb / 1024) + " MB" : "Unknown";
 }
 
-// AlternixOS version — installed from the AlternixOS GitHub version file.
-static QString getAlternixOSVersion()
+// ---------------------------------------------------------------------------
+// Reusable visual components. Styles are scoped by objectName, so they don't
+// affect the parent osm-settings application or other settings pages.
+// ---------------------------------------------------------------------------
+static QLabel *label(const QString &value, int pixels, bool bold = false,
+                     const QString &colour = TEXT)
 {
-    return readInstalledVersion(QDir::home().filePath("Alternix/version"));
+    QLabel *l = new QLabel(value);
+    QFont font("DejaVu Sans");
+    font.setPixelSize(pixels);
+    font.setWeight(bold ? QFont::DemiBold : QFont::Normal);
+    l->setFont(font);
+    l->setWordWrap(true);
+    l->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    l->setStyleSheet(QString("color:%1; background:transparent; border:none;").arg(colour));
+    l->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    return l;
 }
 
-// -----------------------------------------------------
-// LABEL + LIVE REGISTRY
-// -----------------------------------------------------
-static QMap<QString, QLabel*> liveValues;
-
-static QLabel* makeInfoLabel(const QString &txt, int px, bool bold = false,
-                             Qt::Alignment align = Qt::AlignLeft)
+static QFrame *panel(const QString &objectName)
 {
-    QLabel *lbl = new QLabel(txt);
-    QFont f("DejaVu Sans");
-    f.setPointSize(px);
-    f.setBold(bold);
-    lbl->setFont(f);
-    lbl->setAlignment(align);
-    lbl->setStyleSheet("color:#ffffff;");
-    lbl->setWordWrap(true);
-    return lbl;
+    QFrame *f = new QFrame;
+    f->setObjectName(objectName);
+    f->setStyleSheet(QString(
+        "QFrame#%1 { background:#353535; border:1px solid #454545;"
+        " border-radius:23px; }").arg(objectName));
+    f->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    return f;
 }
 
-// -----------------------------------------------------
-// MINI CARD (#555, radius 18) – two-line (label + value)
-// -----------------------------------------------------
-static QFrame* makeMiniCard(const QString &key,
-                            const QString &line1,
-                            const QString &line2)
+static QVBoxLayout *panelLayout(QFrame *p, int margin = 24, int space = 15)
 {
-    QFrame *card = new QFrame;
-    card->setStyleSheet("QFrame { background:#555555; border-radius:18px; }");
-    card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-
-    QVBoxLayout *v = new QVBoxLayout(card);
-    v->setContentsMargins(20, 12, 20, 12);
-    v->setSpacing(4);
-
-    QLabel *L1 = makeInfoLabel(line1, 18, true, Qt::AlignCenter);
-    QLabel *L2 = makeInfoLabel(line2, 18, false, Qt::AlignCenter);
-
-    v->addWidget(L1);
-    v->addWidget(L2);
-
-    liveValues[key] = L2;
-
-    return card;
+    QVBoxLayout *v = new QVBoxLayout(p);
+    v->setContentsMargins(margin, margin, margin, margin);
+    v->setSpacing(space);
+    return v;
 }
 
-// -----------------------------------------------------
-// SECTION: header (26px) + optional subtitle + grid of mini-cards (2 per row)
-// -----------------------------------------------------
-static QWidget* makeSection(const QString &title,
-                            const QString &subtitle,
-                            const QList<QPair<QString,QString>> &items,
-                            const QList<QString> &keys)
+static QFrame *statTile(const QString &title, const QString &value,
+                        const QString &key, QMap<QString, QLabel*> &values,
+                        int valuePixels = 25, bool highlight = false)
 {
-    QWidget *wrap = new QWidget;
-    QVBoxLayout *v = new QVBoxLayout(wrap);
-    v->setContentsMargins(0, 0, 0, 0);
-    v->setSpacing(8);
+    QFrame *tile = new QFrame;
+    tile->setObjectName("systemStatTile");
+    tile->setStyleSheet(
+        "QFrame#systemStatTile { background:#424242; border:1px solid #4D4D4D;"
+        " border-radius:16px; }");
+    tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    QVBoxLayout *v = new QVBoxLayout(tile);
+    v->setContentsMargins(17, 14, 17, 14);
+    v->setSpacing(5);
 
-    // Header
-    QLabel *hdr = makeInfoLabel(title, 26, true, Qt::AlignLeft);
-    v->addWidget(hdr);
+    QLabel *caption = label(title, 14, true, MUTED);
+    QLabel *number  = label(value, valuePixels, true, highlight ? ACCENT : TEXT);
+    number->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    v->addWidget(caption);
+    v->addWidget(number);
+    if (!key.isEmpty()) values.insert(key, number);
+    return tile;
+}
 
-    // Subtitle (OS name / CPU model, etc.)
-    if (!subtitle.isEmpty()) {
-        QLabel *sub = makeInfoLabel(subtitle, 22, false, Qt::AlignLeft);
-        v->addWidget(sub);
+static void addSectionHeading(QVBoxLayout *layout, const QString &heading,
+                              const QString &description = QString())
+{
+    layout->addWidget(label(heading, 19, true));
+    if (!description.isEmpty())
+        layout->addWidget(label(description, 14, false, MUTED));
+}
+
+// A pair of large cards on desktop becomes a vertical stack on small tablets.
+// The same mechanism is used for the three package cards and version tiles.
+class AdaptiveRow : public QWidget
+{
+public:
+    explicit AdaptiveRow(int threshold, QWidget *parent = nullptr)
+        : QWidget(parent), switchWidth(threshold)
+    {
+        items = new QBoxLayout(QBoxLayout::LeftToRight, this);
+        items->setContentsMargins(0, 0, 0, 0);
+        items->setSpacing(14);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
     }
 
-    // Grid of mini-cards, 2 per row
-    QWidget *gridWrap = new QWidget;
-    QGridLayout *grid = new QGridLayout(gridWrap);
-    grid->setContentsMargins(0, 0, 0, 0);
-    grid->setHorizontalSpacing(16);
-    grid->setVerticalSpacing(16);
-    gridWrap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    void add(QWidget *child) { items->addWidget(child, 1); }
 
-    grid->setColumnStretch(0, 1);
-    grid->setColumnStretch(1, 1);
-
-    for (int i = 0; i < items.size(); ++i) {
-        int row = i / 2;
-        int col = i % 2;
-        grid->addWidget(
-            makeMiniCard(keys[i], items[i].first, items[i].second),
-            row, col
-        );
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        const QBoxLayout::Direction wanted =
+            event->size().width() < switchWidth
+                ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight;
+        if (items->direction() != wanted) items->setDirection(wanted);
+        QWidget::resizeEvent(event);
     }
 
-    v->addWidget(gridWrap);
-    return wrap;
+private:
+    QBoxLayout *items;
+    int switchWidth;
+};
+
+static void setValue(const QMap<QString, QLabel*> &values,
+                     const QString &key, const QString &content)
+{
+    QLabel *l = values.value(key, nullptr);
+    if (l && l->text() != content) l->setText(content);
 }
 
-// -----------------------------------------------------
-// ENTRY POINT
-// -----------------------------------------------------
+static QString buttonStyle()
+{
+    // Retain the original Alternix back-button shape and behaviour.
+    return "QPushButton { background:#444444; color:white; border:1px solid #222222;"
+           " border-radius:16px; font-size:22px; font-weight:bold;"
+           " padding:6px 16px; }"
+           "QPushButton:hover { background:#555555; border-color:#666666; }"
+           "QPushButton:pressed { background:#333333; }";
+}
+
+} // namespace
+
 extern "C" QWidget* make_page(QStackedWidget *stack)
 {
-    liveValues.clear();
-
     QWidget *root = new QWidget(stack);
-    root->setStyleSheet("background:#282828; color:white; font-family:Sans;");
+    root->setObjectName("alternixSystemPage");
+    root->setStyleSheet(QString("QWidget#alternixSystemPage { background:%1; }").arg(BG));
 
-    QVBoxLayout *rootLay = new QVBoxLayout(root);
-    rootLay->setContentsMargins(40, 40, 40, 40);
-    rootLay->setSpacing(10);
+    QMap<QString, QLabel*> values; // per-page, not a shared static registry
+    const MemoryInfo initialRAM = getMemoryInfo();
 
-    // Title
-    QLabel *title = new QLabel("System Info");
-    title->setAlignment(Qt::AlignCenter);
-    title->setStyleSheet("font-size:42px; font-weight:bold;");
-    rootLay->addWidget(title);
+    QVBoxLayout *page = new QVBoxLayout(root);
+    page->setContentsMargins(26, 20, 26, 18);
+    page->setSpacing(14);
 
-    // Scroll area (same behaviour as Display)
+    // Header and manual refresh
+    QHBoxLayout *header = new QHBoxLayout;
+    header->setSpacing(12);
+    QVBoxLayout *headText = new QVBoxLayout;
+    headText->setSpacing(3);
+    headText->addWidget(label("System Info", 35, true));
+    headText->addWidget(label("System, hardware and installed software", 15, false, MUTED));
+    header->addLayout(headText, 1);
+
+    QPushButton *reload = new QPushButton("Refresh");
+    reload->setToolTip("Update system information now");
+    reload->setCursor(Qt::PointingHandCursor);
+    reload->setFixedSize(118, 43);
+    reload->setStyleSheet(
+        "QPushButton { background:#3F4846; color:#C5F4E9;"
+        " border:1px solid #577169; border-radius:14px;"
+        " font-size:15px; font-weight:bold; }"
+        "QPushButton:hover { background:#4D5B56; }"
+        "QPushButton:pressed { background:#313F3A; }");
+    header->addWidget(reload, 0, Qt::AlignVCenter);
+    page->addLayout(header);
+
     QScrollArea *scroll = new QScrollArea(root);
+    scroll->setObjectName("systemInfoScroll");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setStyleSheet(
+        "QScrollArea#systemInfoScroll { border:none; background:transparent; }"
+        "QScrollBar:vertical { background:#282828; width:8px; margin:0px; }"
+        "QScrollBar::handle:vertical { background:#606060; border-radius:4px; min-height:28px; }"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }");
     QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
-    QWidget *wrap = new QWidget(scroll);
-    QVBoxLayout *wrapLay = new QVBoxLayout(wrap);
-    wrapLay->setSpacing(10);
-    wrapLay->setContentsMargins(0, 0, 0, 0);
+    QWidget *content = new QWidget;
+    content->setObjectName("alternixSystemContent");
+    content->setStyleSheet(
+        "QWidget#alternixSystemContent { background:#282828; }");
+    scroll->viewport()->setStyleSheet("background:#282828;");
+    QVBoxLayout *body = new QVBoxLayout(content);
+    body->setContentsMargins(2, 2, 12, 8);
+    body->setSpacing(16);
 
-    // Outer big card (same pattern as Display)
-    QFrame *outer = new QFrame(wrap);
-    outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:40px; }");
+    // -----------------------------------------------------------------------
+    // Alternix versions: prominently displayed side by side
+    // -----------------------------------------------------------------------
+    QFrame *alternix = panel("alternixVersionsPanel");
+    QVBoxLayout *av = panelLayout(alternix);
+    av->addWidget(label("ALTERNIX", 13, true, ACCENT));
+    av->addWidget(label("Installed versions", 24, true));
+    AdaptiveRow *versionRow = new AdaptiveRow(440);
+    versionRow->add(statTile("AlternixDE", getAlternixDEVersion(),
+                             "alt_de_version", values, 29, true));
+    versionRow->add(statTile("AlternixOS", getAlternixOSVersion(),
+                             "alt_os_version", values, 29, true));
+    av->addWidget(versionRow);
+    body->addWidget(alternix);
 
-    QVBoxLayout *outerLay = new QVBoxLayout(outer);
-    outerLay->setContentsMargins(50, 30, 50, 30);
-    outerLay->setSpacing(30);
+    // -----------------------------------------------------------------------
+    // OS information
+    // -----------------------------------------------------------------------
+    QFrame *operating = panel("alternixOperatingPanel");
+    QVBoxLayout *op = panelLayout(operating);
+    addSectionHeading(op, "Operating system");
+    op->addWidget(label(getOSName(), 19, false, TEXT));
+    AdaptiveRow *osRow = new AdaptiveRow(440);
+    osRow->add(statTile("Kernel version", getKernel(), "kernel", values, 19));
+    osRow->add(statTile("System uptime", getUptime(), "uptime", values, 23));
+    op->addWidget(osRow);
+    body->addWidget(operating);
 
-    // Sections inside outer card
-    outerLay->addWidget(
-        makeSection(
-            "Alternix",
-            "",
-            {
-                { "AlternixDE", getAlternixDEVersion() },
-                { "AlternixOS", getAlternixOSVersion() }
-            },
-            { "alt_de_version", "alt_os_version" }
-        )
-    );
+    // -----------------------------------------------------------------------
+    // Hardware cards
+    // -----------------------------------------------------------------------
+    AdaptiveRow *hardware = new AdaptiveRow(750);
 
-    outerLay->addWidget(
-        makeSection(
-            "Linux distro & version",
-            getOSName(),
-            {
-                { "Kernel version", getKernel() },
-                { "Uptime",         getUptime() }
-            },
-            { "kernel", "uptime" }
-        )
-    );
+    QFrame *cpu = panel("alternixCpuPanel");
+    QVBoxLayout *cp = panelLayout(cpu);
+    addSectionHeading(cp, "Processor");
+    cp->addWidget(label(getCPUModel(), 18, false, TEXT));
+    cp->addStretch();
+    AdaptiveRow *cpuRow = new AdaptiveRow(400);
+    cpuRow->add(statTile("CPU cores", getCPUCores(), "cores", values, 24));
+    cpuRow->add(statTile("CPU speed", getCPUSpeedGHz(), "cpuspeed", values, 24));
+    cp->addWidget(cpuRow);
+    hardware->add(cpu);
 
-    outerLay->addWidget(
-        makeSection(
-            "CPU info",
-            getCPUModel(),
-            {
-                { "No. cores",    getCPUCores()    },
-                { "Speed in GHz", getCPUSpeedGHz() }
-            },
-            { "cores", "cpuspeed" }
-        )
-    );
+    QFrame *ram = panel("alternixRamPanel");
+    QVBoxLayout *rp = panelLayout(ram);
+    addSectionHeading(rp, "Memory");
+    QHBoxLayout *usage = new QHBoxLayout;
+    QLabel *usageTitle = label("RAM usage", 15, false, MUTED);
+    QLabel *usagePercent = label("0% used", 15, true, ACCENT);
+    usagePercent->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    usage->addWidget(usageTitle, 1);
+    usage->addWidget(usagePercent);
+    rp->addLayout(usage);
 
-    outerLay->addWidget(
-        makeSection(
-            "RAM amount",
-            "",
-            {
-                { "Total",     getRAMTotal() },
-                { "Used",      getRAMUsed()  },
-                { "Available", getRAMFree()  }
-            },
-            { "ram_total", "ram_used", "ram_free" }
-        )
-    );
+    QProgressBar *ramBar = new QProgressBar;
+    ramBar->setRange(0, 100);
+    ramBar->setTextVisible(false);
+    ramBar->setFixedHeight(11);
+    ramBar->setStyleSheet(
+        "QProgressBar { background:#242424; border:none; border-radius:5px; }"
+        "QProgressBar::chunk { background:#70DAC5; border-radius:5px; }");
+    rp->addWidget(ramBar);
+    rp->addStretch();
 
-    outerLay->addWidget(
-        makeSection(
-            "Packages installed",
-            "",
-            {
-                { "Flatpaks", getFlatpakCount() },
-                { "Snaps",    getSnapCount()    },
-                { "APT/DPKG", getDPKGCount()    }
-            },
-            { "flatpaks", "snaps", "dpkg" }
-        )
-    );
+    AdaptiveRow *ramRow = new AdaptiveRow(400);
+    ramRow->add(statTile("Total", memoryMB(initialRAM.totalKB, initialRAM.valid),
+                         "ram_total", values, 19));
+    ramRow->add(statTile("Used", memoryMB(initialRAM.totalKB - initialRAM.availableKB,
+                                          initialRAM.valid), "ram_used", values, 19));
+    rp->addWidget(ramRow);
+    rp->addWidget(statTile("Available", memoryMB(initialRAM.availableKB, initialRAM.valid),
+                           "ram_free", values, 20));
+    hardware->add(ram);
+    body->addWidget(hardware);
 
-    wrapLay->addWidget(outer);
-    wrapLay->addStretch();
+    // -----------------------------------------------------------------------
+    // Installed packages
+    // -----------------------------------------------------------------------
+    QFrame *packages = panel("alternixPackagesPanel");
+    QVBoxLayout *pk = panelLayout(packages);
+    addSectionHeading(pk, "Installed packages", "Packages available on this system");
+    AdaptiveRow *packageRow = new AdaptiveRow(550);
+    packageRow->add(statTile("APT / DPKG", getDPKGCount(), "dpkg", values, 27));
+    packageRow->add(statTile("Flatpak", getFlatpakCount(), "flatpaks", values, 27));
+    packageRow->add(statTile("Snap", getSnapCount(), "snaps", values, 27));
+    pk->addWidget(packageRow);
+    body->addWidget(packages);
+    body->addStretch();
 
-    scroll->setWidget(wrap);
-    rootLay->addWidget(scroll);
+    scroll->setWidget(content);
+    page->addWidget(scroll, 1);
 
-    // Back button (same style as Display)
-    QPushButton *back = makeBtn("❮");
+    // Keep the familiar bottom-centred Back control.
+    QPushButton *back = new QPushButton(QString::fromUtf8("❮"));
+    back->setStyleSheet(buttonStyle());
     back->setFixedSize(140, 60);
-    QObject::connect(back, &QPushButton::clicked, [stack]() {
-        if (stack)
-            stack->setCurrentIndex(0);
+    back->setCursor(Qt::PointingHandCursor);
+    QObject::connect(back, &QPushButton::clicked, root, [stack]() {
+        if (stack) stack->setCurrentIndex(0);
     });
-    rootLay->addWidget(back, 0, Qt::AlignCenter);
+    page->addWidget(back, 0, Qt::AlignHCenter);
 
-    // -------------------------------------------------
-    // Refresh timer (2s) – only when page visible
-    // -------------------------------------------------
-    QTimer *refresh = new QTimer(root);
-    refresh->setInterval(2000);
+    // -----------------------------------------------------------------------
+    // Live updates. Memory and uptime are inexpensive /proc reads. Commands
+    // for package counts and static system details run less often to avoid
+    // needless CPU use on low-power AlternixOS tablets.
+    // -----------------------------------------------------------------------
+    const auto refreshMemory = [values, ramBar, usagePercent]() {
+        const MemoryInfo m = getMemoryInfo();
+        setValue(values, "ram_total", memoryMB(m.totalKB, m.valid));
+        setValue(values, "ram_used", memoryMB(m.totalKB - m.availableKB, m.valid));
+        setValue(values, "ram_free", memoryMB(m.availableKB, m.valid));
+        if (m.valid) {
+            const int percent = static_cast<int>(
+                (100 * (m.totalKB - m.availableKB)) / m.totalKB);
+            ramBar->setValue(percent);
+            usagePercent->setText(QString::number(percent) + "% used");
+        } else {
+            ramBar->setValue(0);
+            usagePercent->setText("Unknown");
+        }
+    };
 
-    QObject::connect(refresh, &QTimer::timeout, [=]() {
-        if (liveValues.contains("alt_de_version"))
-            liveValues["alt_de_version"]->setText(getAlternixDEVersion());
+    const auto refreshFast = [values, refreshMemory]() {
+        setValue(values, "uptime", getUptime());
+        refreshMemory();
+    };
 
-        if (liveValues.contains("alt_os_version"))
-            liveValues["alt_os_version"]->setText(getAlternixOSVersion());
+    const auto refreshSlow = [values]() {
+        setValue(values, "alt_de_version", getAlternixDEVersion());
+        setValue(values, "alt_os_version", getAlternixOSVersion());
+        setValue(values, "kernel", getKernel());
+        setValue(values, "cores", getCPUCores());
+        setValue(values, "cpuspeed", getCPUSpeedGHz());
+        setValue(values, "dpkg", getDPKGCount());
+        setValue(values, "flatpaks", getFlatpakCount());
+        setValue(values, "snaps", getSnapCount());
+    };
 
-        if (liveValues.contains("kernel"))
-            liveValues["kernel"]->setText(getKernel());
-
-        if (liveValues.contains("uptime"))
-            liveValues["uptime"]->setText(getUptime());
-
-        if (liveValues.contains("cores"))
-            liveValues["cores"]->setText(getCPUCores());
-
-        if (liveValues.contains("cpuspeed"))
-            liveValues["cpuspeed"]->setText(getCPUSpeedGHz());
-
-        if (liveValues.contains("ram_total"))
-            liveValues["ram_total"]->setText(getRAMTotal());
-
-        if (liveValues.contains("ram_used"))
-            liveValues["ram_used"]->setText(getRAMUsed());
-
-        if (liveValues.contains("ram_free"))
-            liveValues["ram_free"]->setText(getRAMFree());
-
-        if (liveValues.contains("flatpaks"))
-            liveValues["flatpaks"]->setText(getFlatpakCount());
-
-        if (liveValues.contains("snaps"))
-            liveValues["snaps"]->setText(getSnapCount());
-
-        if (liveValues.contains("dpkg"))
-            liveValues["dpkg"]->setText(getDPKGCount());
-    });
-
-    QObject::connect(stack, &QStackedWidget::currentChanged, root,
-                     [=](int idx) {
-        bool visible = (stack->widget(idx) == root);
-        if (visible)
-            refresh->start();
-        else
-            refresh->stop();
+    refreshMemory();
+    QObject::connect(reload, &QPushButton::clicked, root,
+                     [refreshFast, refreshSlow]() {
+        refreshFast();
+        refreshSlow();
     });
 
-    if (stack->currentWidget() == root)
-        refresh->start();
+    QTimer *fastTimer = new QTimer(root);
+    fastTimer->setInterval(2000);
+    QObject::connect(fastTimer, &QTimer::timeout, root, refreshFast);
+
+    QTimer *slowTimer = new QTimer(root);
+    slowTimer->setInterval(30000);
+    QObject::connect(slowTimer, &QTimer::timeout, root, refreshSlow);
+
+    if (stack) {
+        QObject::connect(stack, &QStackedWidget::currentChanged, root,
+                         [=](int idx) {
+            if (stack->widget(idx) == root) {
+                refreshFast();
+                refreshSlow();
+                fastTimer->start();
+                slowTimer->start();
+            } else {
+                fastTimer->stop();
+                slowTimer->stop();
+            }
+        });
+        if (stack->currentWidget() == root) {
+            fastTimer->start();
+            slowTimer->start();
+        }
+    }
 
     return root;
 }
