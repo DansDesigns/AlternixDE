@@ -117,6 +117,56 @@ sudo apt update
 sudo apt install xlibre -y
 #sudo dpkg --add-architecture i386
 
+# Nala is required by os-check-update. The Volian repo was previously used
+# to supply Nala and its dependencies on Devuan where it is unavailable.
+# This does not change the rest of the installer's APT commands.
+echo "- Adding nala dependencies.."
+VOLIAN_SOURCE="/etc/apt/sources.list.d/volian.list"
+VOLIAN_KEY="/etc/apt/keyrings/volian.gpg"
+NALA_AVAILABLE=false
+
+if command -v nala >/dev/null 2>&1; then
+    echo "[System] Nala is already installed."
+    NALA_AVAILABLE=true
+else
+    # Scope Volian's signing key to its own temporary repository.
+    sudo install -d -m 0755 /etc/apt/keyrings
+    VOLIAN_TEMP_KEY="$(mktemp)"
+    if curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
+            -o "$VOLIAN_TEMP_KEY" https://deb.volian.org/volian/volian.gpg && \
+            [ -s "$VOLIAN_TEMP_KEY" ]; then
+        sudo install -m 0644 "$VOLIAN_TEMP_KEY" "$VOLIAN_KEY"
+        echo "deb [signed-by=$VOLIAN_KEY] https://deb.volian.org/volian/ nala main" \
+            | sudo tee "$VOLIAN_SOURCE" >/dev/null
+        echo "[System] Installing nala.."
+        if sudo apt update && sudo apt install -y nala; then
+            NALA_AVAILABLE=true
+        else
+            echo "[System] Volian Nala install failed; will retry using Devuan APT sources."
+        fi
+    else
+        echo "[System] Could not download Volian's repository key; will retry using Devuan APT sources."
+    fi
+    rm -f -- "$VOLIAN_TEMP_KEY"
+fi
+
+echo "[System] Removing nala Install Components.."
+sudo rm -f "$VOLIAN_SOURCE" "$VOLIAN_KEY"
+
+# Refresh after removing the temporary Volian source, including when it failed.
+# Keep the existing package manager (APT) for the remainder of installation.
+if ! sudo apt update; then
+    echo "WARNING: APT index refresh failed after removing the Volian repository."
+fi
+if [ "$NALA_AVAILABLE" = false ]; then
+    if sudo apt install -y nala; then
+        NALA_AVAILABLE=true
+    fi
+fi
+if [ "$NALA_AVAILABLE" = false ] || ! command -v nala >/dev/null 2>&1; then
+    echo "WARNING: Nala could not be installed. Installation will continue, but os-check-update needs Nala to run system updates."
+fi
+
 echo "[System] Installing Required Components.."
 sudo apt install -y \
     build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
