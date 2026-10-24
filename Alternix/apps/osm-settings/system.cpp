@@ -19,6 +19,7 @@
 #include <QProgressBar>
 #include <QResizeEvent>
 #include <QtGlobal>
+#include <sys/sysinfo.h>
 
 // AlternixOS System page. Only the appearance and refresh organisation of
 // this page have been changed. No external assets or new packages are needed.
@@ -151,23 +152,71 @@ struct MemoryInfo {
     bool valid = false;
 };
 
-// Read both values together so the RAM tiles and usage bar stay in sync.
+// Read memory statistics from /proc/meminfo. On kernels without
+// MemAvailable, estimate it using free/cached/reclaimable memory.
+// If procfs cannot be read, sysinfo(2) still provides valid RAM totals.
 static MemoryInfo getMemoryInfo()
 {
     MemoryInfo m;
     QFile f("/proc/meminfo");
-    if (!f.open(QIODevice::ReadOnly)) return m;
-    QTextStream ts(&f);
-    while (!ts.atEnd()) {
-        const QString line = ts.readLine();
-        if (line.startsWith("MemTotal:"))
-            m.totalKB = line.mid(9).simplified().section(' ', 0, 0).toLongLong();
-        else if (line.startsWith("MemAvailable:"))
-            m.availableKB = line.mid(13).simplified().section(' ', 0, 0).toLongLong();
+    qint64 freeKB = -1;
+    qint64 buffersKB = 0;
+    qint64 cachedKB = 0;
+    qint64 reclaimableKB = 0;
+    qint64 shmemKB = 0;
+    bool hasAvailable = false;
+
+    if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        QTextStream ts(&f);
+        while (!ts.atEnd()) {
+            const QString line = ts.readLine();
+            const int colon = line.indexOf(':');
+            if (colon < 0) continue;
+
+            // "MemTotal:   123456 kB" -> 123456 (kB)
+            bool ok = false;
+            const qint64 kb = line.mid(colon + 1).simplified()
+                                  .section(' ', 0, 0).toLongLong(&ok);
+            if (!ok || kb < 0) continue;
+
+            const QString name = line.left(colon).trimmed();
+            if (name == "MemTotal") m.totalKB = kb;
+            else if (name == "MemAvailable") {
+                m.availableKB = kb;
+                hasAvailable = true;
+            } else if (name == "MemFree") freeKB = kb;
+            else if (name == "Buffers") buffersKB = kb;
+            else if (name == "Cached") cachedKB = kb;
+            else if (name == "SReclaimable") reclaimableKB = kb;
+            else if (name == "Shmem") shmemKB = kb;
+        }
     }
-    m.valid = m.totalKB > 0 && m.availableKB >= 0;
-    if (m.valid)
-        m.availableKB = qBound(qint64(0), m.availableKB, m.totalKB);
+
+    if (m.totalKB > 0) {
+        if (!hasAvailable && freeKB >= 0) {
+            m.availableKB = freeKB + buffersKB + cachedKB
+                            + reclaimableKB - shmemKB;
+            hasAvailable = true;
+        }
+        if (hasAvailable) {
+            m.availableKB = qBound(qint64(0), m.availableKB, m.totalKB);
+            m.valid = true;
+            return m;
+        }
+    }
+
+    // Fallback for environments where procfs is incomplete/unavailable.
+    struct sysinfo si;
+    if (::sysinfo(&si) == 0) {
+        const quint64 unit = si.mem_unit ? si.mem_unit : 1;
+        m.totalKB = static_cast<qint64>(
+            (static_cast<quint64>(si.totalram) * unit) / 1024);
+        m.availableKB = static_cast<qint64>(
+            ((static_cast<quint64>(si.freeram) + si.bufferram) * unit) / 1024);
+        m.valid = m.totalKB > 0;
+        if (m.valid)
+            m.availableKB = qBound(qint64(0), m.availableKB, m.totalKB);
+    }
     return m;
 }
 
@@ -308,40 +357,22 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     page->setContentsMargins(26, 20, 26, 18);
     page->setSpacing(14);
 
-    // Header and manual refresh
-    QHBoxLayout *header = new QHBoxLayout;
-    header->setSpacing(12);
-    QVBoxLayout *headText = new QVBoxLayout;
-    headText->setSpacing(3);
-    headText->addWidget(label("System Info", 35, true));
-    headText->addWidget(label("System, hardware and installed software", 15, false, MUTED));
-    header->addLayout(headText, 1);
-
-    QPushButton *reload = new QPushButton("Refresh");
-    reload->setToolTip("Update system information now");
-    reload->setCursor(Qt::PointingHandCursor);
-    reload->setFixedSize(118, 43);
-    reload->setStyleSheet(
-        "QPushButton { background:#3F4846; color:#C5F4E9;"
-        " border:1px solid #577169; border-radius:14px;"
-        " font-size:15px; font-weight:bold; }"
-        "QPushButton:hover { background:#4D5B56; }"
-        "QPushButton:pressed { background:#313F3A; }");
-    header->addWidget(reload, 0, Qt::AlignVCenter);
-    page->addLayout(header);
+    // Centred page title and subtitle.
+    QLabel *pageTitle = label("System Info", 35, true);
+    pageTitle->setAlignment(Qt::AlignCenter);
+    QLabel *pageSubtitle = label("System, hardware and installed software", 15, false, MUTED);
+    pageSubtitle->setAlignment(Qt::AlignCenter);
+    page->addWidget(pageTitle);
+    page->addWidget(pageSubtitle);
 
     QScrollArea *scroll = new QScrollArea(root);
     scroll->setObjectName("systemInfoScroll");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setStyleSheet(
-        "QScrollArea#systemInfoScroll { border:none; background:transparent; }"
-        "QScrollBar:vertical { background:#282828; width:8px; margin:0px; }"
-        "QScrollBar::handle:vertical { background:#606060; border-radius:4px; min-height:28px; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0px; }"
-        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }");
+        "QScrollArea#systemInfoScroll { border:none; background:transparent; }");
     QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
     QWidget *content = new QWidget;
@@ -494,11 +525,6 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     };
 
     refreshMemory();
-    QObject::connect(reload, &QPushButton::clicked, root,
-                     [refreshFast, refreshSlow]() {
-        refreshFast();
-        refreshSlow();
-    });
 
     QTimer *fastTimer = new QTimer(root);
     fastTimer->setInterval(2000);
