@@ -108,8 +108,11 @@ fi
 # rather than a missing module.
 # ---------------------------------------------------------------------
 if [ "$SENSOR_FOUND" = "no" ]; then
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y linux-firmware firmware-misc-nonfree >/dev/null 2>&1
+    # Avoid a silent, guaranteed-to-fail APT attempt from osm-settings.
+    # Firmware installation requires administrative privileges and should
+    # not be treated as successful merely because APT was invoked.
+    if [ "$RAN_AS_ROOT" = "yes" ] && command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y linux-firmware firmware-misc-nonfree >/dev/null 2>&1 || true
     fi
     modprobe -r intel_ishtp_hid intel_ishtp >/dev/null 2>&1
     modprobe intel_ishtp intel_ishtp_hid >/dev/null 2>&1
@@ -143,7 +146,7 @@ if [ "$SENSOR_FOUND" = "no" ]; then
         HINT="Check $DMESG_LOG for ish/ishtp error lines — often a missing firmware blob, or the sensor hub disabled in BIOS/UEFI firmware settings."
     elif grep -qi 'firmware' "$DMESG_LOG" 2>/dev/null; then
         REASON="A firmware file the sensor driver needs may be missing"
-        HINT="linux-firmware / firmware-misc-nonfree were installed automatically — reboot and scan again."
+        HINT="Check which firmware package supplies this device on AlternixOS/Devuan. If firmware was installed by an administrator, reboot and scan again."
     elif [ ! -s "$DMESG_LOG" ]; then
         REASON="No sensor-related kernel messages found"
         HINT="If this is unexpected, the kernel ring buffer may be restricted (dmesg needs root) — re-run this scan as root/sudo to be sure. Otherwise this device may not have a rotation sensor fitted, or it's disabled in BIOS/UEFI settings."
@@ -154,67 +157,260 @@ if [ "$SENSOR_FOUND" = "no" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# iio-sensor-proxy.
-#
-# Rather than forking the binary ourselves (which fails silently if this
-# process doesn't have permission to own net.hadess.SensorProxy on the
-# system bus), first just talk to the bus name — dbus-daemon itself can
-# auto-activate a registered D-Bus system service on demand, independent
-# of systemd, as long as the package installed a .service file under
-# /usr/share/dbus-1/system-services/. That activation runs with whatever
-# privilege the .service file's Exec= + dbus policy grants (usually
-# root), so it works even when THIS script isn't root.
+# iio-sensor-proxy: package installation, executable location, and D-Bus
+# availability are distinct checks. On Debian/Devuan the executable is
+# typically /usr/libexec/iio-sensor-proxy (NOT on an ordinary user's PATH).
+# Do not treat "command not found" or an absent process as "not installed".
 # ---------------------------------------------------------------------
-if command -v iio-sensor-proxy >/dev/null 2>&1; then
-    PROXY_INSTALLED="yes"
-elif command -v apt-get >/dev/null 2>&1; then
-    apt-get install -y iio-sensor-proxy >/dev/null 2>&1
-    command -v iio-sensor-proxy >/dev/null 2>&1 && PROXY_INSTALLED="yes"
-fi
+PROXY_BINARY=""
+PROXY_ACCESSIBLE="no"
 
-if [ "$PROXY_INSTALLED" = "yes" ] && ! pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
-    # Ping the well-known name — this is enough to trigger D-Bus
-    # activation if a system-services file exists for it.
-    dbus-send --system --print-reply --dest=net.hadess.SensorProxy \
-        /net/hadess/SensorProxy org.freedesktop.DBus.Peer.Ping \
-        > "$ACTIVATE_ERR_LOG" 2>&1
-
-    for i in 1 2 3 4 5; do
-        pgrep -x iio-sensor-proxy >/dev/null 2>&1 && break
-        sleep 1
-    done
-fi
-
-if [ "$PROXY_INSTALLED" = "yes" ] && ! pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
-    # D-Bus activation didn't bring it up (no .service file installed,
-    # or this account isn't allowed to trigger/own it). Fall back to
-    # running it directly with verbose logging, so if it's a permission
-    # problem the daemon's own error ends up in PROXY_LOG.
-    iio-sensor-proxy -v > "$PROXY_LOG" 2>&1 &
-    disown
-    sleep 2
-fi
-
-if pgrep -x iio-sensor-proxy >/dev/null 2>&1; then
-    PROXY_RUNNING="yes"
-elif [ "$PROXY_INSTALLED" = "yes" ]; then
-    if [ "$SENSOR_FOUND" = "yes" ]; then
-        if grep -qiE 'not.*provided.*service|ServiceUnknown' "$ACTIVATE_ERR_LOG" 2>/dev/null; then
-            REASON="No D-Bus service-activation file for iio-sensor-proxy"
-            HINT="The package didn't install /usr/share/dbus-1/system-services/net.hadess.SensorProxy.service (some builds only ship a systemd unit, which Devuan/sysvinit won't use). See $PROXY_LOG for the direct-launch attempt's own error."
-        elif grep -qiE 'AccessDenied|not authorized|denied' "$ACTIVATE_ERR_LOG" "$PROXY_LOG" 2>/dev/null; then
-            REASON="D-Bus denied permission to start/own iio-sensor-proxy"
-            HINT="This account (RAN_AS_ROOT=$RAN_AS_ROOT) likely isn't covered by the D-Bus system policy for net.hadess.SensorProxy. Re-run as root, or add an <allow own=\"net.hadess.SensorProxy\"/> rule for this user in /etc/dbus-1/system.d/."
-        else
-            REASON="iio-sensor-proxy exited immediately despite a detected sensor"
-            HINT="See $PROXY_LOG and $ACTIVATE_ERR_LOG for the exact error."
-        fi
-    elif [ -z "$REASON" ]; then
-        REASON="No accelerometer to start iio-sensor-proxy against"
+find_proxy_binary() {
+    local candidate
+    candidate=$(command -v iio-sensor-proxy 2>/dev/null || true)
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        PROXY_BINARY="$candidate"
+        return 0
     fi
-elif [ -z "$REASON" ]; then
-    REASON="iio-sensor-proxy is not installed and the automatic install failed"
-    HINT="Install it manually (e.g. 'sudo apt-get install iio-sensor-proxy') and re-run this scan."
+
+    for candidate in /usr/libexec/iio-sensor-proxy \
+                     /usr/lib/iio-sensor-proxy \
+                     /usr/bin/iio-sensor-proxy \
+                     /usr/sbin/iio-sensor-proxy; do
+        if [ -x "$candidate" ]; then
+            PROXY_BINARY="$candidate"
+            return 0
+        fi
+    done
+
+    # Covers distributions that install their daemon in an alternate path.
+    if command -v dpkg-query >/dev/null 2>&1; then
+        while IFS= read -r candidate; do
+            case "$candidate" in
+                */iio-sensor-proxy)
+                    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+                        PROXY_BINARY="$candidate"
+                        return 0
+                    fi
+                    ;;
+            esac
+        done < <(dpkg-query -L iio-sensor-proxy 2>/dev/null)
+    fi
+    return 1
+}
+
+check_proxy_installed() {
+    # Query the Debian package database first; the daemon is not generally
+    # located on PATH. Status is e.g. "install ok installed".
+    if command -v dpkg-query >/dev/null 2>&1 &&
+       [ "$(dpkg-query -W -f='${Status}' iio-sensor-proxy 2>/dev/null)" = "install ok installed" ]; then
+        return 0
+    fi
+    [ -n "$PROXY_BINARY" ] || command -v monitor-sensor >/dev/null 2>&1
+}
+
+# Peer.Ping verifies that the proxy actually owns its well-known name on
+# the system bus. D-Bus may activate it when a service registration exists.
+# "pgrep -x" is not suitable: Linux comm names are limited to 15 chars,
+# whereas "iio-sensor-proxy" is 16 chars long.
+probe_proxy_bus() {
+    command -v dbus-send >/dev/null 2>&1 || return 1
+    dbus-send --system --print-reply --reply-timeout=2500 \
+        --dest=net.hadess.SensorProxy /net/hadess/SensorProxy \
+        org.freedesktop.DBus.Peer.Ping >"$ACTIVATE_ERR_LOG" 2>&1
+}
+
+find_proxy_binary || true
+if check_proxy_installed; then
+    PROXY_INSTALLED="yes"
+elif [ "$RAN_AS_ROOT" = "yes" ] && command -v apt-get >/dev/null 2>&1; then
+    # Only attempt an installation when the scan was explicitly run as root.
+    # A normal osm-settings session must not silently attempt privileged APT.
+    if apt-get install -y iio-sensor-proxy >"$PROXY_LOG" 2>&1; then
+        find_proxy_binary || true
+        check_proxy_installed && PROXY_INSTALLED="yes"
+    fi
+fi
+
+# The Debian/Devuan package typically includes a systemd unit, but
+# AlternixOS uses SysVinit. A daemon installed in /usr/libexec does not
+# automatically become a runnable SysV service. Keep this fix inside the
+# normal rotation setup script (no secondary repair script required).
+PROXY_SERVICE="none"
+SERVICE_ERROR=""
+
+# Install a small, root-owned SysV init script if the package provides no
+# native service. This only runs when the user explicitly invokes setup as
+# root; a normal osm-settings scan never silently elevates privileges.
+install_sysv_proxy_service() {
+    [ "$RAN_AS_ROOT" = "yes" ] || return 1
+    [ -n "$PROXY_BINARY" ] && [ -x "$PROXY_BINARY" ] || return 1
+
+    if [ -f /etc/init.d/iio-sensor-proxy ]; then
+        PROXY_SERVICE="iio-sensor-proxy"
+        return 0
+    fi
+
+    PROXY_SERVICE="alternix-iio-sensor-proxy"
+    local init_file="/etc/init.d/$PROXY_SERVICE"
+    if [ ! -f "$init_file" ]; then
+        # Single-quoted heredoc: no untrusted path/commands are expanded.
+        cat > "$init_file" <<'ALT_SYSV_SERVICE'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          alternix-iio-sensor-proxy
+# Required-Start:    $remote_fs $syslog dbus
+# Required-Stop:     $remote_fs $syslog dbus
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: IIO sensor proxy for AlternixOS SysVinit
+### END INIT INFO
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+PIDFILE=/run/alternix-iio-sensor-proxy.pid
+find_daemon() {
+    for candidate in /usr/libexec/iio-sensor-proxy /usr/lib/iio-sensor-proxy \
+                     /usr/sbin/iio-sensor-proxy /usr/bin/iio-sensor-proxy; do
+        if [ -x "$candidate" ]; then
+            DAEMON="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+find_daemon || { echo "iio-sensor-proxy executable missing" >&2; exit 5; }
+
+case "${1:-}" in
+    start)
+        # --exec checks /proc/PID/exe; it does not rely on the truncated
+        # process name. --background handles this foreground GLib daemon.
+        start-stop-daemon --start --quiet --oknodo \
+            --background --make-pidfile --pidfile "$PIDFILE" \
+            --exec "$DAEMON" --startas "$DAEMON"
+        ;;
+    stop)
+        start-stop-daemon --stop --quiet --oknodo --retry=TERM/5/KILL/5 \
+            --pidfile "$PIDFILE" --exec "$DAEMON"
+        rc=$?
+        rm -f "$PIDFILE"
+        exit "$rc"
+        ;;
+    restart|force-reload)
+        "$0" stop && "$0" start
+        ;;
+    status)
+        if start-stop-daemon --status --exec "$DAEMON"; then
+            echo "iio-sensor-proxy is running"
+            exit 0
+        fi
+        echo "iio-sensor-proxy is not running"
+        exit 3
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|force-reload|status}" >&2
+        exit 2
+        ;;
+esac
+ALT_SYSV_SERVICE
+        if ! chmod 0755 "$init_file"; then
+            SERVICE_ERROR="Could not set SysV init script permissions"
+            rm -f "$init_file"
+            return 1
+        fi
+        chown root:root "$init_file" 2>/dev/null || true
+    fi
+
+    # Register the service for future boots with SysVinit, not systemd.
+    if command -v update-rc.d >/dev/null 2>&1; then
+        if ! update-rc.d "$PROXY_SERVICE" defaults >/dev/null 2>&1; then
+            SERVICE_ERROR="update-rc.d failed to register $PROXY_SERVICE"
+            return 1
+        fi
+    else
+        SERVICE_ERROR="update-rc.d not found; automatic boot startup not enabled"
+        return 1
+    fi
+    return 0
+}
+
+start_sysv_proxy_service() {
+    local name=""
+    if [ -f /etc/init.d/iio-sensor-proxy ]; then
+        name="iio-sensor-proxy"
+    elif [ -f /etc/init.d/alternix-iio-sensor-proxy ]; then
+        name="alternix-iio-sensor-proxy"
+    else
+        return 1
+    fi
+    PROXY_SERVICE="$name"
+    if command -v invoke-rc.d >/dev/null 2>&1; then
+        # invoke-rc.d respects local runlevel policy; direct invocation is
+        # used if a policy prevents setup from starting the service now.
+        invoke-rc.d "$name" start >"$PROXY_LOG" 2>&1 || \
+            "/etc/init.d/$name" start >>"$PROXY_LOG" 2>&1
+    else
+        "/etc/init.d/$name" start >"$PROXY_LOG" 2>&1
+    fi
+}
+
+if [ "$PROXY_INSTALLED" = "yes" ]; then
+    if probe_proxy_bus; then
+        PROXY_RUNNING="yes"
+        PROXY_ACCESSIBLE="yes"
+    else
+        # First check for an existing service. Only root can start/init it.
+        if [ -f /etc/init.d/iio-sensor-proxy ]; then
+            PROXY_SERVICE="iio-sensor-proxy"
+        elif [ -f /etc/init.d/alternix-iio-sensor-proxy ]; then
+            PROXY_SERVICE="alternix-iio-sensor-proxy"
+        fi
+
+        if [ "$RAN_AS_ROOT" = "yes" ]; then
+            install_sysv_proxy_service || true
+            start_sysv_proxy_service || true
+            for i in 1 2 3 4 5; do
+                if probe_proxy_bus; then
+                    PROXY_RUNNING="yes"
+                    PROXY_ACCESSIBLE="yes"
+                    break
+                fi
+                sleep 1
+            done
+        fi
+    fi
+fi
+
+if [ "$PROXY_INSTALLED" != "yes" ]; then
+    if [ -z "$REASON" ]; then
+        REASON="iio-sensor-proxy package is not installed"
+        HINT="Install it with administrative privileges: apt-get install iio-sensor-proxy."
+    fi
+elif [ "$PROXY_RUNNING" != "yes" ]; then
+    # Service activation is a separate issue from package installation.
+    # The Debian package may ship ONLY a systemd unit; Devuan doesn't use it.
+    if [ -z "$PROXY_BINARY" ]; then
+        PROXY_ISSUE="iio-sensor-proxy is installed, but its daemon executable was not found"
+        PROXY_FIX="Check 'dpkg -L iio-sensor-proxy' and reinstall the package if necessary."
+    elif grep -qiE 'ServiceUnknown|was not provided by any|not.*activat|Unit.*not found|org.freedesktop.systemd1' "$ACTIVATE_ERR_LOG" 2>/dev/null; then
+        PROXY_ISSUE="iio-sensor-proxy is installed, but D-Bus could not activate it"
+        PROXY_FIX="On AlternixOS/SysVinit run: sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. This configures an /etc/init.d/ service. See $ACTIVATE_ERR_LOG."
+    elif grep -qiE 'AccessDenied|not authorized|denied' "$ACTIVATE_ERR_LOG" "$PROXY_LOG" 2>/dev/null; then
+        PROXY_ISSUE="iio-sensor-proxy is installed, but D-Bus denied its startup"
+        PROXY_FIX="Check the D-Bus policy/service configuration. Do not grant ordinary users ownership of net.hadess.SensorProxy. See $ACTIVATE_ERR_LOG."
+    else
+        PROXY_ISSUE="iio-sensor-proxy is installed, but its D-Bus service is not running"
+        PROXY_FIX="AlternixOS uses SysVinit. The proxy is at $PROXY_BINARY. Run the setup script once with administrator privileges to install/start the SysV service: sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. See $ACTIVATE_ERR_LOG and $PROXY_LOG."
+    fi
+    if [ -z "$REASON" ]; then
+        REASON="$PROXY_ISSUE"
+        HINT="$PROXY_FIX"
+    else
+        HINT="${HINT:+$HINT }$PROXY_ISSUE. $PROXY_FIX"
+    fi
+fi
+
+if [ -n "$SERVICE_ERROR" ]; then
+    HINT="${HINT:+$HINT }$SERVICE_ERROR"
 fi
 
 if [ "$PROXY_RUNNING" = "yes" ]; then
@@ -233,6 +429,10 @@ echo "SENSOR_NAME=$SENSOR_NAME"
 echo "DRIVER_LOADED=$DRIVER_LOADED"
 echo "PROXY_INSTALLED=$PROXY_INSTALLED"
 echo "PROXY_RUNNING=$PROXY_RUNNING"
+echo "PROXY_BINARY=$PROXY_BINARY"
+echo "PROXY_ACCESSIBLE=$PROXY_ACCESSIBLE"
+echo "PROXY_SERVICE=$PROXY_SERVICE"
+echo "SERVICE_ERROR=$SERVICE_ERROR"
 echo "ORIENTATION=$ORIENTATION"
 echo "RAN_AS_ROOT=$RAN_AS_ROOT"
 echo "REASON=$REASON"
