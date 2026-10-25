@@ -12,11 +12,11 @@ echo "       Current Version: $LOCAL_VERSION"
 echo "=============================================="
 echo "Checking for Linux System Updates..."
 echo " "
-sudo nala update
+/usr/local/bin/osm-sudo nala update
 echo " "
 echo "Applying Upgrades…"
 echo " "
-sudo nala upgrade -y
+/usr/local/bin/osm-sudo nala upgrade -y
 echo " "
 echo "Checking for Alternix Updates..."
 
@@ -149,7 +149,7 @@ while true; do
                 sleep 1
                 echo "1.."
                 sleep 1
-                sudo reboot
+                /usr/local/bin/osm-sudo reboot
                 break
             elif [[ "$KEY" == "2" ]]; then
                 echo ""
