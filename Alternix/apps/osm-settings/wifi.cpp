@@ -87,7 +87,7 @@ static QString runCmdAnimated(const QString &cmd, int timeoutMs,
 }
 
 // ---------------------------------------------------------------------
-// Privileged commands (nmcli connect / radio on-off / rescan need
+// Privileged commands (nmcli connect / radio on-off may need
 // org.freedesktop.NetworkManager.network-control, which this minimal
 // build has no polkit agent to satisfy interactively).
 //
@@ -432,19 +432,38 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         ssidList->addItem(ph);
         QCoreApplication::processEvents();
 
-        // nmcli's "--rescan yes" triggers a scan via D-Bus and blocks until
-        // fresh results are available — the wait is sliced by runCmdAnimated
-        // so the spinner keeps moving the whole time.
+        // Listing nearby Wi-Fi networks is a read-only operation and should
+        // NOT run through sudo/osm-sudo. On some installations sudo -A cannot
+        // obtain an interactive password, so its "[sudo] password for ..."
+        // prompt was being rendered in red instead of the available SSIDs.
+        // Ask NetworkManager for a fresh scan as the logged-in user; keep the
+        // existing animated spinner while the scan completes.
         int frame = 0;
+        auto scanTick = [&]() {
+            frame = (frame + 1) % SPIN_COUNT;
+            ph->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Scanning…");
+            if (extraTick) extraTick(frame);
+        };
         QString err;
-        QString out = runCmdAsRootAnimated(
+        QString out = runCmdAnimated(
             "nmcli -t -f IN-USE,SSID device wifi list --rescan yes", 15000,
-            [&]() {
-                frame = (frame + 1) % SPIN_COUNT;
-                ph->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Scanning…");
-                if (extraTick) extraTick(frame);
-            },
-            &err);
+            scanTick, &err);
+
+        // Some NetworkManager configurations restrict requesting a *new*
+        // scan but still permit reading the last discovered access points.
+        // Show that cached list instead of asking for an admin password.
+        if (out.isEmpty()) {
+            QString cachedErr;
+            QString cached = runCmdAnimated(
+                "nmcli -t -f IN-USE,SSID device wifi list --rescan no", 5000,
+                scanTick, &cachedErr);
+            if (!cached.isEmpty()) {
+                out = cached;
+                err.clear();
+            } else if (err.isEmpty()) {
+                err = cachedErr;
+            }
+        }
 
         ssidList->clear();
 
