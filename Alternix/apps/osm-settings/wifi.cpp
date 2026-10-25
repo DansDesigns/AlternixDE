@@ -19,7 +19,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QTimer>
-#include <QProcessEnvironment>
+#include <memory>
 #include <functional>
 
 // =========================================================
@@ -87,111 +87,128 @@ static QString runCmdAnimated(const QString &cmd, int timeoutMs,
 }
 
 // ---------------------------------------------------------------------
-// Privileged commands (nmcli connect / radio on-off may need
-// org.freedesktop.NetworkManager.network-control, which this minimal
-// build has no polkit agent to satisfy interactively).
+// Privileged operations: Alternix's osm-sudo is an AUTHENTICATING COMMAND
+// WRAPPER (`osm-lock --auth`, then `sudo -S "$@"`). It is NOT a SUDO_ASKPASS
+// program: setting SUDO_ASKPASS=osm-sudo causes the unusable
+// "[sudo] password for ...:" popup instead of providing a password.
 //
-// Strategy: try `sudo -n` first — silent and instant if NOPASSWD is
-// configured for the user (Alternix sets this up by default). If that
-// specifically fails because a password is needed, retry with `sudo -A`
-// so sudo calls the SUDO_ASKPASS helper — osm-sudo, the GUI pattern
-// unlock — instead of trying (and failing) to prompt on a controlling
-// terminal that doesn't exist for a GUI app.
+// Try cached/passwordless sudo first; only if sudo requires authentication
+// launch the actual osm-sudo command. A successful authentication is shared
+// for the lifetime of this Wi-Fi page, so no second pattern prompt is shown.
 // ---------------------------------------------------------------------
 
-static QProcessEnvironment sudoEnv() {
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    // osm-sudo is installed to /usr/local/bin and normally exported via
-    // /etc/profile.d/osm-sudo.sh — this is just a safety net in case a
-    // process ends up with a stripped environment.
-    if (env.value("SUDO_ASKPASS").isEmpty())
-        env.insert("SUDO_ASKPASS", "/usr/local/bin/osm-sudo");
-    return env;
+static bool sudoNeedsAuthentication(const QString &error) {
+    return error.contains("password is required", Qt::CaseInsensitive) ||
+           error.contains("a password is required", Qt::CaseInsensitive) ||
+           error.contains("[sudo] password", Qt::CaseInsensitive) ||
+           error.contains("a terminal is required", Qt::CaseInsensitive) ||
+           error.contains("no tty present", Qt::CaseInsensitive);
+}
+
+static bool wifiPermissionDenied(const QString &error) {
+    return error.contains("not authorized", Qt::CaseInsensitive) ||
+           error.contains("not authorised", Qt::CaseInsensitive) ||
+           error.contains("not permitted", Qt::CaseInsensitive) ||
+           error.contains("permission denied", Qt::CaseInsensitive) ||
+           error.contains("insufficient privileges", Qt::CaseInsensitive) ||
+           error.contains("access denied", Qt::CaseInsensitive) ||
+           error.contains("not allowed", Qt::CaseInsensitive) ||
+           error.contains("authorization required", Qt::CaseInsensitive) ||
+           error.contains("authorisation required", Qt::CaseInsensitive);
+}
+
+// This also supports the animated connection spinner. Exit status is checked
+// separately from stdout: nmcli can print a successful 'connection add' and
+// then fail to activate the connection.
+static QString runWifiProcess(const QString &program, const QStringList &args,
+                              int timeoutMs, const std::function<void()> &tick,
+                              QString *errOut, bool *success = nullptr) {
+    QProcess p;
+    p.start(program, args);
+    if (!p.waitForStarted(3000)) {
+        if (success) *success = false;
+        if (errOut) *errOut = "Could not start " + program + ": " + p.errorString();
+        return {};
+    }
+
+    QElapsedTimer t;
+    t.start();
+    bool timedOut = false;
+    while (!p.waitForFinished(80)) {
+        if (t.elapsed() >= timeoutMs) {
+            timedOut = true;
+            p.kill();
+            p.waitForFinished(500);
+            break;
+        }
+        if (tick) tick();
+        QCoreApplication::processEvents();
+    }
+    bool ok = !timedOut && p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+    QString error = QString::fromUtf8(p.readAllStandardError()).trimmed();
+    QString output = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    if (timedOut) error = "Wi-Fi operation timed out";
+    else if (!ok && error.isEmpty()) {
+        error = output.isEmpty() ? (program + " exited without completing the Wi-Fi operation.")
+                                  : output;
+    }
+    if (success) *success = ok;
+    if (errOut) *errOut = error;
+    return output;
+}
+
+// Wi-Fi page authorization is reset when this page is recreated. This is NOT
+// a cached password: it only prevents re-launching osm-lock for an operation
+// that should already be allowed by the machine's sudo policy.
+static QString runRootWifiCommand(const QString &cmd, int timeoutMs,
+                                  const std::function<void()> &tick,
+                                  QString *errOut = nullptr,
+                                  bool *pageAuthenticated = nullptr) {
+    QString error;
+    bool ok = false;
+    QString output = runWifiProcess("sudo", {"-n", "bash", "-c", cmd},
+                                    timeoutMs, tick, &error, &ok);
+    if (ok || !sudoNeedsAuthentication(error)) {
+        if (errOut) *errOut = error;
+        return output;
+    }
+
+    // Already authenticated on this Wi-Fi page: don't display the pattern
+    // prompt a second time. A misconfigured sudoers rule needs reporting,
+    // not an endless series of pattern dialogs.
+    if (pageAuthenticated && *pageAuthenticated) {
+        if (errOut) *errOut = "Wi-Fi access was already authorised, but sudo "
+                              "did not retain permission. Check Alternix's "
+                              "sudo/polkit configuration.";
+        return {};
+    }
+
+    // Use osm-sudo as the actual command wrapper, NOT as SUDO_ASKPASS.
+    // The extra allowance is for entering a pattern; the Wi-Fi command
+    // itself may take another ~45 seconds after approval.
+    output = runWifiProcess("/usr/local/bin/osm-sudo", {"bash", "-c", cmd},
+                            qMax(timeoutMs, 60000), tick, &error, &ok);
+    if (ok && pageAuthenticated) *pageAuthenticated = true;
+    if (!ok && sudoNeedsAuthentication(error)) {
+        error = "The osm-sudo pattern unlock completed, but sudo still "
+                "requires a Unix password. Check the Alternix sudoers "
+                "permissions; osm-sudo is not a sudo password prompt.";
+    }
+    if (errOut) *errOut = error;
+    return output;
 }
 
 static QString runCmdAsRoot(const QString &cmd, int timeoutMs = 5000,
-                             QString *errOut = nullptr) {
-    QProcessEnvironment env = sudoEnv();
-
-    QProcess p;
-    p.setProcessEnvironment(env);
-    p.start("sudo", {"-n", "bash", "-c", cmd});
-    p.waitForFinished(timeoutMs);
-    QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
-    QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
-
-    if (err.contains("password is required") || err.contains("a password is required")) {
-        QProcess p2;
-        p2.setProcessEnvironment(env);
-        p2.start("sudo", {"-A", "bash", "-c", cmd});
-        p2.waitForFinished(qMax(timeoutMs, 60000));  // give osm-sudo time to unlock
-        out = QString::fromUtf8(p2.readAllStandardOutput()).trimmed();
-        err = QString::fromUtf8(p2.readAllStandardError()).trimmed();
-    }
-
-    if (errOut) *errOut = err;
-    return out;
+                             QString *errOut = nullptr,
+                             bool *pageAuthenticated = nullptr) {
+    return runRootWifiCommand(cmd, timeoutMs, {}, errOut, pageAuthenticated);
 }
 
-// Animated variant of runCmdAsRoot, mirroring runCmdAnimated so callers
-// (scan / connect) can keep their spinner alive while osm-sudo is up and
-// while the privileged command itself runs.
 static QString runCmdAsRootAnimated(const QString &cmd, int timeoutMs,
                                     const std::function<void()> &tick,
-                                    QString *errOut = nullptr) {
-    QProcessEnvironment env = sudoEnv();
-
-    // FIX: this used to be a hardcoded p.waitForFinished(3000) here. sudo -n
-    // fails almost instantly when a password IS required, but when NOPASSWD
-    // is configured (the normal case) it just runs the real command —
-    // which for a wifi rescan can legitimately take up to timeoutMs (15s).
-    // Capping this at 3s meant a working NOPASSWD scan got killed and
-    // read back as empty output before it ever finished, which looked
-    // identical to "no networks" / "nmcli returned nothing" regardless of
-    // what was actually going on. Give it the full timeoutMs, same as the
-    // -A path below.
-    QProcess p;
-    p.setProcessEnvironment(env);
-    p.start("sudo", {"-n", "bash", "-c", cmd});
-
-    {
-        QElapsedTimer t;
-        t.start();
-        while (!p.waitForFinished(80)) {
-            if (t.elapsed() > timeoutMs) {
-                p.kill();
-                p.waitForFinished(500);
-                break;
-            }
-            if (tick) tick();
-            QCoreApplication::processEvents();
-        }
-    }
-    QString out = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
-    QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
-
-    if (err.contains("password is required") || err.contains("a password is required")) {
-        QProcess p2;
-        p2.setProcessEnvironment(env);
-        p2.start("sudo", {"-A", "bash", "-c", cmd});
-
-        QElapsedTimer t;
-        t.start();
-        while (!p2.waitForFinished(80)) {
-            if (t.elapsed() > timeoutMs) {
-                p2.kill();
-                p2.waitForFinished(500);
-                break;
-            }
-            if (tick) tick();
-            QCoreApplication::processEvents();
-        }
-        out = QString::fromUtf8(p2.readAllStandardOutput()).trimmed();
-        err = QString::fromUtf8(p2.readAllStandardError()).trimmed();
-    }
-
-    if (errOut) *errOut = err;
-    return out;
+                                    QString *errOut = nullptr,
+                                    bool *pageAuthenticated = nullptr) {
+    return runRootWifiCommand(cmd, timeoutMs, tick, errOut, pageAuthenticated);
 }
 
 static QString cidrToMask(const QString &cidrStr) {
@@ -413,11 +430,13 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // LAMBDAS FOR STATE UPDATES
     // =====================================================
 
+    auto wifiAuth = std::make_shared<bool>(false);
+
     // FIX: Trigger a real radio rescan before listing SSIDs.
     // Also fetch IN_USE and SSID together so we can mark the active network.
     // extraTick (optional) receives the spinner frame index so callers can
     // animate their own widget (e.g. the Refresh button) in sync.
-    auto doScan = [ssidList](const std::function<void(int)> &extraTick = {}) {
+    auto doScan = [ssidList, wifiAuth](const std::function<void(int)> &extraTick = {}) {
         // Reentrancy guard: processEvents during the animated wait means the
         // user can tap Refresh mid-scan; a nested scan would clear the list
         // and leave the outer scan holding a dangling placeholder pointer.
@@ -432,12 +451,9 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         ssidList->addItem(ph);
         QCoreApplication::processEvents();
 
-        // Listing nearby Wi-Fi networks is a read-only operation and should
-        // NOT run through sudo/osm-sudo. On some installations sudo -A cannot
-        // obtain an interactive password, so its "[sudo] password for ..."
-        // prompt was being rendered in red instead of the available SSIDs.
-        // Ask NetworkManager for a fresh scan as the logged-in user; keep the
-        // existing animated spinner while the scan completes.
+        // Ask NetworkManager for a fresh scan without sudo; retain the
+        // spinner. Only use the real osm-sudo wrapper if NetworkManager
+        // denies the scan for lack of permission.
         int frame = 0;
         auto scanTick = [&]() {
             frame = (frame + 1) % SPIN_COUNT;
@@ -448,6 +464,18 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         QString out = runCmdAnimated(
             "nmcli -t -f IN-USE,SSID device wifi list --rescan yes", 15000,
             scanTick, &err);
+
+        // If this install restricts fresh scans, use the Alternix pattern
+        // unlock once and reuse that authorisation for a later connection.
+        // Other scan errors still fall through to the existing cached list.
+        if (out.isEmpty() && wifiPermissionDenied(err)) {
+            QString rootErr;
+            out = runCmdAsRootAnimated(
+                "nmcli -t -f IN-USE,SSID device wifi list --rescan yes", 15000,
+                scanTick, &rootErr, wifiAuth.get());
+            if (!out.isEmpty()) err.clear();
+            else if (!rootErr.isEmpty()) err = rootErr;
+        }
 
         // Some NetworkManager configurations restrict requesting a *new*
         // scan but still permit reading the last discovered access points.
@@ -620,12 +648,12 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     });
 
     // Toggle WiFi radio and update visual state
-    QObject::connect(toggleWifi, &QPushButton::clicked, [updateWifiState]() mutable {
+    QObject::connect(toggleWifi, &QPushButton::clicked, [updateWifiState, wifiAuth]() mutable {
         QString state = runCmd("nmcli radio wifi");
         if (state == "enabled")
-            runCmdAsRoot("nmcli radio wifi off");
+            runCmdAsRoot("nmcli radio wifi off", 5000, nullptr, wifiAuth.get());
         else
-            runCmdAsRoot("nmcli radio wifi on");
+            runCmdAsRoot("nmcli radio wifi on", 5000, nullptr, wifiAuth.get());
 
         updateWifiState();
     });
@@ -641,7 +669,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
     // Alternix installs set NOPASSWD sudo for the user, so no prompt appears.
     // -n makes sudo fail immediately (reported) instead of hanging on a
     // password prompt if NOPASSWD isn't configured.
-    QObject::connect(fixBtn, &QPushButton::clicked, [ssidList, doScan, updateInfo, updateWifiState]() mutable {
+    QObject::connect(fixBtn, &QPushButton::clicked, [ssidList, doScan, updateInfo, updateWifiState, wifiAuth]() mutable {
         QString iface = getWifiIface();
 
         const QString scriptPath = "/tmp/alternix_wifi_fix.sh";
@@ -900,14 +928,12 @@ fi
             f.close();
         }
 
-        // Run as root. Alternix sets NOPASSWD for the user, so this succeeds
-        // silently via `sudo -n`; if that isn't configured, runCmdAsRoot
-        // falls back to `sudo -A`, which calls osm-sudo for a GUI
-        // pattern-unlock instead of hanging on a terminal prompt that a
-        // GUI app doesn't have.
+        // Run with cached/passwordless sudo or the real osm-sudo wrapper;
+        // osm-sudo cannot be used as a sudo askpass helper.
         QString err;
         QString out = runCmdAsRoot(
-            "bash " + scriptPath + " '" + iface + "'", 30000, &err);
+            "bash " + scriptPath + " '" + iface + "'", 30000, &err,
+            wifiAuth.get());
 
         QString report = out.isEmpty() ? "No output from fix script." : out;
         if (!err.isEmpty())
@@ -924,7 +950,7 @@ fi
     // CONNECT ON SSID CLICK
     // -----------------------------------------------------
     QObject::connect(ssidList, &QListWidget::itemClicked,
-                     [ssidList, refresh, toggleWifi, fixBtn, doScan, updateInfo, updateWifiState]() mutable {
+                     [ssidList, refresh, toggleWifi, fixBtn, doScan, updateInfo, updateWifiState, wifiAuth]() mutable {
         QListWidgetItem *item = ssidList->currentItem();
         if (!item) return;
 
@@ -975,10 +1001,42 @@ fi
         // FIX: 45s timeout — the old 5s runCmd cut off real associations,
         // which commonly take 10-20s (scan + auth + DHCP).
         QString err;
-        QString out = runCmdAsRootAnimated(cmd, 45000, [&]() {
+        auto connectTick = [&]() {
             frame = (frame + 1) % SPIN_COUNT;
             item->setText(QString::fromUtf8(SPIN_FRAMES[frame]) + "  Connecting to " + ssid + "…");
-        }, &err);
+        };
+
+        // First use the existing sudo permission silently. Alternix normally
+        // configures passwordless/cached sudo; this avoids invoking a second
+        // NetworkManager/Polkit authorization dialog after the Wi-Fi scan.
+        // When this page explicitly unlocked osm-sudo during the scan, only
+        // the non-interactive attempt is allowed here (no second prompt).
+        bool connected = false;
+        QString out = runWifiProcess("sudo", {"-n", "bash", "-c", cmd},
+                                     45000, connectTick, &err, &connected);
+        bool sudoUnavailable = sudoNeedsAuthentication(err) ||
+                               wifiPermissionDenied(err) ||
+                               err.contains("sudoers", Qt::CaseInsensitive) ||
+                               err.contains("Could not start sudo", Qt::CaseInsensitive);
+        if (!connected && sudoUnavailable) {
+            if (*wifiAuth) {
+                err = "The Wi-Fi page was already unlocked, but sudo no "
+                      "longer permits the connection. Check Alternix's "
+                      "sudo/polkit configuration.";
+            } else {
+                // If root access is unavailable, ask NetworkManager directly.
+                // This can use normal user permissions/active-session Polkit.
+                out = runWifiProcess("bash", {"-c", cmd}, 45000,
+                                     connectTick, &err, &connected);
+                if (!connected && wifiPermissionDenied(err)) {
+                    // Last resort: invoke the REAL osm-sudo command wrapper
+                    // for one pattern unlock, never `sudo -A`.
+                    out = runCmdAsRootAnimated(cmd, 45000, connectTick, &err,
+                                               wifiAuth.get());
+                    connected = err.isEmpty();
+                }
+            }
+        }
 
         item->setText(original);
         ssidList->setEnabled(true);
@@ -986,8 +1044,15 @@ fi
         toggleWifi->setEnabled(true);
         fixBtn->setEnabled(true);
 
-        QString msg = !out.isEmpty() ? out : err;
-        QMessageBox::information(nullptr, "Wi-Fi", msg.isEmpty() ? "Done." : msg);
+        QString msg = !err.isEmpty() ? err : out;
+        if (msg.contains("[sudo] password", Qt::CaseInsensitive))
+            msg = "Wi-Fi needs administrator permission, but the sudo "
+                  "password prompt cannot be used in this window. "
+                  "Check the Alternix osm-sudo/sudoers configuration.";
+        if (connected)
+            QMessageBox::information(nullptr, "Wi-Fi", msg.isEmpty() ? "Connected." : msg);
+        else
+            QMessageBox::warning(nullptr, "Wi-Fi", msg.isEmpty() ? "Connection failed." : msg);
 
         // Refresh so the ✔ lands on the newly joined network and the
         // IP/DNS/gateway info reflects the new connection.
