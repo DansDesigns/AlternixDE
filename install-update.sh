@@ -153,6 +153,10 @@ echo "• Building wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 wifi.so /usr/local/bin/
 
+echo "• Building display.so..."
+g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 display.so /usr/local/bin/
+
 echo "• Building bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 bluetooth.so /usr/local/bin/
