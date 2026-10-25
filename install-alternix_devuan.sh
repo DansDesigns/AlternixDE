@@ -139,7 +139,7 @@ else
         echo "deb [signed-by=$VOLIAN_KEY] https://deb.volian.org/volian/ nala main" \
             | sudo tee "$VOLIAN_SOURCE" >/dev/null
         echo "[System] Installing nala.."
-        if sudo apt update && sudo apt install -y nala; then
+        if sudo apt update && sudo apt install -y nala nala; then
             NALA_AVAILABLE=true
         else
             echo "[System] Volian Nala install failed; will retry using Devuan APT sources."
