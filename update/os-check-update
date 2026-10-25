@@ -1,5 +1,28 @@
 #!/bin/bash
 
+# Authenticate once through osm-sudo, then perform the complete update as root.
+# Re-enter this same script rather than prompting separately for each command.
+if (( EUID != 0 )); then
+    if [[ "${1:-}" == "--alternix-elevated" ]]; then
+        echo "ERROR: osm-sudo did not grant root access. Update cancelled." >&2
+        exit 1
+    fi
+
+    UPDATE_SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}") || exit 1
+    exec /usr/local/bin/osm-sudo /bin/bash "$UPDATE_SCRIPT" --alternix-elevated "$(id -u)"
+fi
+
+# Keep the original user's home available to the Alternix installer. Otherwise,
+# running the whole update as root could redirect per-user files to /root.
+if [[ "${1:-}" == "--alternix-elevated" && "${2:-}" =~ ^[0-9]+$ ]]; then
+    ORIGINAL_PASSWD=$(getent passwd "$2")
+    if [[ -n "$ORIGINAL_PASSWD" ]]; then
+        IFS=: read -r ORIGINAL_USER _ ORIGINAL_UID ORIGINAL_GID _ ORIGINAL_HOME _ <<< "$ORIGINAL_PASSWD"
+        export SUDO_USER="$ORIGINAL_USER" SUDO_UID="$ORIGINAL_UID" SUDO_GID="$ORIGINAL_GID"
+        export HOME="$ORIGINAL_HOME"
+    fi
+fi
+
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
 
 echo "=============================================="
@@ -12,11 +35,11 @@ echo "       Current Version: $LOCAL_VERSION"
 echo "=============================================="
 echo "Checking for Linux System Updates..."
 echo " "
-/usr/local/bin/osm-sudo nala update
+nala update
 echo " "
 echo "Applying Upgrades…"
 echo " "
-/usr/local/bin/osm-sudo nala upgrade -y
+nala upgrade -y
 echo " "
 echo "Checking for Alternix Updates..."
 
@@ -149,7 +172,7 @@ while true; do
                 sleep 1
                 echo "1.."
                 sleep 1
-                /usr/local/bin/osm-sudo reboot
+                reboot
                 break
             elif [[ "$KEY" == "2" ]]; then
                 echo ""
