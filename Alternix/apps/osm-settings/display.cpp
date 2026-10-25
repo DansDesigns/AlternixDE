@@ -19,6 +19,8 @@
 #include <QTimer>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <functional>
 
 // -----------------------------------------------------
@@ -284,30 +286,105 @@ static QString rotateInvertPath()
     return QDir::homePath() + "/.config/Alternix/rotate-invert";
 }
 
+// A pidfile alone is not evidence of a live monitor: failed starts and
+// unclean shutdowns can leave one behind.
 static bool rotateMonitorRunning()
 {
-    return QFile::exists(rotatePidPath());
+    QFile f(rotatePidPath());
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    bool ok = false;
+    const qlonglong pid = QString::fromUtf8(f.readAll()).trimmed().toLongLong(&ok);
+    return ok && pid > 1 && QFileInfo(QString("/proc/%1").arg(pid)).isDir();
+}
+
+// A process' /proc/comm name is limited to 15 characters on Linux;
+// 'iio-sensor-proxy' has 16, so `pgrep -x iio-sensor-proxy` is unreliable.
+static bool rotationProxyRunning()
+{
+    QProcess p;
+    p.start("pgrep", {"-f", "(^|/)iio-sensor-proxy([[:space:]]|$)"});
+    if (!p.waitForFinished(1000)) {
+        p.kill();
+        p.waitForFinished(200);
+        return false;
+    }
+    return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+}
+
+// Read IIO information only; do not touch drivers or permissions on page load.
+struct RotateSensorInfo {
+    QString name;
+    QString driver;
+    bool found = false;
+};
+
+static RotateSensorInfo readRotateSensorInfo()
+{
+    RotateSensorInfo info;
+    const QDir devices("/sys/bus/iio/devices");
+    const QStringList names = devices.entryList({"iio:device*"},
+                                                QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &name : names) {
+        const QString base = devices.filePath(name);
+        // A generic IIO device (for instance an ALS sensor) is NOT
+        // necessarily an accelerometer.
+        if (!QFile::exists(base + "/in_accel_x_raw") &&
+            !QFile::exists(base + "/in_accel_x_input") &&
+            !QFile::exists(base + "/scan_elements/in_accel_x_en"))
+            continue;
+
+        info.found = true;
+        info.name = QString::fromUtf8(readSmallFile(base + "/name")).trimmed();
+        if (info.name.isEmpty()) info.name = name;
+        const QFileInfo driverLink(base + "/device/driver");
+        if (driverLink.isSymLink())
+            info.driver = QFileInfo(driverLink.symLinkTarget()).fileName();
+        return info;
+    }
+    return info;
 }
 
 // Spinner frames — same Braille rotation used by the WiFi/Bluetooth
-// refresh buttons, reused here so Scan/Setup behaves identically.
+// refresh buttons.
 static const char* const ROTATE_SPIN_FRAMES[] = {
     "⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"
 };
 static const int ROTATE_SPIN_COUNT = 10;
 
-// Runs a command while calling tick() roughly every 80ms so the UI stays
-// responsive and can animate — same slicing approach as wifi.cpp's
-// runCmdAnimated, duplicated locally to keep this file self-contained.
-static QString runRotateCmdAnimated(const QString &cmd, int timeoutMs,
-                                     const std::function<void()> &tick) {
-    QProcess p;
-    p.start("bash", { "-c", cmd });
+struct RotateCommandResult {
+    QString standardOutput;
+    QString standardError;
+    int exitCode = -1;
+    bool started = false;
+    bool timedOut = false;
+};
 
-    QElapsedTimer t;
-    t.start();
-    while (!p.waitForFinished(80)) {
-        if (t.elapsed() > timeoutMs) {
+// Pass the script path as a bash ARGUMENT, not through `bash -c` (which
+// interprets paths and shell metacharacters). Retain stderr and exit status.
+static RotateCommandResult runRotateCmdAnimated(const QString &script,
+                                                 int timeoutMs,
+                                                 const std::function<void()> &tick)
+{
+    RotateCommandResult result;
+    if (!QFileInfo::exists(script)) {
+        result.standardError = "Rotation setup script is missing: " + script;
+        return result;
+    }
+
+    QProcess p;
+    p.start("bash", {script});
+    if (!p.waitForStarted(2500)) {
+        result.standardError = "Could not start rotation setup: " + p.errorString();
+        return result;
+    }
+    result.started = true;
+
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (p.state() != QProcess::NotRunning) {
+        if (p.waitForFinished(80)) break;
+        if (elapsed.elapsed() >= timeoutMs) {
+            result.timedOut = true;
             p.kill();
             p.waitForFinished(500);
             break;
@@ -315,29 +392,52 @@ static QString runRotateCmdAnimated(const QString &cmd, int timeoutMs,
         if (tick) tick();
         QCoreApplication::processEvents();
     }
-    return QString::fromUtf8(p.readAllStandardOutput());
+
+    result.standardOutput = QString::fromUtf8(p.readAllStandardOutput());
+    result.standardError = QString::fromUtf8(p.readAllStandardError()).trimmed();
+    if (!result.timedOut && p.exitStatus() == QProcess::NormalExit)
+        result.exitCode = p.exitCode();
+    return result;
 }
 
-// Runs alternix-rotate-setup.sh (scan + driver load + iio-sensor-proxy
-// activation) without freezing the UI, driving tick() so a caller can
-// animate a spinner in sync — mirrors doScan()/runCmdAnimated in
-// wifi.cpp. Returns the KEY=VALUE lines it printed.
+// The setup script supplies KEY=VALUE results. If it fails or is absent,
+// report the actual error instead of presenting 'no sensor' as a diagnosis.
 static QMap<QString, QString> runRotateScan(const std::function<void(int)> &tick = {})
 {
     QMap<QString, QString> result;
-    QString script = rotateScriptDir() + "/alternix-rotate-setup.sh";
+    const QString script = rotateScriptDir() + "/alternix-rotate-setup.sh";
 
     int frame = 0;
-    QString out = runRotateCmdAnimated(script, 45000, [&]() {
+    const RotateCommandResult cmd = runRotateCmdAnimated(script, 45000, [&]() {
         frame = (frame + 1) % ROTATE_SPIN_COUNT;
         if (tick) tick(frame);
     });
 
-    for (const QString &lineRaw : out.split('\n')) {
-        QString line = lineRaw.trimmed();
-        int eq = line.indexOf('=');
+    for (const QString &raw : cmd.standardOutput.split('\n')) {
+        const QString line = raw.trimmed();
+        const int eq = line.indexOf('=');
         if (eq <= 0) continue;
-        result[line.left(eq)] = line.mid(eq + 1);
+        const QString key = line.left(eq).trimmed();
+        if (key.isEmpty() || key.contains(' ')) continue;
+        result[key] = line.mid(eq + 1).trimmed();
+    }
+
+    if (!cmd.started || cmd.timedOut || cmd.exitCode != 0 || result.isEmpty()) {
+        QString problem;
+        if (!cmd.started) problem = "Rotation setup could not start";
+        else if (cmd.timedOut) problem = "Rotation setup timed out after 45 seconds";
+        else if (cmd.exitCode != 0)
+            problem = QString("Rotation setup failed (exit code %1)").arg(cmd.exitCode);
+        else problem = "Rotation setup returned no sensor information";
+
+        const QString existing = result.value("REASON");
+        result["REASON"] = existing.isEmpty() ? problem : existing + "; " + problem;
+        const QString stderrText = cmd.standardError.left(1200);
+        if (!stderrText.isEmpty()) {
+            const QString existingHint = result.value("HINT");
+            result["HINT"] = existingHint.isEmpty()
+                ? stderrText : existingHint + "\n" + stderrText;
+        }
     }
     return result;
 }
@@ -579,6 +679,13 @@ private:
         return card;
     }
 
+    void setRotationError(const QString &message)
+    {
+        if (!m_sensorHintLabel) return;
+        m_sensorHintLabel->setText(message);
+        m_sensorHintLabel->setVisible(!message.isEmpty());
+    }
+
     QWidget *makeAutoRotateRow()
     {
         QFrame *card = new QFrame;
@@ -591,26 +698,45 @@ private:
         QLabel *lbl = new QLabel("Auto-Rotate");
         lbl->setStyleSheet("font-size:30px; font-weight:bold;");
         lay->addWidget(lbl);
-
         lay->addStretch();
 
-        // Config flag and the actual running monitor can disagree (e.g.
-        // if the sensor setup failed) — reflect what's really running.
-        bool on = readCfgBool("display_auto_rotate", false) && rotateMonitorRunning();
-        m_autoRotatePill = new BoolPillToggle(on, card);
+        // Show the actual running state even if the configuration is stale.
+        m_autoRotatePill = new BoolPillToggle(rotateMonitorRunning(), card);
         lay->addWidget(m_autoRotatePill);
 
         connect(m_autoRotatePill, &QPushButton::clicked, this, [this]() {
-            m_autoRotatePill->toggle();
-            bool state = m_autoRotatePill->isOn();
-            writeCfg("display_auto_rotate", state ? "true" : "false");
+            const bool desired = !m_autoRotatePill->isOn();
+            const QString script = rotateScriptDir() + "/alternix-rotate-toggle.sh";
+            if (!QFileInfo::exists(script)) {
+                setRotationError("Auto-Rotate script missing: " + script);
+                return;
+            }
 
-            QString script = rotateScriptDir() + "/alternix-rotate-toggle.sh";
-            QProcess::startDetached("bash", { script, state ? "on" : "off" });
+            // Keep the original detached launch contract: the toggle script
+            // might stay running while monitoring orientation. Never kill it
+            // simply because the UI command is still active.
+            const bool launched = QProcess::startDetached(
+                "bash", {script, desired ? "on" : "off"});
+            if (!launched) {
+                setRotationError("Could not start Auto-Rotate script: " + script);
+                return;
+            }
 
-            // Give the monitor script a moment to (de)claim the sensor
-            // and write/remove its pidfile, then refresh sensor status.
-            QTimer::singleShot(600, this, [this]() { refreshSensorInfo(); });
+            m_autoRotatePill->setEnabled(false);
+            // Allow the script to create/remove the monitor and its pidfile.
+            QTimer::singleShot(2000, this, [this, desired]() {
+                const bool running = rotateMonitorRunning();
+                m_autoRotatePill->setState(running);
+                m_autoRotatePill->setEnabled(true);
+                writeCfg("display_auto_rotate", running ? "true" : "false");
+                if (running != desired) {
+                    setRotationError("Auto-Rotate did not reach the requested state. "
+                                     "Check alternix-rotate-toggle.sh and its monitor log.");
+                } else {
+                    setRotationError(QString());
+                }
+                refreshSensorInfo();
+            });
         });
 
         return card;
@@ -799,34 +925,57 @@ private:
     // just refreshes what's currently running so the page isn't blank.
     void refreshSensorInfo()
     {
-        if (m_sensorProxyLabel) {
-            QProcess p;
-            p.start("bash", {"-c",
-                "pgrep -x iio-sensor-proxy >/dev/null 2>&1 && echo yes || echo no"});
-            p.waitForFinished(300);
-            bool running = (QString::fromUtf8(p.readAll()).trimmed() == "yes");
-            m_sensorProxyLabel->setText(running ? "Running" : "Not running (use Scan / Setup)");
+        const RotateSensorInfo sensor = readRotateSensorInfo();
+        if (m_sensorFoundLabel) {
+            if (sensor.found) m_sensorFoundLabel->setText("Yes");
+            else if (m_sensorFoundLabel->text() == "Not scanned yet")
+                m_sensorFoundLabel->setText("Not detected yet (use Scan / Setup)");
+        }
+        if (sensor.found) {
+            if (m_sensorNameLabel) m_sensorNameLabel->setText(sensor.name);
+            if (m_sensorDriverLabel)
+                m_sensorDriverLabel->setText(sensor.driver.isEmpty() ? "—" : sensor.driver);
         }
 
-        if (m_sensorOrientLabel) {
-            QProcess p2;
-            p2.start("bash", {"-c",
-                "dbus-send --system --print-reply --dest=net.hadess.SensorProxy "
-                "/net/hadess/SensorProxy org.freedesktop.DBus.Properties.Get "
-                "string:net.hadess.SensorProxy string:AccelerometerOrientation "
-                "2>/dev/null | awk -F'\"' '/string/{print $2}'"});
-            p2.waitForFinished(500);
-            QString orient = QString::fromUtf8(p2.readAll()).trimmed();
-            m_sensorOrientLabel->setText(orient.isEmpty() ? "Unknown" : orient);
+        bool sensorProxyOnBus = false;
+        if (m_sensorOrientLabel || m_sensorProxyLabel) {
+            QProcess p;
+            p.start("dbus-send", {
+                "--system", "--print-reply", "--dest=net.hadess.SensorProxy",
+                "/net/hadess/SensorProxy", "org.freedesktop.DBus.Properties.Get",
+                "string:net.hadess.SensorProxy", "string:AccelerometerOrientation"
+            });
+            if (!p.waitForFinished(1200)) {
+                p.kill();
+                p.waitForFinished(200);
+            }
+            const QString out = QString::fromUtf8(p.readAllStandardOutput());
+            const QRegularExpression re("variant\\s+string\\s+\"([^\"]+)\"");
+            const QRegularExpressionMatch match = re.match(out);
+            sensorProxyOnBus = p.exitStatus() == QProcess::NormalExit
+                               && p.exitCode() == 0;
+            if (m_sensorOrientLabel)
+                m_sensorOrientLabel->setText(match.hasMatch() ? match.captured(1) : "Unknown");
         }
+        if (m_sensorProxyLabel) {
+            m_sensorProxyLabel->setText(sensorProxyOnBus || rotationProxyRunning()
+                ? "Running" : "Not running (use Scan / Setup)");
+        }
+        if (m_autoRotatePill && m_autoRotatePill->isEnabled())
+            m_autoRotatePill->setState(rotateMonitorRunning());
     }
 
     // Applies the full output of alternix-rotate-setup.sh (driver load +
     // sysfs scan + iio-sensor-proxy start) to the info labels.
     void applyScanResult(const QMap<QString, QString> &r)
     {
-        if (m_sensorFoundLabel)
-            m_sensorFoundLabel->setText(r.value("SENSOR_FOUND", "no") == "yes" ? "Yes" : "No — check cabling / BIOS sensor settings");
+        if (m_sensorFoundLabel) {
+            if (!r.contains("SENSOR_FOUND"))
+                m_sensorFoundLabel->setText("Setup failed — detection not completed");
+            else
+                m_sensorFoundLabel->setText(r.value("SENSOR_FOUND") == "yes"
+                    ? "Yes" : "No sensor found by setup");
+        }
 
         if (m_sensorNameLabel) {
             QString name = r.value("SENSOR_NAME");
@@ -855,10 +1004,10 @@ private:
             // the sensor itself was found fine — it's usually *why* the
             // proxy won't stay running.
             if (ranAsRoot == "no" && r.value("PROXY_RUNNING") != "yes" && r.value("PROXY_INSTALLED") == "yes") {
-                QString privNote = "Not running as root/admin — starting "
-                    "iio-sensor-proxy and owning its D-Bus system-bus name "
-                    "usually needs elevated privileges. Try running Alternix "
-                    "(or at least this scan) with sudo/pkexec.";
+                QString privNote = "The rotation setup was run without administrative "
+                    "privileges. Kernel-module or system-service changes may require "
+                    "authorisation in the setup script; do not run the entire "
+                    "settings application as root.";
                 reason = reason.isEmpty() ? "Insufficient privileges" : reason;
                 hint = hint.isEmpty() ? privNote : hint + "\n" + privNote;
             }
