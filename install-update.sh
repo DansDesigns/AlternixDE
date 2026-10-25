@@ -319,12 +319,14 @@ echo ""
 #===========================================================
 # Updater:
 #===========================================================
+echo "• Updating Alternix Updater..."
+sudo install -m 755 "$ALT_ROOT/update/os-check-update" /usr/bin/
 
 #=========================================
 # Create Folder if not already existing:
 #sudo mkdir /usr/share/alternix
-
 #=========================================
+
 # Update Version Number:
 echo "• Updating Version Number..."
 sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
