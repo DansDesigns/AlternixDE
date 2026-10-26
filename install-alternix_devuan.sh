@@ -1128,20 +1128,42 @@ THIRD_PARTY_DIR="$TARGET_HOME/Alternix"
 mkdir -p "$THIRD_PARTY_DIR"
 chown "$TARGET_USER:$TARGET_GROUP" "$THIRD_PARTY_DIR"
 
-# Download the AlternixOS release version into the selected user's home.
-# Always replace an existing version on success; preserve it if download fails.
+# Download the AlternixOS release version from the known file on GitHub's
+# main branch into the selected user's home (not the installer/root home).
+# The github.com/.../blob/main/version page is HTML; use its raw file URL.
 echo "• Downloading AlternixOS version..."
 ALT_OS_VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixOS/main/version"
-ALT_OS_VERSION_TMP="$(as_target mktemp "$THIRD_PARTY_DIR/.version.XXXXXX")"
-if as_target curl -fsSL --retry 2 --connect-timeout 10 --max-time 60 \
-        -o "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_URL" && [ -s "$ALT_OS_VERSION_TMP" ]; then
-    as_target chmod 644 "$ALT_OS_VERSION_TMP"
-    as_target mv -f "$ALT_OS_VERSION_TMP" "$THIRD_PARTY_DIR/version"
-    echo "• AlternixOS version saved to $THIRD_PARTY_DIR/version"
+ALT_OS_VERSION_DEST="$TARGET_HOME/Alternix/version"
+ALT_OS_VERSION_TMP="$(mktemp /tmp/alternixos-version.XXXXXX)"
+
+if curl -fL --show-error --silent --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 60 \
+        --output "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_URL" && \
+        [ -s "$ALT_OS_VERSION_TMP" ] && \
+        [ "$(wc -c < "$ALT_OS_VERSION_TMP")" -le 512 ] && \
+        grep -q '[^[:space:]]' "$ALT_OS_VERSION_TMP"; then
+    # Write the version with ownership for the chosen account, even when
+    # this script is running as root inside the live ISO/build environment.
+    sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0755 "$TARGET_HOME/Alternix"
+    if sudo install -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0644 \
+            "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_DEST" && \
+            [ -s "$ALT_OS_VERSION_DEST" ]; then
+        echo "• AlternixOS version saved to $ALT_OS_VERSION_DEST"
+        echo "• AlternixOS version: $(head -n 1 "$ALT_OS_VERSION_DEST")"
+    else
+        echo "WARNING: Could not write $ALT_OS_VERSION_DEST (check permissions)."
+    fi
 else
-    as_target rm -f "$ALT_OS_VERSION_TMP"
-    echo "WARNING: Could not download AlternixOS version; installation will continue."
+    echo "WARNING: Could not download a valid AlternixOS version from:"
+    echo "         $ALT_OS_VERSION_URL"
+    echo "WARNING: Check GitHub access/network connectivity in the installer environment."
+    if [ -s "$ALT_OS_VERSION_DEST" ]; then
+        echo "• Keeping the existing version at $ALT_OS_VERSION_DEST"
+    else
+        echo "WARNING: Missing $ALT_OS_VERSION_DEST; System Settings may show Unknown."
+    fi
 fi
+rm -f -- "$ALT_OS_VERSION_TMP"
 
 # Build-time writes above must not leave the installed desktop owned by root.
 for user_dir in "$TARGET_HOME/.config" "$TARGET_HOME/.local" \
