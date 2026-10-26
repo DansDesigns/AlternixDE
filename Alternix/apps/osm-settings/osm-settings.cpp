@@ -18,6 +18,8 @@
 #include <QMouseEvent>
 #include <QScroller>
 #include <QSettings>
+#include <QFileInfo>
+#include <QTimer>
 #include <functional>
 
 static const int CARD_PADDING = 22;
@@ -91,9 +93,73 @@ QString runCommand(const QString &cmd) {
     return QString::fromUtf8(p.readAllStandardOutput());
 }
 
+// Read the currently associated Wi-Fi network, not a saved connection profile.
+// Avoid triggering a Wi-Fi scan or asking for elevated permissions.
+QString wifiCommandOutput(const QString &program, const QStringList &arguments) {
+    QProcess process;
+    process.start(program, arguments);
+    if (!process.waitForStarted(300)) return QString();
+    if (!process.waitForFinished(1000)) {
+        process.kill();
+        process.waitForFinished(100);
+        return QString();
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+        return QString();
+    return QString::fromUtf8(process.readAllStandardOutput());
+}
+
 QString getSSID() {
-    QString ssid = runCommand("iwgetid -r 2>/dev/null").trimmed();
-    return ssid.isEmpty() ? "N/C" : ssid;
+    // NetworkManager: use the in-use access point, never the profile name.
+    // --rescan no prevents this status check from starting a Wi-Fi scan.
+    const QString nmOutput = wifiCommandOutput(
+        "nmcli", {"-t", "-e", "no", "-f", "IN-USE,SSID",
+                  "device", "wifi", "list", "--rescan", "no"});
+    for (const QString &line : nmOutput.split('\n')) {
+        if (line.startsWith("*:")) {
+            const QString ssid = line.mid(2).trimmed();
+            if (!ssid.isEmpty()) return ssid;
+        }
+    }
+
+    // Work without NetworkManager as well (e.g. wpa_supplicant or iwd).
+    QDir netDir("/sys/class/net");
+    const QStringList interfaces = netDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    QStringList wifiInterfaces;
+    for (const QString &iface : interfaces) {
+        const QString netPath = "/sys/class/net/" + iface;
+        if (!QFileInfo::exists(netPath + "/wireless") &&
+            !QFileInfo::exists(netPath + "/phy80211"))
+            continue;
+        wifiInterfaces << iface;
+
+        const QString link = wifiCommandOutput("iw", {"dev", iface, "link"});
+        if (!link.contains("Connected to ")) continue;
+        for (const QString &line : link.split('\n')) {
+            const QString field = line.trimmed();
+            if (field.startsWith("SSID:")) {
+                const QString ssid = field.mid(5).trimmed();
+                if (!ssid.isEmpty()) return ssid;
+            }
+        }
+    }
+
+    // Older wireless-tools drivers may only support iwgetid.
+    const QString oldSSID = wifiCommandOutput("iwgetid", {"-r"}).trimmed();
+    if (!oldSSID.isEmpty()) return oldSSID;
+
+    // Last fallback for direct wpa_supplicant setups.
+    for (const QString &iface : wifiInterfaces) {
+        const QString status = wifiCommandOutput("wpa_cli", {"-i", iface, "status"});
+        QString state, ssid;
+        for (const QString &line : status.split('\n')) {
+            if (line.startsWith("wpa_state=")) state = line.mid(10).trimmed();
+            else if (line.startsWith("ssid=")) ssid = line.mid(5).trimmed();
+        }
+        if (state == "COMPLETED" && !ssid.isEmpty()) return ssid;
+    }
+
+    return "N/C";
 }
 
 QString getEthernetStatus() {
@@ -140,6 +206,17 @@ public:
         setCentralWidget(stack);
 
         stack->addWidget(makeMainMenu());
+
+        // Keep the Wireless subtitle in sync if Wi-Fi connects or changes.
+        QTimer *wifiStatusTimer = new QTimer(this);
+        QObject::connect(wifiStatusTimer, &QTimer::timeout, this, [this]() {
+            if (stack->currentIndex() == 0 && wirelessStatusLabel) {
+                const QString ssid = getSSID();
+                if (wirelessStatusLabel->text() != ssid)
+                    wirelessStatusLabel->setText(ssid);
+            }
+        });
+        wifiStatusTimer->start(10000);
     }
 
 protected:
@@ -152,6 +229,7 @@ protected:
 
 private:
     QStackedWidget *stack;
+    QLabel *wirelessStatusLabel = nullptr;
 
     // ------------------------------------------------------
     QWidget *makeMainMenu() {
@@ -249,6 +327,7 @@ private:
 
         QLabel *subt = new QLabel(sub);
         subt->setStyleSheet("font-size:22px; color:#bbbbbb;");
+        if (title == "Wireless") wirelessStatusLabel = subt;
 
         textCol->addWidget(ttl);
         textCol->addWidget(subt);
