@@ -36,8 +36,8 @@ echo "[Config] Updating Grub Entry.."
 
 sudo nala install fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez
 
-echo "[Config] Installing updated configs..."
-cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
+#echo "[Config] Installing updated configs..."
+#cp -r "$ALT_ROOT/Alternix/configs/." "$HOME/.config/"
 
 # ────────────────────────────────────────────────
 # Devuan / elogind: stop unexpected tablet sleep
