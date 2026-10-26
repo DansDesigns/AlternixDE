@@ -16,6 +16,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDir>
+#include <QFileInfo>
+#include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QDialog>
@@ -292,35 +294,50 @@ static bool g_netLocEnabled    = false;   // Location/network_enabled
 static bool g_serialGpsEnabled = true;    // Location/serial_gps_enabled
 
 // ---------------------------------------------------------
-// Root command runner
+// Privileged time operations
 //
-// Fast path is `sudo -n`, which succeeds because install-alternix_devuan.sh
-// grants NOPASSWD. If that path produces no marker line the request never
-// reached the script (sudo refused), so we retry through SUDO_ASKPASS
-// (osm-sudo). Waits are polled rather than a single fixed waitForFinished
-// so the caller's spinner keeps animating and long syncs are not truncated.
+// IMPORTANT: Alternix's osm-sudo is a COMMAND WRAPPER: it opens osm-lock
+// --auth and then runs its command. It is NOT a SUDO_ASKPASS helper, and using
+// it with sudo -A makes sudo's terminal password prompt leak into Settings.
+//
+// Read-only time/RTC probes above do not need root. For a clock change we
+// first try non-interactive sudo (no authentication necessary if the system
+// already authorises it), and if that fails, invoke osm-sudo DIRECTLY so
+// the user sees the Alternix graphical authentication UI.
 // ---------------------------------------------------------
 
-static QString askpassHelperPath()
+static QString osmSudoPath()
 {
-    QString fromEnv = qEnvironmentVariable("SUDO_ASKPASS");
-    if (!fromEnv.isEmpty() && QFile::exists(fromEnv))
-        return fromEnv;
-
     const QStringList candidates = {
+        "/usr/local/bin/osm-sudo", // Installed by the AlternixDE installer
         "/usr/bin/osm-sudo",
-        "/usr/local/bin/osm-sudo",
         "/usr/lib/alternix/osm-sudo"
     };
-    for (const QString &c : candidates) {
-        if (QFile::exists(c))
-            return c;
+    for (const QString &candidate : candidates) {
+        QFileInfo fi(candidate);
+        if (fi.isFile() && fi.isExecutable())
+            return candidate;
     }
-    return QString();
+    return QStandardPaths::findExecutable("osm-sudo");
 }
 
-// Returns combined stdout+stderr. `reachedScript` reports whether the
-// script itself ran (marker seen), as opposed to sudo blocking us.
+// Do not expose sudo's CLI password prompt even in the expanded error dialog.
+// Other useful output (hwclock diagnostics, NTP errors) is retained.
+static QString withoutSudoPrompt(QString output)
+{
+    output.replace(QRegularExpression(
+        "\\[sudo\\]\\s*password for[^:\\r\\n]*:\\s*",
+        QRegularExpression::CaseInsensitiveOption), QString());
+    output.replace(QRegularExpression(
+        "(?im)^\\s*sudo:\\s*(?:a password is required|no password was provided|"
+        "a terminal is required to read the password|"
+        "no tty present and no askpass program specified)[^\\r\\n]*"), QString());
+    return output.trimmed();
+}
+
+// Returns the clock operation's stdout/stderr ONLY when the supplied marker
+// proves that the privileged script ran. `reachedScript` differentiates a
+// failed clock operation from cancelled/missing authentication.
 static QString runAsRootShell(const QString &script,
                               const QString &marker,
                               int timeoutMs,
@@ -328,53 +345,69 @@ static QString runAsRootShell(const QString &script,
 {
     if (reachedScript) *reachedScript = false;
 
-    auto attempt = [&](bool useAskpass) -> QString {
+    auto attempt = [&](const QString &program, const QStringList &args) -> QString {
         QProcess proc;
+        // osm-sudo currently calls sudo -S internally. Never let it read a
+        // terminal password via stdin: only its graphical authentication is
+        // acceptable. With absent NOPASSWD rules, fail safely instead of
+        // presenting or hanging on a CLI prompt.
+        proc.setStandardInputFile(QProcess::nullDevice());
+        proc.start(program, args, QIODevice::ReadOnly);
+        if (!proc.waitForStarted(1500))
+            return QStringLiteral("Could not start the privileged command.");
 
-        if (useAskpass) {
-            QString helper = askpassHelperPath();
-            if (helper.isEmpty())
-                return QStringLiteral("osm-sudo askpass helper not found");
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            env.insert("SUDO_ASKPASS", helper);
-            proc.setProcessEnvironment(env);
-            proc.start("sudo", {"-A", "/bin/sh", "-c", script});
-        } else {
-            proc.start("sudo", {"-n", "/bin/sh", "-c", script});
-        }
-
-        QElapsedTimer t;
-        t.start();
+        QElapsedTimer timer;
+        timer.start();
         while (!proc.waitForFinished(80)) {
-            if (proc.error() == QProcess::FailedToStart)
-                return QStringLiteral("sudo could not be started");
-            if (t.elapsed() > timeoutMs) {
+            if (timer.elapsed() > timeoutMs) {
                 proc.kill();
                 proc.waitForFinished(500);
-                break;
+                return QStringLiteral("The privileged operation timed out.");
             }
             if (g_locTick) g_locTick();
             QCoreApplication::processEvents();
         }
 
-        QString out = proc.readAllStandardOutput();
-        out += proc.readAllStandardError();
-        return out;
+        QString result = QString::fromLocal8Bit(proc.readAllStandardOutput());
+        result += QString::fromLocal8Bit(proc.readAllStandardError());
+        return withoutSudoPrompt(result);
     };
 
-    QString out = attempt(false);
-    if (out.contains(marker)) {
-        if (reachedScript) *reachedScript = true;
-        return out;
+    // An app already running as root does not need to launch a prompt.
+    if (::geteuid() == 0) {
+        QString result = attempt("/bin/sh", {"-c", script});
+        if (result.contains(marker) && reachedScript) *reachedScript = true;
+        return result;
     }
 
-    QString fallback = attempt(true);
-    if (fallback.contains(marker)) {
+    // This never asks for a password, and its stderr is NOT shown to the user
+    // if it cannot gain permission.
+    QString result = attempt("sudo", {"-n", "/bin/sh", "-c", script});
+    if (result.contains(marker)) {
         if (reachedScript) *reachedScript = true;
-        return fallback;
+        return result;
     }
 
-    return out + "\n" + fallback;
+    const QString helper = osmSudoPath();
+    if (helper.isEmpty())
+        return QStringLiteral("The Alternix graphical authentication helper "
+                              "(osm-sudo) could not be found or is not executable.");
+
+    // Direct wrapper invocation, NOT sudo -A / SUDO_ASKPASS.
+    result = attempt(helper, {"/bin/sh", "-c", script});
+    if (result.contains(marker)) {
+        if (reachedScript) *reachedScript = true;
+        return result;
+    }
+
+    // Never forward a CLI sudo prompt (or unfiltered authentication stderr)
+    // to the Location page. osm-sudo authenticates with osm-lock; its inner
+    // sudo also requires the installer's NOPASSWD authorisation to execute.
+    return QStringLiteral("Graphical osm-sudo authentication was cancelled or "
+                          "the privileged command was not authorised. "
+                          "If the pattern was accepted, verify this account's "
+                          "sudoers permissions (the Alternix installer sets "
+                          "NOPASSWD for the installed user).");
 }
 
 // ---------------------------------------------------------
@@ -592,8 +625,19 @@ rtc_write() {
     if [ -x "$c" ]; then HW="$c"; break; fi
   done
   if [ -z "$HW" ]; then
-    RTCLOG="$RTCLOG
-hwclock utility is missing (on Devuan Excalibur install util-linux-extra). This does not mean the RTC chip is missing."
+    if command -v hwclock >/dev/null 2>&1; then
+      HW=$(command -v hwclock)
+    fi
+  fi
+  if [ -z "$HW" ]; then
+    if command -v dpkg-query >/dev/null 2>&1 &&
+       dpkg-query -W -f='${Status}' util-linux-extra 2>/dev/null | grep -q 'install ok installed'; then
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located, but util-linux-extra is installed. This is not an RTC hardware failure."
+    else
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located. Check whether util-linux-extra is installed. This does not mean the RTC chip is missing."
+    fi
     return 1
   fi
 
@@ -2044,15 +2088,42 @@ private:
                     if (QFile::exists(node)) found << node;
                 }
             }
-            const bool hwclockInstalled = QFile::exists("/usr/sbin/hwclock") ||
-                                          QFile::exists("/sbin/hwclock") ||
-                                          QFile::exists("/usr/bin/hwclock") ||
-                                          QFile::exists("/bin/hwclock");
+            QString hwclock = QStandardPaths::findExecutable("hwclock");
+            if (hwclock.isEmpty()) {
+                // X sessions often omit /usr/sbin from PATH even when the
+                // util-linux-extra package and hwclock are both installed.
+                const QStringList paths = {
+                    "/usr/sbin/hwclock", "/sbin/hwclock",
+                    "/usr/bin/hwclock", "/bin/hwclock",
+                    "/usr/local/sbin/hwclock", "/usr/local/bin/hwclock"
+                };
+                for (const QString &candidate : paths) {
+                    QFileInfo fi(candidate);
+                    if (fi.isFile() && fi.isExecutable()) {
+                        hwclock = candidate;
+                        break;
+                    }
+                }
+            }
             QString status = found.isEmpty()
                 ? "Hardware clock: not exposed to Linux (BIOS RTC may still exist)"
                 : "Hardware clock detected: " + found.join(", ");
-            if (!hwclockInstalled)
-                status += "\nhwclock tool missing (install util-linux-extra)";
+            if (hwclock.isEmpty()) {
+                // A missing executable is NOT evidence that the package was
+                // never installed or that this computer has no BIOS clock.
+                QProcess pkg;
+                pkg.start("dpkg-query", {"-W", "-f=${Status}", "util-linux-extra"});
+                bool installed = pkg.waitForStarted(300) &&
+                    pkg.waitForFinished(1000) && pkg.exitCode() == 0 &&
+                    QString::fromLocal8Bit(pkg.readAllStandardOutput())
+                        .contains("install ok installed");
+                if (pkg.state() != QProcess::NotRunning) {
+                    pkg.kill(); pkg.waitForFinished(150);
+                }
+                status += installed
+                    ? "\nhwclock command is unavailable, but util-linux-extra IS installed"
+                    : "\nhwclock command unavailable (check util-linux-extra installation)";
+            }
             rtcStatusLabel->setText(status);
             rtcStatusLabel->setStyleSheet(QString("QLabel { font-size:20px; color:%1; }")
                 .arg(found.isEmpty() ? "#FFC24B" : "#7CFC00"));
