@@ -42,6 +42,160 @@ import scrollerbar
 import re
 
 
+# Alternix battery detection: use the same sysfs rules as the ISO installer.
+# Qtile's own battery reader assumes BAT* devices / charge-energy counters,
+# which fails on tablets reporting only capacity or vendor-specific names.
+from libqtile.widget.battery import BatteryState, BatteryStatus
+
+
+def _alternix_read_supply(base, filename):
+    try:
+        with open(os.path.join(base, filename), encoding="utf-8") as supply_file:
+            return supply_file.read().strip()
+    except OSError:
+        return ""
+
+
+def _alternix_battery_snapshot(root="/sys/class/power_supply"):
+    """Match the installer's power-supply classification and percentage fallback."""
+    result = {"found": False, "percent": None, "status": "", "mains_online": False}
+    try:
+        supplies = sorted(os.listdir(root))
+    except OSError:
+        return result
+
+    for name in supplies:
+        base = os.path.join(root, name)
+        if not os.path.isdir(base):
+            continue
+        kind = _alternix_read_supply(base, "type").lower()
+        if not kind:
+            for line in _alternix_read_supply(base, "uevent").splitlines():
+                if line.startswith("POWER_SUPPLY_TYPE="):
+                    kind = line.partition("=")[2].strip().lower()
+                    break
+
+        if kind == "mains":
+            if _alternix_read_supply(base, "online") == "1":
+                result["mains_online"] = True
+            continue
+        # USB / wireless online signals can mean peripherals, not wall power.
+        if kind in ("usb", "wireless") or kind.startswith("usb_"):
+            continue
+        if _alternix_read_supply(base, "present") == "0":
+            continue
+
+        status = _alternix_read_supply(base, "status")
+        raw_percent = _alternix_read_supply(base, "capacity")
+        try:
+            percent = int(raw_percent) if raw_percent.isascii() and raw_percent.isdecimal() else None
+        except ValueError:
+            percent = None
+        if percent is not None and not 0 <= percent <= 100:
+            percent = None
+
+        has_counters = any(
+            os.path.isfile(os.path.join(base, kind_name + "_now"))
+            and os.path.isfile(os.path.join(base, kind_name + "_full"))
+            for kind_name in ("energy", "charge")
+        )
+        lower_name = name.lower()
+        battery_name = (
+            "battery" in lower_name
+            or (lower_name.startswith("bat") and len(lower_name) > 3
+                and lower_name[3].isdigit())
+            or ("fuel" in lower_name and "gauge" in lower_name)
+        )
+        is_battery = kind == "battery" or (
+            kind in ("", "unknown")
+            and ((percent is not None and bool(status))
+                 or has_counters
+                 or (battery_name and (percent is not None or bool(status))))
+        )
+        if not is_battery:
+            continue
+        result["found"] = True
+
+        if percent is None:
+            for counter in ("energy", "charge"):
+                now = _alternix_read_supply(base, counter + "_now")
+                full = _alternix_read_supply(base, counter + "_full")
+                if not (now.isascii() and now.isdecimal()
+                        and full.isascii() and full.isdecimal()):
+                    continue
+                full_value = int(full)
+                if full_value > 0:
+                    percent = min(100, int(int(now) * 100 / full_value + 0.5))
+                    break
+
+        # As in the installer, the lowest readable battery percentage wins.
+        if percent is not None and (result["percent"] is None
+                                    or percent < result["percent"]):
+            result["percent"] = percent
+            result["status"] = status
+        elif not result["status"]:
+            result["status"] = status
+
+    if result["status"].lower() == "discharging":
+        result["mains_online"] = False
+    return result
+
+
+class _AlternixBatteryReader:
+    """Provide the standard Qtile BatteryStatus using installer's sysfs scan."""
+    force_charge = False  # Keep Qtile's standard Battery commands compatible.
+
+    def update_status(self):
+        snapshot = _alternix_battery_snapshot()
+        if snapshot["percent"] is None:
+            raise RuntimeError("Battery percentage unavailable")
+        states = {
+            "charging": BatteryState.CHARGING,
+            "discharging": BatteryState.DISCHARGING,
+            "full": BatteryState.FULL,
+            "not charging": BatteryState.NOT_CHARGING,
+        }
+        state = states.get(snapshot["status"].lower(), BatteryState.UNKNOWN)
+        return BatteryStatus(
+            state=state,
+            percent=snapshot["percent"] / 100.0,
+            power=0.0,  # The firmware may expose only capacity, no wattage.
+            time=0,
+            charge_start_threshold=0,
+            charge_end_threshold=100,
+        )
+
+
+class _AlternixBattery(widget.Battery):
+    @staticmethod
+    def _load_battery(**config):
+        return _AlternixBatteryReader()
+
+    def poll(self):
+        snapshot = _alternix_battery_snapshot()
+        if not snapshot["found"]:
+            return ""
+        if snapshot["percent"] is None:
+            return "--%"
+        return super().poll()
+
+
+class _AlternixBatteryIcon(widget.BatteryIcon):
+    @staticmethod
+    def _load_battery(**config):
+        return _AlternixBatteryReader()
+
+    def update(self):
+        try:
+            super().update()
+        except (RuntimeError, ValueError, OSError):
+            # Unreadable capacity should not crash the Qtile bar.
+            if self.current_icon != "battery-missing":
+                self.current_icon = "battery-missing"
+                if self.images:
+                    self.draw()
+
+
 mod = "mod4"
 terminal = guess_terminal()
 bg = '28282899'
@@ -349,8 +503,8 @@ screens = [
             widget.Clock(format="%H:%M", mouse_callbacks = {'Button1': lazy.spawn("osm-clock")}),
             # widget.Clock(format="%H:%M"),
             widget.Spacer(length=bar.STRETCH),
-            widget.Battery(format='{percent:2.0%}'),
-            widget.BatteryIcon(scale=1.5),
+            _AlternixBattery(format='{percent:2.0%}'),
+            _AlternixBatteryIcon(scale=1.5),
             widget.Spacer(length=15),
             widget.Volume(emoji=True),
             widget.CurrentLayout(mode='icon', scale=0.6),
