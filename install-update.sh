@@ -184,7 +184,9 @@ if [ -f "icons/osm-kernels.png" ]; then
     sudo cp icons/osm-kernels.png /usr/share/icons/hicolor/64x64/apps/osm-kernels.png
 fi
 
-cat <<EOF > "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+# The .desktop file is generated here; make sure its destination exists.
+mkdir -p "$HOME/.local/share/applications"
+cat <<EOF > "$HOME/.local/share/applications/osm-kernels.desktop"
 [Desktop Entry]
 Type=Application
 Name=Kernels
@@ -195,7 +197,7 @@ Terminal=false
 Categories=System;Settings;
 Keywords=kernel;linux;mainline;liquorix;xanmod;grub;
 EOF
-chmod +x "$TARGET_HOME/.local/share/applications/osm-kernels.desktop"
+chmod +x "$HOME/.local/share/applications/osm-kernels.desktop"
 
 
 echo "• Building osm-notify..."
@@ -228,7 +230,17 @@ g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widget
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
 echo "• Building osm-launcher-lock-cleaner..."
-chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/
+# Resolve the source in the repository instead of assuming it is in the working directory.
+LOCKCLEAN_SRC="$(find "$ALT_ROOT" -type f -name 'osm-launcher-lockclean' -print -quit)"
+if [ -n "$LOCKCLEAN_SRC" ]; then
+    sudo install -m755 "$LOCKCLEAN_SRC" /usr/local/bin/osm-launcher-lockclean
+elif [ -f /usr/local/bin/osm-launcher-lockclean ]; then
+    # Previous installers moved the original source into /usr/local/bin.
+    sudo chmod 755 /usr/local/bin/osm-launcher-lockclean
+    echo "• osm-launcher-lockclean is already installed."
+else
+    echo "[ERROR] osm-launcher-lockclean was not found in the repo or /usr/local/bin."
+fi
 
 
 echo "• Compiling osm-powerd..."
