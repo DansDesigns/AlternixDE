@@ -1242,7 +1242,7 @@ Name=System Update
 Exec=alacritty -e /usr/bin/os-check-update
 Icon=os-check-update
 Type=Application
-Terminal=true
+Terminal=false
 Categories=System;
 EOF
 
