@@ -1,26 +1,42 @@
 #!/bin/bash
 
-# Authenticate once through osm-sudo, then perform the complete update as root.
-# Re-enter this same script rather than prompting separately for each command.
-if (( EUID != 0 )); then
-    if [[ "${1:-}" == "--alternix-elevated" ]]; then
-        echo "ERROR: osm-sudo did not grant root access. Update cancelled." >&2
-        exit 1
-    fi
-
-    UPDATE_SCRIPT=$(readlink -f -- "${BASH_SOURCE[0]}") || exit 1
-    exec /usr/local/bin/osm-sudo /bin/bash "$UPDATE_SCRIPT" --alternix-elevated "$(id -u)"
+# Run the updater in the logged-in user's session. Authenticate once using
+# Alternix's existing pattern prompt; use non-interactive sudo for privileged
+# steps. Do not relaunch the whole script as root (which redirects user paths).
+if (( EUID == 0 )); then
+    echo "ERROR: System Update must be launched by the desktop user, not as root." >&2
+    exit 1
 fi
 
-# Keep the original user's home available to the Alternix installer. Otherwise,
-# running the whole update as root could redirect per-user files to /root.
-if [[ "${1:-}" == "--alternix-elevated" && "${2:-}" =~ ^[0-9]+$ ]]; then
-    ORIGINAL_PASSWD=$(getent passwd "$2")
-    if [[ -n "$ORIGINAL_PASSWD" ]]; then
-        IFS=: read -r ORIGINAL_USER _ ORIGINAL_UID ORIGINAL_GID _ ORIGINAL_HOME _ <<< "$ORIGINAL_PASSWD"
-        export SUDO_USER="$ORIGINAL_USER" SUDO_UID="$ORIGINAL_UID" SUDO_GID="$ORIGINAL_GID"
-        export HOME="$ORIGINAL_HOME"
+# Show an error before Alacritty closes, while retaining the existing
+# five-second close on a normal no-update run.
+update_exit_status() {
+    local result=$?
+    trap - EXIT
+    if (( result != 0 )); then
+        echo ""
+        echo "[ERROR] System Update stopped (exit status $result)."
+        read -r -p "Press Enter to close this window... " _ || true
     fi
+}
+trap update_exit_status EXIT
+
+if [ ! -x /usr/local/bin/osm-sudo ]; then
+    echo "ERROR: /usr/local/bin/osm-sudo is missing or not executable." >&2
+    exit 1
+fi
+if ! command -v nala >/dev/null 2>&1; then
+    echo "ERROR: Nala is not installed. System Update requires the nala package." >&2
+    exit 1
+fi
+
+# The pattern prompt is only shown once. osm-sudo also verifies that the
+# installed sudo policy allows the requested command without a second prompt.
+echo "Authenticating with osm-sudo..."
+if ! /usr/local/bin/osm-sudo /usr/bin/true; then
+    echo "ERROR: Pattern authentication failed, or sudo -n denied access." >&2
+    echo "Check the system's existing sudo permissions; no permission changes were made." >&2
+    exit 1
 fi
 
 LOCAL_VERSION=$(cat /usr/share/alternix/version.txt 2>/dev/null)
@@ -35,18 +51,24 @@ echo "       Current Version: $LOCAL_VERSION"
 echo "=============================================="
 echo "Checking for Linux System Updates..."
 echo " "
-nala update
+if ! sudo -n nala update; then
+    echo "ERROR: Nala could not refresh the system package lists." >&2
+    exit 1
+fi
 echo " "
 echo "Applying Upgrades…"
 echo " "
-nala upgrade -y
+if ! sudo -n nala upgrade -y; then
+    echo "ERROR: Nala failed to upgrade the system packages." >&2
+    exit 1
+fi
 echo " "
 echo "Checking for Alternix Updates..."
 
 REPO_URL="https://github.com/DansDesigns/AlternixDE.git"
 VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixDE/main/update/version.txt"
 
-REMOTE_VERSION=$(curl -fs $VERSION_URL)
+REMOTE_VERSION=$(curl -fs "$VERSION_URL")
 
 while true; do
 
@@ -92,7 +114,7 @@ while true; do
             echo ""
             cd /
             rm -rf "$TMP_DIR"
-            
+
             echo "1) Retry"
             echo "2) Exit"
             read -p "Select option: " choice1
@@ -121,7 +143,7 @@ while true; do
             echo ""
             cd /
             rm -rf "$TMP_DIR"
-            
+
             echo "1) Retry"
             echo "2) Exit"
             read -p "Select option: " choice2
@@ -149,7 +171,7 @@ while true; do
         sleep 1
         echo "Parsing un-passable Conduits..."
         echo ""
-	echo "Removing temp directory..."
+        echo "Removing temp directory..."
         rm -rf "$TMP_DIR"
         echo ""
         echo ""
@@ -172,7 +194,7 @@ while true; do
                 sleep 1
                 echo "1.."
                 sleep 1
-                reboot
+                sudo -n reboot
                 break
             elif [[ "$KEY" == "2" ]]; then
                 echo ""
@@ -184,7 +206,6 @@ while true; do
                 echo "Invalid choice. Press 1 to Restart or 2 to Continue."
             fi
         done
-        
 
     else
         echo " "
