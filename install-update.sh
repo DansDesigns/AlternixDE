@@ -334,6 +334,26 @@ echo ""
 echo "• Updating Alternix Updater..."
 sudo install -m 755 "$ALT_ROOT/update/os-check-update" /usr/bin/
 
+# The desktop shortcut starts Alacritty itself, so Terminal must be false.
+# Keep the system entry consistent with the fresh-install installer.
+echo "• Updating Alternix Updater shortcut..."
+sudo tee /usr/share/applications/os-check-update.desktop >/dev/null <<'UPDATER_DESKTOP'
+[Desktop Entry]
+Name=System Update
+Exec=alacritty -e /usr/bin/os-check-update
+Icon=os-check-update
+Type=Application
+Terminal=false
+Categories=System;
+UPDATER_DESKTOP
+
+# A user-level entry overrides the system entry. Keep any existing copy
+# consistent rather than leaving the old broken launcher active.
+if [ -f "$HOME/.local/share/applications/os-check-update.desktop" ]; then
+    install -m 644 /usr/share/applications/os-check-update.desktop \
+        "$HOME/.local/share/applications/os-check-update.desktop"
+fi
+
 #=========================================
 # Create Folder if not already existing:
 #sudo mkdir /usr/share/alternix
