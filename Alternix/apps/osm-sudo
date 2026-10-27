@@ -3,7 +3,7 @@
 AUTH_RESULT=$?
 
 if [ $AUTH_RESULT -eq 0 ]; then
-    /usr/bin/sudo -S "$@"
+    /usr/bin/sudo -n "$@"
 else
     echo "Authentication failed or cancelled."
     exit 1
