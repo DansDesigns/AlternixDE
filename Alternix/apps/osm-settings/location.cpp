@@ -16,6 +16,8 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDir>
+#include <QFileInfo>
+#include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QDialog>
@@ -292,89 +294,109 @@ static bool g_netLocEnabled    = false;   // Location/network_enabled
 static bool g_serialGpsEnabled = true;    // Location/serial_gps_enabled
 
 // ---------------------------------------------------------
-// Root command runner
+// Privileged clock operations
 //
-// Fast path is `sudo -n`, which succeeds because install-alternix_devuan.sh
-// grants NOPASSWD. If that path produces no marker line the request never
-// reached the script (sudo refused), so we retry through SUDO_ASKPASS
-// (osm-sudo). Waits are polled rather than a single fixed waitForFinished
-// so the caller's spinner keeps animating and long syncs are not truncated.
+// Alternix's osm-sudo authenticates with osm-lock --auth, then invokes sudo.
+// It DOES NOT provide a Unix sudo password. A root-owned helper with a
+// restricted sudoers rule is needed so the pattern is the only prompt.
+// NEVER send user-controlled shell commands to this helper.
 // ---------------------------------------------------------
-
-static QString askpassHelperPath()
+static QString osmSudoPath()
 {
-    QString fromEnv = qEnvironmentVariable("SUDO_ASKPASS");
-    if (!fromEnv.isEmpty() && QFile::exists(fromEnv))
-        return fromEnv;
-
     const QStringList candidates = {
-        "/usr/bin/osm-sudo",
-        "/usr/local/bin/osm-sudo",
-        "/usr/lib/alternix/osm-sudo"
+        "/usr/local/bin/osm-sudo", "/usr/bin/osm-sudo", "/usr/lib/alternix/osm-sudo"
     };
-    for (const QString &c : candidates) {
-        if (QFile::exists(c))
-            return c;
+    for (const QString &candidate : candidates) {
+        QFileInfo f(candidate);
+        if (f.isFile() && f.isExecutable()) return candidate;
     }
-    return QString();
+    return QStandardPaths::findExecutable("osm-sudo");
 }
 
-// Returns combined stdout+stderr. `reachedScript` reports whether the
-// script itself ran (marker seen), as opposed to sudo blocking us.
-static QString runAsRootShell(const QString &script,
-                              const QString &marker,
-                              int timeoutMs,
-                              bool *reachedScript)
+// The pattern prompt authenticates the person, but does not give the process
+// root privileges. Check the fixed-helper sudo rule BEFORE showing a pattern;
+// otherwise a perfectly valid pattern is followed by a failed sudo password
+// prompt. This probe never asks for a password or changes the clock.
+static bool clockHelperAuthorised(const QString &helper)
 {
-    if (reachedScript) *reachedScript = false;
+    if (::geteuid() == 0) return true;
+    QProcess probe;
+    probe.setStandardInputFile(QProcess::nullDevice());
+    probe.start("/usr/bin/sudo", {"-n", "--", helper, "status"}, QIODevice::ReadOnly);
+    if (!probe.waitForStarted(1500)) return false;
+    if (!probe.waitForFinished(3000)) {
+        probe.kill();
+        probe.waitForFinished(500);
+        return false;
+    }
+    return probe.exitStatus() == QProcess::NormalExit &&
+           probe.exitCode() == 0 &&
+           QString::fromLocal8Bit(probe.readAllStandardOutput())
+               .contains("TIME_HELPER_READY");
+}
 
-    auto attempt = [&](bool useAskpass) -> QString {
-        QProcess proc;
-
-        if (useAskpass) {
-            QString helper = askpassHelperPath();
-            if (helper.isEmpty())
-                return QStringLiteral("osm-sudo askpass helper not found");
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            env.insert("SUDO_ASKPASS", helper);
-            proc.setProcessEnvironment(env);
-            proc.start("sudo", {"-A", "/bin/sh", "-c", script});
-        } else {
-            proc.start("sudo", {"-n", "/bin/sh", "-c", script});
-        }
-
-        QElapsedTimer t;
-        t.start();
-        while (!proc.waitForFinished(80)) {
-            if (proc.error() == QProcess::FailedToStart)
-                return QStringLiteral("sudo could not be started");
-            if (t.elapsed() > timeoutMs) {
-                proc.kill();
-                proc.waitForFinished(500);
-                break;
-            }
-            if (g_locTick) g_locTick();
-            QCoreApplication::processEvents();
-        }
-
-        QString out = proc.readAllStandardOutput();
-        out += proc.readAllStandardError();
-        return out;
-    };
-
-    QString out = attempt(false);
-    if (out.contains(marker)) {
-        if (reachedScript) *reachedScript = true;
-        return out;
+static QString runTimeHelper(const QString &action, const QString &argument,
+                             const QString &marker, int timeoutMs, bool *reached)
+{
+    if (reached) *reached = false;
+    const QString helper = "/usr/local/sbin/alternix-time-helper";
+    if (!QFileInfo(helper).isExecutable()) {
+        return "The Alternix clock helper is not installed on this system. "
+               "Updating the installer or source repository does not install "
+               "the helper on an existing AlternixOS installation.";
     }
 
-    QString fallback = attempt(true);
-    if (fallback.contains(marker)) {
-        if (reachedScript) *reachedScript = true;
-        return fallback;
+    if (!clockHelperAuthorised(helper)) {
+        return "Clock permission is not configured for this installed user. "
+               "The root-owned clock helper must be authorised through "
+               "/etc/sudoers.d/zz-alternix-time (NOPASSWD for this helper). "
+               "An osm-sudo pattern cannot supply a Unix sudo password. "
+               "No clock command was attempted.";
     }
 
-    return out + "\n" + fallback;
+    QStringList args = {helper, action};
+    if (!argument.isEmpty()) args << argument;
+    QString program;
+    if (::geteuid() == 0) {
+        program = helper;
+        args.removeFirst();
+    } else {
+        // Exactly ONE graphical authentication; never use SUDO_ASKPASS.
+        program = osmSudoPath();
+        if (program.isEmpty())
+            return "osm-sudo is missing or cannot be executed.";
+    }
+
+    QProcess process;
+    // Never allow a nested sudo -S in an older installed osm-sudo wrapper
+    // to read a terminal/Unix password. stderr remains private on failure.
+    process.setStandardInputFile(QProcess::nullDevice());
+    process.start(program, args, QIODevice::ReadOnly);
+    if (!process.waitForStarted(1500))
+        return "The Alternix graphical clock action could not start.";
+    QElapsedTimer timer;
+    timer.start();
+    while (!process.waitForFinished(80)) {
+        if (timer.elapsed() > timeoutMs) {
+            process.kill();
+            process.waitForFinished(500);
+            return "The clock action timed out.";
+        }
+        if (g_locTick) g_locTick();
+        QCoreApplication::processEvents();
+    }
+
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+    // Only helper output with the expected marker is passed to the UI.
+    // sudo's CLI prompts/errors are never copied into the page or dialog.
+    if (output.contains(marker)) {
+        if (reached) *reached = true;
+        return output.trimmed();
+    }
+    return "The clock helper did not run after osm-sudo authentication. "
+           "Check that the INSTALLED /usr/local/bin/osm-sudo is the corrected "
+           "version using sudo -n (not sudo -S), and that the clock helper "
+           "is still authorised. No Unix password should be requested.";
 }
 
 // ---------------------------------------------------------
@@ -520,172 +542,17 @@ static bool sntpBestTime(qint64 *unixMsOut, QString *serverOut, QString *logOut)
 }
 
 // ---------------------------------------------------------
-// Battery-backed clock (RTC)
-//
-// `hwclock --systohc` alone is not enough on these tablets: the plain call
-// can fail while writing through an explicit /dev/rtc node or the direct ISA
-// path still works. The earlier version sent hwclock's error to /dev/null,
-// so a failure was reported with no reason attached. This keeps the reason.
+// Hardware clock (RTC) write-back after a manual clock change.
+// RTC presence, RTC read access and RTC write access are DIFFERENT states.
+// A failed hwclock command must never be reported as "no clock chip".
+// Preserve the configured RTC time scale (LOCAL or UTC); never blindly
+// rewrite a LOCAL/dual-boot RTC as UTC just because the first attempt fails.
+// Normal continuous synchronisation is handled by chrony, not this helper.
 // ---------------------------------------------------------
 
-static const char *RTC_WRITE_SH = R"SH(
-RTCLOG=""
-FAKELOG=""
-RTC_SEEN=0
-HW=""
+// RTC write operations are implemented by the root-owned, fixed-action
+// alternix-time-helper installed by AlternixOS.
 
-# Read the chip back and see whether it now agrees with the system clock.
-# This does not trust hwclock's exit status, which can be non-zero for a
-# warning even when the write actually landed.
-rtc_readback_ok() {
-  # The chip may be kept in UTC or in local time; /etc/adjtime says which.
-  MODE=UTC
-  if [ -f /etc/adjtime ]; then
-    T=$(sed -n '3p' /etc/adjtime 2>/dev/null)
-    [ "$T" = "LOCAL" ] && MODE=LOCAL
-  fi
-
-  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
-    [ -r "$r/date" ] && [ -r "$r/time" ] || continue
-    RTC_SEEN=1
-    RD=$(cat "$r/date" 2>/dev/null)
-    RT=$(cat "$r/time" 2>/dev/null)
-    [ -n "$RD" ] && [ -n "$RT" ] || continue
-    if [ "$MODE" = LOCAL ]; then
-      RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
-    else
-      RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
-    fi
-    NOW=$(date +%s)
-    D=$((RE - NOW))
-    [ "$D" -lt 0 ] && D=$((0 - D))
-    [ "$D" -le 5 ] && return 0
-    RTCLOG="$RTCLOG
-$r holds $RD $RT ($MODE), which is ${D}s from the system clock"
-  done
-  return 1
-}
-
-# One hwclock attempt. Counts as success if hwclock says so OR if the chip
-# reads back correct afterwards regardless of what hwclock claimed.
-rtc_try() {
-  O=$("$HW" "$@" 2>&1)
-  if [ $? -eq 0 ]; then return 0; fi
-  RTCLOG="$RTCLOG
-$HW $*: $O"
-  if rtc_readback_ok; then
-    RTCLOG="$RTCLOG
-  ...but the chip reads back correct after this attempt, so it did work"
-    return 0
-  fi
-  return 1
-}
-
-rtc_diag() {
-  RTCLOG="$RTCLOG
---- what this machine has ---"
-  L=$(ls -l /dev/rtc* 2>&1 | tr '\n' '; ')
-  RTCLOG="$RTCLOG
-device nodes: $L"
-  for r in /sys/class/rtc/rtc0 /sys/class/rtc/rtc1; do
-    [ -d "$r" ] || continue
-    N=$(cat "$r/name" 2>/dev/null)
-    RTCLOG="$RTCLOG
-$r name: $N"
-  done
-  if [ -f /etc/adjtime ]; then
-    A=$(tr '\n' ' ' < /etc/adjtime)
-    RTCLOG="$RTCLOG
-/etc/adjtime: $A"
-  else
-    RTCLOG="$RTCLOG
-/etc/adjtime: missing (hwclock has never successfully run here)"
-  fi
-  M=$(lsmod 2>/dev/null | grep -i '^rtc' | awk '{print $1}' | tr '\n' ' ')
-  [ -z "$M" ] && M="none"
-  RTCLOG="$RTCLOG
-rtc kernel modules loaded: $M
---- attempts ---"
-}
-
-rtc_write() {
-  for c in /sbin/hwclock /usr/sbin/hwclock /bin/hwclock /usr/bin/hwclock; do
-    if [ -x "$c" ]; then HW="$c"; break; fi
-  done
-  if [ -z "$HW" ]; then
-    RTCLOG="hwclock is not installed (it comes from the util-linux package)"
-    return 1
-  fi
-
-  rtc_diag
-
-  rtc_try --systohc && return 0
-  rtc_try --systohc --utc && return 0
-  # --noadjfile skips /etc/adjtime entirely, which is what fails when that
-  # file is missing or was written by a different tool.
-  rtc_try --systohc --noadjfile --utc && return 0
-
-  for d in /dev/rtc0 /dev/rtc /dev/rtc1; do
-    [ -e "$d" ] || continue
-    rtc_try --systohc -f "$d" && return 0
-    rtc_try --systohc --noadjfile --utc -f "$d" && return 0
-  done
-
-  rtc_try --systohc --directisa && return 0
-
-  # busybox is a completely separate implementation and sometimes succeeds
-  # where util-linux does not.
-  if command -v busybox >/dev/null 2>&1; then
-    O=$(busybox hwclock -w -u 2>&1)
-    if [ $? -eq 0 ]; then return 0; fi
-    RTCLOG="$RTCLOG
-busybox hwclock -w -u: $O"
-    rtc_readback_ok && return 0
-  fi
-
-  V=$("$HW" --systohc --verbose 2>&1 | head -n 30)
-  RTCLOG="$RTCLOG
-
---- hwclock --systohc --verbose (says which access method it tried) ---
-$V"
-
-  if [ "$RTC_SEEN" = 0 ] && [ ! -e /dev/rtc0 ] && [ ! -e /dev/rtc ] && [ ! -e /dev/rtc1 ]; then
-    RTCLOG="$RTCLOG
-
-There is no clock chip registered by the kernel on this machine at all."
-  fi
-  return 1
-}
-
-# When the chip cannot be written, keep the time across a reboot anyway by
-# storing it on disk. This is what fake-hwclock is for and it is the normal
-# answer for hardware with no usable RTC.
-fake_clock_save() {
-  if command -v fake-hwclock >/dev/null 2>&1; then
-    O=$(fake-hwclock save 2>&1)
-    if [ $? -eq 0 ]; then
-      FAKELOG="The time was written to disk with fake-hwclock instead, so it
-will be restored at the next boot."
-      return 0
-    fi
-    FAKELOG="fake-hwclock save failed: $O"
-    return 1
-  fi
-  FAKELOG="fake-hwclock is not installed. Installing that package would let
-the time survive a reboot even without a working clock chip."
-  return 1
-}
-
-# Write the clock chip, falling back to on-disk storage. Sets RTC to one of
-# ok / fake / failed.
-rtc_store() {
-  RTC=ok
-  if ! rtc_write; then
-    RTC=failed
-    fake_clock_save && RTC=fake
-  fi
-}
-)SH";
 
 // ---------------------------------------------------------
 // Direct serial NMEA backend (offline GNSS chips)
@@ -1552,7 +1419,7 @@ public:
             " border-radius:40px;"
             "}"
         );
-        timeFrame->setFixedHeight(520);
+        timeFrame->setMinimumHeight(650);
 
         QVBoxLayout *timeLayout = new QVBoxLayout(timeFrame);
         timeLayout->setContentsMargins(30, 30, 30, 30);
@@ -1580,6 +1447,22 @@ public:
         tzInfoLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         tzInfoLabel->setStyleSheet("QLabel { font-size:22px; color:#BBBBBB; }");
         timeLayout->addWidget(tzInfoLabel);
+
+        rtcStatusLabel = new QLabel("Hardware clock: checking...", timeFrame);
+        rtcStatusLabel->setAlignment(Qt::AlignCenter);
+        rtcStatusLabel->setWordWrap(true);
+        rtcStatusLabel->setMinimumWidth(1);
+        rtcStatusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        rtcStatusLabel->setStyleSheet("QLabel { font-size:20px; color:#BBBBBB; }");
+        timeLayout->addWidget(rtcStatusLabel);
+
+        autoSyncLabel = new QLabel("Automatic sync: checking...", timeFrame);
+        autoSyncLabel->setAlignment(Qt::AlignCenter);
+        autoSyncLabel->setWordWrap(true);
+        autoSyncLabel->setMinimumWidth(1);
+        autoSyncLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        autoSyncLabel->setStyleSheet("QLabel { font-size:20px; color:#BBBBBB; }");
+        timeLayout->addWidget(autoSyncLabel);
 
         // Zone selector: Local / UTC / GMT
         QHBoxLayout *zoneRow = new QHBoxLayout();
@@ -1869,6 +1752,9 @@ private:
     QLabel *clockLabel      = nullptr;
     QLabel *tzInfoLabel     = nullptr;
     QLabel *timeStatusLabel = nullptr;
+    QLabel *rtcStatusLabel  = nullptr;
+    QLabel *autoSyncLabel   = nullptr;
+    QElapsedTimer timeHealthAge;
 
     QPushButton *localZoneButton = nullptr;
     QPushButton *utcZoneButton   = nullptr;
@@ -2040,6 +1926,103 @@ private:
             tzInfoLabel->setText(QString("System time zone: %1  (UTC%2)")
                                      .arg(QString::fromUtf8(tz.id()), offStr));
         }
+        // Clock readout is every second; hardware/service probes are not.
+        if (!timeHealthAge.isValid() || timeHealthAge.elapsed() >= 20000) {
+            timeHealthAge.restart();
+            updateTimeHealth();
+        }
+    }
+
+    void updateTimeHealth()
+    {
+        if (rtcStatusLabel) {
+            QDir d("/sys/class/rtc");
+            QStringList nodes = d.entryList(QStringList() << "rtc*",
+                QDir::Dirs | QDir::NoDotAndDotDot | QDir::System);
+            QStringList found;
+            for (const QString &node : nodes) {
+                QString name = readSysFile(d.filePath(node + "/name"));
+                const bool readable = !readSysFile(d.filePath(node + "/time")).isEmpty();
+                QString description = node;
+                if (!name.isEmpty()) description += " (" + name + ")";
+                if (!readable) description += " [not readable]";
+                found << description;
+            }
+            if (found.isEmpty()) {
+                for (const QString &node : QStringList({"/dev/rtc", "/dev/rtc0", "/dev/rtc1"})) {
+                    if (QFile::exists(node)) found << node;
+                }
+            }
+            QString hwclock = QStandardPaths::findExecutable("hwclock");
+            if (hwclock.isEmpty()) {
+                // X sessions often omit /usr/sbin from PATH even when the
+                // util-linux-extra package and hwclock are both installed.
+                const QStringList paths = {
+                    "/usr/sbin/hwclock", "/sbin/hwclock",
+                    "/usr/bin/hwclock", "/bin/hwclock",
+                    "/usr/local/sbin/hwclock", "/usr/local/bin/hwclock"
+                };
+                for (const QString &candidate : paths) {
+                    QFileInfo fi(candidate);
+                    if (fi.isFile() && fi.isExecutable()) {
+                        hwclock = candidate;
+                        break;
+                    }
+                }
+            }
+            QString status = found.isEmpty()
+                ? "Hardware clock: not exposed to Linux (BIOS RTC may still exist)"
+                : "Hardware clock detected: " + found.join(", ");
+            if (hwclock.isEmpty()) {
+                // A missing executable is NOT evidence that the package was
+                // never installed or that this computer has no BIOS clock.
+                QProcess pkg;
+                pkg.start("dpkg-query", {"-W", "-f=${Status}", "util-linux-extra"});
+                bool installed = pkg.waitForStarted(300) &&
+                    pkg.waitForFinished(1000) && pkg.exitCode() == 0 &&
+                    QString::fromLocal8Bit(pkg.readAllStandardOutput())
+                        .contains("install ok installed");
+                if (pkg.state() != QProcess::NotRunning) {
+                    pkg.kill(); pkg.waitForFinished(150);
+                }
+                status += installed
+                    ? "\nhwclock command is unavailable, but util-linux-extra IS installed"
+                    : "\nhwclock command unavailable (check util-linux-extra installation)";
+            }
+            rtcStatusLabel->setText(status);
+            rtcStatusLabel->setStyleSheet(QString("QLabel { font-size:20px; color:%1; }")
+                .arg(found.isEmpty() ? "#FFC24B" : "#7CFC00"));
+        }
+
+        if (autoSyncLabel) {
+            QString text;
+            QString colour = "#FFC24B";
+            if (!QFile::exists("/usr/bin/chronyc") && !QFile::exists("/bin/chronyc")) {
+                text = "Automatic sync: Chrony not installed (Sync now is manual only)";
+            } else {
+                QProcess probe;
+                probe.start("chronyc", {"-n", "tracking"});
+                if (probe.waitForStarted(300) && probe.waitForFinished(1200) &&
+                    probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0) {
+                    QString report = QString::fromLocal8Bit(probe.readAllStandardOutput());
+                    if (report.contains(QRegularExpression("Leap status\\s*:\\s*Normal"))) {
+                        text = "Automatic sync: Chrony synchronised";
+                        colour = "#7CFC00";
+                    } else {
+                        text = "Automatic sync: Chrony running, waiting for a valid time source";
+                    }
+                } else {
+                    if (probe.state() != QProcess::NotRunning) {
+                        probe.kill();
+                        probe.waitForFinished(150);
+                    }
+                    text = "Automatic sync: Chrony not responding";
+                }
+            }
+            autoSyncLabel->setText(text);
+            autoSyncLabel->setStyleSheet(QString("QLabel { font-size:20px; color:%1; }")
+                .arg(colour));
+        }
     }
 
     void updateZoneButtons()
@@ -2194,26 +2177,12 @@ private:
 
     void applySystemDateTime(const QDateTime &utc)
     {
-        QString stamp = utc.toString("yyyy-MM-dd HH:mm:ss");
-
-        QString script = QString::fromLatin1(RTC_WRITE_SH) + QString(
-            "\n"
-            "if ! O=$(date -u -s \"%1\" 2>&1); then\n"
-            "  echo OSMSET_FAIL\n"
-            "  echo \"date -u -s: $O\"\n"
-            "  exit 1\n"
-            "fi\n"
-            "rtc_store\n"
-            "echo \"OSMSET_OK:$RTC\"\n"
-            "echo \"$RTCLOG\"\n"
-            "echo \"$FAKELOG\"\n"
-            "exit 0\n"
-        ).arg(stamp);
-
+        // The helper only accepts a UTC epoch; never pass a shell script.
+        const QString epoch = QString::number(utc.toSecsSinceEpoch());
         bool reached = false;
         QString out;
         runWithSpinner(setTimeButton, "Change", [&]() {
-            out = runAsRootShell(script, "OSMSET_", 30000, &reached);
+            out = runTimeHelper("set", epoch, "OSMSET_", 30000, &reached);
         });
 
         if (!reached) {
@@ -2234,23 +2203,19 @@ private:
             return;
         }
 
+        timeHealthAge.invalidate();
         updateClock();
 
         if (out.contains("OSMSET_OK:fake")) {
-            // Chip unusable, but the time is stored on disk and comes back
-            // at boot, so the user's actual problem is solved.
-            setTimeStatus("Clock changed. This machine has no usable clock chip, "
-                          "so the time was saved to disk and will be restored "
-                          "at the next start up.",
-                          "#FFC24B");
-        } else if (out.contains("OSMSET_OK:failed")) {
-            setTimeStatus("Clock changed, but the battery-backed clock could not be "
-                          "updated. The time may be wrong again after a shutdown.",
-                          "#FFC24B");
-            showDetail("Battery-backed clock",
-                       "The time on screen is now correct, but it could not be "
-                       "written to the clock chip that keeps time while the "
-                       "machine is switched off. The reason is below.",
+            setTimeStatus("Clock changed. Linux could not access an RTC; an approximate "
+                          "boot timestamp was saved to disk.", "#FFC24B");
+        } else if (out.contains("OSMSET_OK:unwritable") ||
+                   out.contains("OSMSET_OK:unavailable")) {
+            setTimeStatus("Clock changed; RTC write-back was unavailable. "
+                          "See the hardware-clock diagnostics.", "#FFC24B");
+            showDetail("Hardware-clock write problem",
+                       "Linux could not write the hardware clock. This does NOT mean "
+                       "that the BIOS clock is absent. See the diagnostics below.",
                        out, QMessageBox::Warning);
         } else {
             setTimeStatus("Clock changed by hand at " +
@@ -2259,8 +2224,43 @@ private:
         }
     }
 
+    // If Chrony is running, ask IT to refresh rather than force-setting the
+    // system clock behind the synchronisation daemon's back.
+    bool syncViaChrony()
+    {
+        if (!QFile::exists("/usr/bin/chronyc") && !QFile::exists("/bin/chronyc"))
+            return false;
+        QProcess probe;
+        probe.start("chronyc", {"-n", "tracking"});
+        if (!probe.waitForStarted(250) || !probe.waitForFinished(900) ||
+            probe.exitStatus() != QProcess::NormalExit || probe.exitCode() != 0) {
+            if (probe.state() != QProcess::NotRunning) {
+                probe.kill(); probe.waitForFinished(150);
+            }
+            return false;
+        }
+
+        bool reached = false;
+        QString out;
+        runWithSpinner(syncTimeButton, "Sync now", [&]() {
+            out = runTimeHelper("chrony", QString(), "CHRONY_REACHED", 30000, &reached);
+        });
+        if (reached && out.contains("CHRONY_SYNC_OK")) {
+            setTimeStatus("Chrony has refreshed the automatic network time sync.", "#7CFC00");
+        } else {
+            setTimeStatus("Chrony could not confirm a network time source. "
+                          "It will retry when connectivity returns.", "#FFC24B");
+            showDetail("Automatic time sync", "Chrony did not synchronise yet.",
+                       out, QMessageBox::Warning);
+        }
+        timeHealthAge.invalidate();
+        updateClock();
+        return true;
+    }
+
     void syncTimeFromInternet()
     {
+        if (syncViaChrony()) return;
         qint64 unixMs = 0;
         QString server;
         QString sntpLog;
@@ -2273,74 +2273,16 @@ private:
             // works even when the clock is far enough out to break TLS.
             haveSntp = sntpBestTime(&unixMs, &server, &sntpLog);
 
-            QString script;
             if (haveSntp) {
                 QString epoch = QString("%1.%2")
                                     .arg(unixMs / 1000)
                                     .arg(unixMs % 1000, 3, 10, QChar('0'));
-                script = QString::fromLatin1(RTC_WRITE_SH) + QString(
-                    "\n"
-                    "if ! O=$(date -u -s \"@%1\" 2>&1); then\n"
-                    "  echo OSMSYNC_FAIL\n"
-                    "  echo \"date -u -s: $O\"\n"
-                    "  exit 1\n"
-                    "fi\n"
-                    "rtc_store\n"
-                    "echo \"OSMSYNC_OK:$RTC:%2\"\n"
-                    "echo \"$RTCLOG\"\n"
-                    "echo \"$FAKELOG\"\n"
-                    "exit 0\n"
-                ).arg(epoch, server);
+                out = runTimeHelper("network-set", epoch, "OSMSYNC_", 30000, &reached);
             } else {
-                // Step 2: fall back to the Date header of a web server. Less
-                // precise (whole seconds) but survives networks that block
-                // outgoing UDP port 123.
-                script = QString::fromLatin1(RTC_WRITE_SH) + R"SH(
-LOG=""
-SRC=""
-
-HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
-HAVE_WGET=0; command -v wget >/dev/null 2>&1 && HAVE_WGET=1
-
-if [ "$HAVE_CURL" = 0 ] && [ "$HAVE_WGET" = 0 ]; then
-  LOG="$LOG
-neither curl nor wget is installed, so there is no way to fetch the time"
-fi
-
-for url in http://deb.devuan.org/ https://deb.devuan.org/ http://www.google.com/; do
-  D=""
-  if [ "$HAVE_CURL" = 1 ]; then
-    D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-  fi
-  if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
-    D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-  fi
-  if [ -n "$D" ]; then
-    if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
-    LOG="$LOG
-could not apply the date from $url: $D"
-  else
-    LOG="$LOG
-no date sent by $url"
-  fi
-done
-
-if [ -z "$SRC" ]; then
-  echo "OSMSYNC_FAIL"
-  echo "$LOG"
-  exit 1
-fi
-
-rtc_store
-echo "OSMSYNC_OK:$RTC:$SRC"
-echo "$LOG"
-echo "$RTCLOG"
-echo "$FAKELOG"
-exit 0
-)SH";
+                // When UDP/123 is blocked, retain the existing HTTP Date
+                // fallback in the fixed-action root helper.
+                out = runTimeHelper("http-sync", QString(), "OSMSYNC_", 90000, &reached);
             }
-
-            out = runAsRootShell(script, "OSMSYNC_", 90000, &reached);
         });
 
         // Every diagnostic goes in front of the user, not to /dev/null.
@@ -2367,6 +2309,7 @@ exit 0
             return;
         }
 
+        timeHealthAge.invalidate();
         updateClock();
 
         QString source;
@@ -2376,27 +2319,24 @@ exit 0
         bool rtcFake = false;
         if (okM.hasMatch()) {
             QString state = okM.captured(1).trimmed();
-            rtcFailed = (state == "failed");
+            rtcFailed = (state == "unwritable" || state == "unavailable");
             rtcFake   = (state == "fake");
             source = okM.captured(2).trimmed();
         }
 
         QString when = QDateTime::currentDateTime().toString("HH:mm:ss");
         if (rtcFake) {
-            setTimeStatus(QString("Clock synced at %1. This machine has no usable "
-                                  "clock chip, so the time was saved to disk and "
-                                  "will be restored at the next start up.").arg(when),
+            setTimeStatus(QString("Clock synced at %1. No RTC was accessible to "
+                                  "Linux; an approximate boot time was saved to disk.").arg(when),
                           "#FFC24B");
         } else if (rtcFailed) {
-            setTimeStatus(QString("Clock synced at %1, but the battery-backed clock "
-                                  "could not be updated. The time may be wrong again "
-                                  "after a shutdown.").arg(when),
+            setTimeStatus(QString("Clock synced at %1, but Linux could not write "
+                                  "the RTC. The hardware may still be present.").arg(when),
                           "#FFC24B");
-            showDetail("Battery-backed clock",
-                       "The time was fetched successfully and the clock on screen "
-                       "is now correct. It could not be written to the clock chip "
-                       "that keeps time while the machine is switched off, so it "
-                       "may be wrong again after a reboot. The reason is below.",
+            showDetail("Hardware-clock write problem",
+                       "The system time was corrected, but Linux could not write "
+                       "the RTC. This does not establish that the BIOS clock "
+                       "is missing. The actual error follows.",
                        detail, QMessageBox::Warning);
         } else if (!source.isEmpty()) {
             setTimeStatus(QString("Clock synced at %1 from %2.").arg(when, source),
