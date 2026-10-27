@@ -294,120 +294,78 @@ static bool g_netLocEnabled    = false;   // Location/network_enabled
 static bool g_serialGpsEnabled = true;    // Location/serial_gps_enabled
 
 // ---------------------------------------------------------
-// Privileged time operations
+// Privileged clock operations
 //
-// IMPORTANT: Alternix's osm-sudo is a COMMAND WRAPPER: it opens osm-lock
-// --auth and then runs its command. It is NOT a SUDO_ASKPASS helper, and using
-// it with sudo -A makes sudo's terminal password prompt leak into Settings.
-//
-// Read-only time/RTC probes above do not need root. For a clock change we
-// first try non-interactive sudo (no authentication necessary if the system
-// already authorises it), and if that fails, invoke osm-sudo DIRECTLY so
-// the user sees the Alternix graphical authentication UI.
+// Alternix's osm-sudo authenticates with osm-lock --auth, then invokes sudo.
+// It DOES NOT provide a Unix sudo password. A root-owned helper with a
+// restricted sudoers rule is needed so the pattern is the only prompt.
+// NEVER send user-controlled shell commands to this helper.
 // ---------------------------------------------------------
-
 static QString osmSudoPath()
 {
     const QStringList candidates = {
-        "/usr/local/bin/osm-sudo", // Installed by the AlternixDE installer
-        "/usr/bin/osm-sudo",
-        "/usr/lib/alternix/osm-sudo"
+        "/usr/local/bin/osm-sudo", "/usr/bin/osm-sudo", "/usr/lib/alternix/osm-sudo"
     };
     for (const QString &candidate : candidates) {
-        QFileInfo fi(candidate);
-        if (fi.isFile() && fi.isExecutable())
-            return candidate;
+        QFileInfo f(candidate);
+        if (f.isFile() && f.isExecutable()) return candidate;
     }
     return QStandardPaths::findExecutable("osm-sudo");
 }
 
-// Do not expose sudo's CLI password prompt even in the expanded error dialog.
-// Other useful output (hwclock diagnostics, NTP errors) is retained.
-static QString withoutSudoPrompt(QString output)
+static QString runTimeHelper(const QString &action, const QString &argument,
+                             const QString &marker, int timeoutMs, bool *reached)
 {
-    output.replace(QRegularExpression(
-        "\\[sudo\\]\\s*password for[^:\\r\\n]*:\\s*",
-        QRegularExpression::CaseInsensitiveOption), QString());
-    output.replace(QRegularExpression(
-        "(?im)^\\s*sudo:\\s*(?:a password is required|no password was provided|"
-        "a terminal is required to read the password|"
-        "no tty present and no askpass program specified)[^\\r\\n]*"), QString());
-    return output.trimmed();
-}
-
-// Returns the clock operation's stdout/stderr ONLY when the supplied marker
-// proves that the privileged script ran. `reachedScript` differentiates a
-// failed clock operation from cancelled/missing authentication.
-static QString runAsRootShell(const QString &script,
-                              const QString &marker,
-                              int timeoutMs,
-                              bool *reachedScript)
-{
-    if (reachedScript) *reachedScript = false;
-
-    auto attempt = [&](const QString &program, const QStringList &args) -> QString {
-        QProcess proc;
-        // osm-sudo currently calls sudo -S internally. Never let it read a
-        // terminal password via stdin: only its graphical authentication is
-        // acceptable. With absent NOPASSWD rules, fail safely instead of
-        // presenting or hanging on a CLI prompt.
-        proc.setStandardInputFile(QProcess::nullDevice());
-        proc.start(program, args, QIODevice::ReadOnly);
-        if (!proc.waitForStarted(1500))
-            return QStringLiteral("Could not start the privileged command.");
-
-        QElapsedTimer timer;
-        timer.start();
-        while (!proc.waitForFinished(80)) {
-            if (timer.elapsed() > timeoutMs) {
-                proc.kill();
-                proc.waitForFinished(500);
-                return QStringLiteral("The privileged operation timed out.");
-            }
-            if (g_locTick) g_locTick();
-            QCoreApplication::processEvents();
-        }
-
-        QString result = QString::fromLocal8Bit(proc.readAllStandardOutput());
-        result += QString::fromLocal8Bit(proc.readAllStandardError());
-        return withoutSudoPrompt(result);
-    };
-
-    // An app already running as root does not need to launch a prompt.
+    if (reached) *reached = false;
+    const QString helper = "/usr/local/sbin/alternix-time-helper";
+    if (!QFileInfo(helper).isExecutable()) {
+        return "The Alternix clock helper has not been installed. "
+               "Run the updated Alternix installer or the one-time clock "
+               "permission setup on this machine.";
+    }
+    QStringList args = {helper, action};
+    if (!argument.isEmpty()) args << argument;
+    QString program;
     if (::geteuid() == 0) {
-        QString result = attempt("/bin/sh", {"-c", script});
-        if (result.contains(marker) && reachedScript) *reachedScript = true;
-        return result;
+        program = helper;
+        args.removeFirst();
+    } else {
+        // The ONLY elevation route is osm-sudo: it invokes the pattern UI.
+        // A root-owned fixed helper has its own limited NOPASSWD sudoers rule.
+        program = osmSudoPath();
+        if (program.isEmpty())
+            return "osm-sudo is not installed or cannot be executed.";
     }
-
-    // This never asks for a password, and its stderr is NOT shown to the user
-    // if it cannot gain permission.
-    QString result = attempt("sudo", {"-n", "/bin/sh", "-c", script});
-    if (result.contains(marker)) {
-        if (reachedScript) *reachedScript = true;
-        return result;
+    QProcess process;
+    // osm-sudo uses sudo -S after the pattern. With an incorrectly configured
+    // system that second sudo may try reading a Unix password. Give it no
+    // stdin, and NEVER surface its prompt or stderr in the Location UI.
+    process.setStandardInputFile(QProcess::nullDevice());
+    process.start(program, args, QIODevice::ReadOnly);
+    if (!process.waitForStarted(1500))
+        return "Could not start the Alternix graphical clock action.";
+    QElapsedTimer timer;
+    timer.start();
+    while (!process.waitForFinished(80)) {
+        if (timer.elapsed() > timeoutMs) {
+            process.kill();
+            process.waitForFinished(500);
+            return "The clock operation timed out.";
+        }
+        if (g_locTick) g_locTick();
+        QCoreApplication::processEvents();
     }
-
-    const QString helper = osmSudoPath();
-    if (helper.isEmpty())
-        return QStringLiteral("The Alternix graphical authentication helper "
-                              "(osm-sudo) could not be found or is not executable.");
-
-    // Direct wrapper invocation, NOT sudo -A / SUDO_ASKPASS.
-    result = attempt(helper, {"/bin/sh", "-c", script});
-    if (result.contains(marker)) {
-        if (reachedScript) *reachedScript = true;
-        return result;
+    QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+    output += QString::fromLocal8Bit(process.readAllStandardError());
+    if (output.contains(marker)) {
+        if (reached) *reached = true;
+        // Restrict success detection to markers written by our root-owned helper.
+        return output.trimmed();
     }
-
-    // Never forward a CLI sudo prompt (or unfiltered authentication stderr)
-    // to the Location page. osm-sudo authenticates with osm-lock; its inner
-    // sudo also requires the installer's NOPASSWD authorisation to execute.
-    return QStringLiteral("Graphical osm-sudo authentication was cancelled or "
-                          "the privileged command was not authorised. "
-                          "If the pattern was accepted, verify this account's "
-                          "sudoers permissions (the Alternix installer sets "
-                          "NOPASSWD for the installed user).");
+    // Do not show `[sudo] password for ...` (or any other sudo CLI output).
+    return "The clock action was not authorised. If the osm-sudo pattern was "
+           "accepted, the installed account needs the Alternix clock-helper "
+           "permission setup. No Unix sudo password is required inside Settings.";
 }
 
 // ---------------------------------------------------------
@@ -561,133 +519,9 @@ static bool sntpBestTime(qint64 *unixMsOut, QString *serverOut, QString *logOut)
 // Normal continuous synchronisation is handled by chrony, not this helper.
 // ---------------------------------------------------------
 
-static const char *RTC_WRITE_SH = R"SH(
-RTCLOG=""
-FAKELOG=""
-RTC_PRESENT=0
-HW=""
-RTC_MODE=UTC
-[ -f /etc/adjtime ] && [ "$(sed -n '3p' /etc/adjtime 2>/dev/null)" = LOCAL ] && RTC_MODE=LOCAL
+// RTC write operations are implemented by the root-owned, fixed-action
+// alternix-time-helper installed by AlternixOS.
 
-rtc_detect() {
-  for r in /sys/class/rtc/rtc*; do
-    [ -d "$r" ] || continue
-    RTC_PRESENT=1
-    RTCLOG="$RTCLOG
-Detected $r ($(cat "$r/name" 2>/dev/null))"
-  done
-  for r in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
-    [ -e "$r" ] && RTC_PRESENT=1
-  done
-  [ -r /proc/driver/rtc ] && RTC_PRESENT=1
-  RTCLOG="$RTCLOG
-RTC time scale from /etc/adjtime: $RTC_MODE"
-}
-
-rtc_readback_ok() {
-  for r in /sys/class/rtc/rtc*; do
-    [ -r "$r/date" ] && [ -r "$r/time" ] || continue
-    RD=$(cat "$r/date" 2>/dev/null)
-    RT=$(cat "$r/time" 2>/dev/null)
-    [ -n "$RD" ] && [ -n "$RT" ] || continue
-    if [ "$RTC_MODE" = LOCAL ]; then
-      RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
-    else
-      RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
-    fi
-    NOW=$(date +%s)
-    D=$((RE - NOW))
-    [ "$D" -lt 0 ] && D=$((-D))
-    [ "$D" -le 5 ] && return 0
-    RTCLOG="$RTCLOG
-$r reads $RD $RT ($RTC_MODE); ${D}s away from system time"
-  done
-  return 1
-}
-
-rtc_try() {
-  O=$("$HW" "$@" 2>&1)
-  RC=$?
-  if [ "$RC" -eq 0 ]; then return 0; fi
-  RTCLOG="$RTCLOG
-$HW $*: $O"
-  if rtc_readback_ok; then
-    RTCLOG="$RTCLOG
-RTC read-back agrees with the corrected system time"
-    return 0
-  fi
-  return 1
-}
-
-rtc_write() {
-  rtc_detect
-  for c in /usr/sbin/hwclock /sbin/hwclock /usr/bin/hwclock /bin/hwclock; do
-    if [ -x "$c" ]; then HW="$c"; break; fi
-  done
-  if [ -z "$HW" ]; then
-    if command -v hwclock >/dev/null 2>&1; then
-      HW=$(command -v hwclock)
-    fi
-  fi
-  if [ -z "$HW" ]; then
-    if command -v dpkg-query >/dev/null 2>&1 &&
-       dpkg-query -W -f='${Status}' util-linux-extra 2>/dev/null | grep -q 'install ok installed'; then
-      RTCLOG="$RTCLOG
-The hwclock executable could not be located, but util-linux-extra is installed. This is not an RTC hardware failure."
-    else
-      RTCLOG="$RTCLOG
-The hwclock executable could not be located. Check whether util-linux-extra is installed. This does not mean the RTC chip is missing."
-    fi
-    return 1
-  fi
-
-  # First use the machine's existing /etc/adjtime mode.
-  rtc_try --systohc && return 0
-  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
-    [ -e "$d" ] || continue
-    rtc_try --systohc --rtc "$d" && return 0
-  done
-
-  # Bypass a broken/missing adjtime file, but KEEP its LOCAL/UTC mode.
-  rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" && return 0
-  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
-    [ -e "$d" ] || continue
-    rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" --rtc "$d" && return 0
-  done
-
-  # Never use direct ISA writes on modern tablets as a blind fallback.
-  RTCLOG="$RTCLOG
-Linux could not WRITE the RTC. The hardware may still be present and readable.
-$($HW --show --verbose 2>&1 | head -n 16)"
-  return 1
-}
-
-fake_clock_save() {
-  if command -v fake-hwclock >/dev/null 2>&1; then
-    O=$(fake-hwclock save 2>&1)
-    if [ $? -eq 0 ]; then
-      FAKELOG="Saved an approximate boot timestamp to disk (not a real RTC)."
-      return 0
-    fi
-    FAKELOG="fake-hwclock save failed: $O"
-    return 1
-  fi
-  FAKELOG="No RTC is exposed to Linux and fake-hwclock is not installed."
-  return 1
-}
-
-rtc_store() {
-  RTC=ok
-  if ! rtc_write; then
-    if [ "$RTC_PRESENT" -eq 1 ]; then
-      RTC=unwritable
-    else
-      RTC=unavailable
-      fake_clock_save && RTC=fake
-    fi
-  fi
-}
-)SH";
 
 // ---------------------------------------------------------
 // Direct serial NMEA backend (offline GNSS chips)
@@ -2312,26 +2146,12 @@ private:
 
     void applySystemDateTime(const QDateTime &utc)
     {
-        QString stamp = utc.toString("yyyy-MM-dd HH:mm:ss");
-
-        QString script = QString::fromLatin1(RTC_WRITE_SH) + QString(
-            "\n"
-            "if ! O=$(date -u -s \"%1\" 2>&1); then\n"
-            "  echo OSMSET_FAIL\n"
-            "  echo \"date -u -s: $O\"\n"
-            "  exit 1\n"
-            "fi\n"
-            "rtc_store\n"
-            "echo \"OSMSET_OK:$RTC\"\n"
-            "echo \"$RTCLOG\"\n"
-            "echo \"$FAKELOG\"\n"
-            "exit 0\n"
-        ).arg(stamp);
-
+        // The helper only accepts a UTC epoch; never pass a shell script.
+        const QString epoch = QString::number(utc.toSecsSinceEpoch());
         bool reached = false;
         QString out;
         runWithSpinner(setTimeButton, "Change", [&]() {
-            out = runAsRootShell(script, "OSMSET_", 30000, &reached);
+            out = runTimeHelper("set", epoch, "OSMSET_", 30000, &reached);
         });
 
         if (!reached) {
@@ -2391,17 +2211,8 @@ private:
 
         bool reached = false;
         QString out;
-        const QString script = QStringLiteral(
-            "echo CHRONY_REACHED\n"
-            "chronyc -a online 2>&1\n"
-            "chronyc -a 'burst 4/4' 2>&1\n"
-            "chronyc -n waitsync 10 1 100 2 2>&1\n"
-            "RES=$?\n"
-            "chronyc -n tracking 2>&1\n"
-            "if [ \"$RES\" -eq 0 ]; then echo CHRONY_SYNC_OK; "
-            "else echo CHRONY_SYNC_WAIT; fi\n");
         runWithSpinner(syncTimeButton, "Sync now", [&]() {
-            out = runAsRootShell(script, "CHRONY_REACHED", 30000, &reached);
+            out = runTimeHelper("chrony", QString(), "CHRONY_REACHED", 30000, &reached);
         });
         if (reached && out.contains("CHRONY_SYNC_OK")) {
             setTimeStatus("Chrony has refreshed the automatic network time sync.", "#7CFC00");
@@ -2431,74 +2242,16 @@ private:
             // works even when the clock is far enough out to break TLS.
             haveSntp = sntpBestTime(&unixMs, &server, &sntpLog);
 
-            QString script;
             if (haveSntp) {
                 QString epoch = QString("%1.%2")
                                     .arg(unixMs / 1000)
                                     .arg(unixMs % 1000, 3, 10, QChar('0'));
-                script = QString::fromLatin1(RTC_WRITE_SH) + QString(
-                    "\n"
-                    "if ! O=$(date -u -s \"@%1\" 2>&1); then\n"
-                    "  echo OSMSYNC_FAIL\n"
-                    "  echo \"date -u -s: $O\"\n"
-                    "  exit 1\n"
-                    "fi\n"
-                    "rtc_store\n"
-                    "echo \"OSMSYNC_OK:$RTC:%2\"\n"
-                    "echo \"$RTCLOG\"\n"
-                    "echo \"$FAKELOG\"\n"
-                    "exit 0\n"
-                ).arg(epoch, server);
+                out = runTimeHelper("network-set", epoch, "OSMSYNC_", 30000, &reached);
             } else {
-                // Step 2: fall back to the Date header of a web server. Less
-                // precise (whole seconds) but survives networks that block
-                // outgoing UDP port 123.
-                script = QString::fromLatin1(RTC_WRITE_SH) + R"SH(
-LOG=""
-SRC=""
-
-HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
-HAVE_WGET=0; command -v wget >/dev/null 2>&1 && HAVE_WGET=1
-
-if [ "$HAVE_CURL" = 0 ] && [ "$HAVE_WGET" = 0 ]; then
-  LOG="$LOG
-neither curl nor wget is installed, so there is no way to fetch the time"
-fi
-
-for url in http://deb.devuan.org/ https://deb.devuan.org/ http://www.google.com/; do
-  D=""
-  if [ "$HAVE_CURL" = 1 ]; then
-    D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-  fi
-  if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
-    D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
-  fi
-  if [ -n "$D" ]; then
-    if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
-    LOG="$LOG
-could not apply the date from $url: $D"
-  else
-    LOG="$LOG
-no date sent by $url"
-  fi
-done
-
-if [ -z "$SRC" ]; then
-  echo "OSMSYNC_FAIL"
-  echo "$LOG"
-  exit 1
-fi
-
-rtc_store
-echo "OSMSYNC_OK:$RTC:$SRC"
-echo "$LOG"
-echo "$RTCLOG"
-echo "$FAKELOG"
-exit 0
-)SH";
+                // When UDP/123 is blocked, retain the existing HTTP Date
+                // fallback in the fixed-action root helper.
+                out = runTimeHelper("http-sync", QString(), "OSMSYNC_", 90000, &reached);
             }
-
-            out = runAsRootShell(script, "OSMSYNC_", 90000, &reached);
         });
 
         // Every diagnostic goes in front of the user, not to /dev/null.
