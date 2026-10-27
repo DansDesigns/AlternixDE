@@ -1,10 +1,14 @@
 #!/bin/bash
+# AlternixOS graphical authentication: pattern first, then a permitted command.
+# Never request or consume a second Unix/terminal sudo password.
+if [ "$#" -eq 0 ]; then
+    echo "osm-sudo: no command supplied" >&2
+    exit 2
+fi
 /usr/local/bin/osm-lock --auth
 AUTH_RESULT=$?
-
-if [ $AUTH_RESULT -eq 0 ]; then
-    /usr/bin/sudo -n "$@"
-else
-    echo "Authentication failed or cancelled."
+if [ "$AUTH_RESULT" -ne 0 ]; then
+    echo "Authentication failed or cancelled." >&2
     exit 1
 fi
+exec /usr/bin/sudo -n -- "$@"
