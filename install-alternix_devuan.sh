@@ -240,6 +240,378 @@ else
     echo "[Time] Chrony enabled for the installed system; live checks deferred until boot."
 fi
 
+# ------------------------------------------------
+# AlternixOS clock actions: osm-sudo pattern authentication + a fixed helper.
+# The helper cannot run arbitrary commands and requires no CLI sudo password.
+# ------------------------------------------------
+echo "[Time] Configuring osm-sudo clock permissions..."
+sudo install -d -m 0755 /usr/local/sbin
+sudo /bin/sh -c 'cat > /usr/local/sbin/alternix-time-helper' <<'ALT_TIME_HELPER_CONTENT'
+#!/bin/sh
+# Installed by AlternixOS. Root-owned and callable only for specific clock actions.
+# There is intentionally NO arbitrary command, shell, or file argument interface.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 022
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "TIME_HELPER_DENIED: elevated privileges were not granted"
+    exit 1
+fi
+
+case "${1:-}" in
+    status)
+        [ "$#" -eq 1 ] || exit 2
+        echo TIME_HELPER_READY
+        exit 0
+        ;;
+    set|network-set)
+        [ "$#" -eq 2 ] || { echo "Invalid clock request"; exit 2; }
+        # Only accept a numeric Unix timestamp; never evaluate shell input.
+        printf '%s\n' "$2" | LC_ALL=C grep -Eq '^[0-9]{9,11}(\.[0-9]{1,3})?$' || {
+            echo "Invalid clock timestamp"; exit 2;
+        }
+        YEAR=$(date -u -d "@$2" +%Y 2>/dev/null) || {
+            echo "Invalid clock timestamp"; exit 2;
+        }
+        [ "$YEAR" -ge 2000 ] && [ "$YEAR" -le 2099 ] || {
+            echo "Timestamp outside supported range"; exit 2;
+        }
+RTCLOG=""
+FAKELOG=""
+RTC_PRESENT=0
+HW=""
+RTC_MODE=UTC
+[ -f /etc/adjtime ] && [ "$(sed -n '3p' /etc/adjtime 2>/dev/null)" = LOCAL ] && RTC_MODE=LOCAL
+
+rtc_detect() {
+  for r in /sys/class/rtc/rtc*; do
+    [ -d "$r" ] || continue
+    RTC_PRESENT=1
+    RTCLOG="$RTCLOG
+Detected $r ($(cat "$r/name" 2>/dev/null))"
+  done
+  for r in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$r" ] && RTC_PRESENT=1
+  done
+  [ -r /proc/driver/rtc ] && RTC_PRESENT=1
+  RTCLOG="$RTCLOG
+RTC time scale from /etc/adjtime: $RTC_MODE"
+}
+
+rtc_readback_ok() {
+  for r in /sys/class/rtc/rtc*; do
+    [ -r "$r/date" ] && [ -r "$r/time" ] || continue
+    RD=$(cat "$r/date" 2>/dev/null)
+    RT=$(cat "$r/time" 2>/dev/null)
+    [ -n "$RD" ] && [ -n "$RT" ] || continue
+    if [ "$RTC_MODE" = LOCAL ]; then
+      RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
+    else
+      RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
+    fi
+    NOW=$(date +%s)
+    D=$((RE - NOW))
+    [ "$D" -lt 0 ] && D=$((-D))
+    [ "$D" -le 5 ] && return 0
+    RTCLOG="$RTCLOG
+$r reads $RD $RT ($RTC_MODE); ${D}s away from system time"
+  done
+  return 1
+}
+
+rtc_try() {
+  O=$("$HW" "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ]; then return 0; fi
+  RTCLOG="$RTCLOG
+$HW $*: $O"
+  if rtc_readback_ok; then
+    RTCLOG="$RTCLOG
+RTC read-back agrees with the corrected system time"
+    return 0
+  fi
+  return 1
+}
+
+rtc_write() {
+  rtc_detect
+  for c in /usr/sbin/hwclock /sbin/hwclock /usr/bin/hwclock /bin/hwclock; do
+    if [ -x "$c" ]; then HW="$c"; break; fi
+  done
+  if [ -z "$HW" ]; then
+    if command -v hwclock >/dev/null 2>&1; then
+      HW=$(command -v hwclock)
+    fi
+  fi
+  if [ -z "$HW" ]; then
+    if command -v dpkg-query >/dev/null 2>&1 &&
+       dpkg-query -W -f='${Status}' util-linux-extra 2>/dev/null | grep -q 'install ok installed'; then
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located, but util-linux-extra is installed. This is not an RTC hardware failure."
+    else
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located. Check whether util-linux-extra is installed. This does not mean the RTC chip is missing."
+    fi
+    return 1
+  fi
+
+  # First use the machine's existing /etc/adjtime mode.
+  rtc_try --systohc && return 0
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$d" ] || continue
+    rtc_try --systohc --rtc "$d" && return 0
+  done
+
+  # Bypass a broken/missing adjtime file, but KEEP its LOCAL/UTC mode.
+  rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" && return 0
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$d" ] || continue
+    rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" --rtc "$d" && return 0
+  done
+
+  # Never use direct ISA writes on modern tablets as a blind fallback.
+  RTCLOG="$RTCLOG
+Linux could not WRITE the RTC. The hardware may still be present and readable.
+$($HW --show --verbose 2>&1 | head -n 16)"
+  return 1
+}
+
+fake_clock_save() {
+  if command -v fake-hwclock >/dev/null 2>&1; then
+    O=$(fake-hwclock save 2>&1)
+    if [ $? -eq 0 ]; then
+      FAKELOG="Saved an approximate boot timestamp to disk (not a real RTC)."
+      return 0
+    fi
+    FAKELOG="fake-hwclock save failed: $O"
+    return 1
+  fi
+  FAKELOG="No RTC is exposed to Linux and fake-hwclock is not installed."
+  return 1
+}
+
+rtc_store() {
+  RTC=ok
+  if ! rtc_write; then
+    if [ "$RTC_PRESENT" -eq 1 ]; then
+      RTC=unwritable
+    else
+      RTC=unavailable
+      fake_clock_save && RTC=fake
+    fi
+  fi
+}
+        if ! O=$(date -u -s "@$2" 2>&1); then
+            if [ "$1" = set ]; then echo OSMSET_FAIL; else echo OSMSYNC_FAIL; fi
+            echo "date -u -s: $O"
+            exit 1
+        fi
+        rtc_store
+        if [ "$1" = set ]; then
+            echo "OSMSET_OK:$RTC"
+        else
+            echo "OSMSYNC_OK:$RTC:network NTP server"
+        fi
+        echo "$RTCLOG"
+        echo "$FAKELOG"
+        exit 0
+        ;;
+    chrony)
+        [ "$#" -eq 1 ] || exit 2
+        echo CHRONY_REACHED
+        chronyc -a online 2>&1
+        chronyc -a 'burst 4/4' 2>&1
+        chronyc -n waitsync 10 1 100 2 2>&1
+        RES=$?
+        chronyc -n tracking 2>&1
+        if [ "$RES" -eq 0 ]; then echo CHRONY_SYNC_OK
+        else echo CHRONY_SYNC_WAIT; fi
+        exit 0
+        ;;
+    http-sync)
+        [ "$#" -eq 1 ] || exit 2
+RTCLOG=""
+FAKELOG=""
+RTC_PRESENT=0
+HW=""
+RTC_MODE=UTC
+[ -f /etc/adjtime ] && [ "$(sed -n '3p' /etc/adjtime 2>/dev/null)" = LOCAL ] && RTC_MODE=LOCAL
+
+rtc_detect() {
+  for r in /sys/class/rtc/rtc*; do
+    [ -d "$r" ] || continue
+    RTC_PRESENT=1
+    RTCLOG="$RTCLOG
+Detected $r ($(cat "$r/name" 2>/dev/null))"
+  done
+  for r in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$r" ] && RTC_PRESENT=1
+  done
+  [ -r /proc/driver/rtc ] && RTC_PRESENT=1
+  RTCLOG="$RTCLOG
+RTC time scale from /etc/adjtime: $RTC_MODE"
+}
+
+rtc_readback_ok() {
+  for r in /sys/class/rtc/rtc*; do
+    [ -r "$r/date" ] && [ -r "$r/time" ] || continue
+    RD=$(cat "$r/date" 2>/dev/null)
+    RT=$(cat "$r/time" 2>/dev/null)
+    [ -n "$RD" ] && [ -n "$RT" ] || continue
+    if [ "$RTC_MODE" = LOCAL ]; then
+      RE=$(date -d "$RD $RT" +%s 2>/dev/null) || continue
+    else
+      RE=$(date -u -d "$RD $RT" +%s 2>/dev/null) || continue
+    fi
+    NOW=$(date +%s)
+    D=$((RE - NOW))
+    [ "$D" -lt 0 ] && D=$((-D))
+    [ "$D" -le 5 ] && return 0
+    RTCLOG="$RTCLOG
+$r reads $RD $RT ($RTC_MODE); ${D}s away from system time"
+  done
+  return 1
+}
+
+rtc_try() {
+  O=$("$HW" "$@" 2>&1)
+  RC=$?
+  if [ "$RC" -eq 0 ]; then return 0; fi
+  RTCLOG="$RTCLOG
+$HW $*: $O"
+  if rtc_readback_ok; then
+    RTCLOG="$RTCLOG
+RTC read-back agrees with the corrected system time"
+    return 0
+  fi
+  return 1
+}
+
+rtc_write() {
+  rtc_detect
+  for c in /usr/sbin/hwclock /sbin/hwclock /usr/bin/hwclock /bin/hwclock; do
+    if [ -x "$c" ]; then HW="$c"; break; fi
+  done
+  if [ -z "$HW" ]; then
+    if command -v hwclock >/dev/null 2>&1; then
+      HW=$(command -v hwclock)
+    fi
+  fi
+  if [ -z "$HW" ]; then
+    if command -v dpkg-query >/dev/null 2>&1 &&
+       dpkg-query -W -f='${Status}' util-linux-extra 2>/dev/null | grep -q 'install ok installed'; then
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located, but util-linux-extra is installed. This is not an RTC hardware failure."
+    else
+      RTCLOG="$RTCLOG
+The hwclock executable could not be located. Check whether util-linux-extra is installed. This does not mean the RTC chip is missing."
+    fi
+    return 1
+  fi
+
+  # First use the machine's existing /etc/adjtime mode.
+  rtc_try --systohc && return 0
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$d" ] || continue
+    rtc_try --systohc --rtc "$d" && return 0
+  done
+
+  # Bypass a broken/missing adjtime file, but KEEP its LOCAL/UTC mode.
+  rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" && return 0
+  for d in /dev/rtc /dev/rtc[0-9]* /dev/misc/rtc; do
+    [ -e "$d" ] || continue
+    rtc_try --systohc --noadjfile "--$( [ "$RTC_MODE" = LOCAL ] && echo localtime || echo utc )" --rtc "$d" && return 0
+  done
+
+  # Never use direct ISA writes on modern tablets as a blind fallback.
+  RTCLOG="$RTCLOG
+Linux could not WRITE the RTC. The hardware may still be present and readable.
+$($HW --show --verbose 2>&1 | head -n 16)"
+  return 1
+}
+
+fake_clock_save() {
+  if command -v fake-hwclock >/dev/null 2>&1; then
+    O=$(fake-hwclock save 2>&1)
+    if [ $? -eq 0 ]; then
+      FAKELOG="Saved an approximate boot timestamp to disk (not a real RTC)."
+      return 0
+    fi
+    FAKELOG="fake-hwclock save failed: $O"
+    return 1
+  fi
+  FAKELOG="No RTC is exposed to Linux and fake-hwclock is not installed."
+  return 1
+}
+
+rtc_store() {
+  RTC=ok
+  if ! rtc_write; then
+    if [ "$RTC_PRESENT" -eq 1 ]; then
+      RTC=unwritable
+    else
+      RTC=unavailable
+      fake_clock_save && RTC=fake
+    fi
+  fi
+}
+LOG=""
+SRC=""
+HAVE_CURL=0; command -v curl >/dev/null 2>&1 && HAVE_CURL=1
+HAVE_WGET=0; command -v wget >/dev/null 2>&1 && HAVE_WGET=1
+if [ "$HAVE_CURL" = 0 ] && [ "$HAVE_WGET" = 0 ]; then
+  LOG="$LOG
+neither curl nor wget is installed, so there is no way to fetch the time"
+fi
+for url in http://deb.devuan.org/ https://deb.devuan.org/ http://www.google.com/; do
+  D=""
+  if [ "$HAVE_CURL" = 1 ]; then
+    D=$(curl -sI -m 8 "$url" 2>/dev/null | grep -i '^date:' | head -n1 | sed 's/^[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
+  fi
+  if [ -z "$D" ] && [ "$HAVE_WGET" = 1 ]; then
+    D=$(wget -S --spider -T 8 -q -O /dev/null "$url" 2>&1 | grep -i '^ *date:' | head -n1 | sed 's/^ *[Dd][Aa][Tt][Ee]:[ ]*//' | tr -d '\r')
+  fi
+  if [ -n "$D" ]; then
+    if date -u -s "$D" >/dev/null 2>&1; then SRC="the web server at $url"; break; fi
+    LOG="$LOG
+could not apply the date from $url: $D"
+  else
+    LOG="$LOG
+no date sent by $url"
+  fi
+done
+if [ -z "$SRC" ]; then
+  echo OSMSYNC_FAIL
+  echo "$LOG"
+  exit 1
+fi
+rtc_store
+echo "OSMSYNC_OK:$RTC:$SRC"
+echo "$LOG"
+echo "$RTCLOG"
+echo "$FAKELOG"
+exit 0
+        ;;
+    *)
+        echo "Unsupported time operation"
+        exit 2
+        ;;
+esac
+ALT_TIME_HELPER_CONTENT
+sudo chown root:root /usr/local/sbin/alternix-time-helper
+sudo chmod 0755 /usr/local/sbin/alternix-time-helper
+ALT_TIME_SUDOERS_TMP="$(mktemp)"
+printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/alternix-time-helper\n' "$TARGET_USER" > "$ALT_TIME_SUDOERS_TMP"
+if sudo visudo -cf "$ALT_TIME_SUDOERS_TMP" >/dev/null; then
+    sudo install -o root -g root -m 0440 "$ALT_TIME_SUDOERS_TMP" /etc/sudoers.d/zz-alternix-time
+else
+    rm -f "$ALT_TIME_SUDOERS_TMP"
+    echo "ERROR: Invalid clock helper sudoers rule. Aborting." >&2
+    exit 1
+fi
+rm -f "$ALT_TIME_SUDOERS_TMP"
+
 echo ""
 echo "[System] Installing Qtile, Qtile-Extras & mypy"
 pip3 install qtile qtile-extras mypy --break-system-packages
