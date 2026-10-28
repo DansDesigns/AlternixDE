@@ -796,6 +796,8 @@ private:
     QString currentSelectedStyle;
     QString pathBtnNormalStyle;
     QElapsedTimer planThrottle;
+    QProcess *extractionProcess = nullptr;
+    QByteArray extractionProgressBuffer;
 
     QHash<QString, QPushButton*> pathToButton;
     QSet<QString> selectedPaths;
@@ -1564,7 +1566,7 @@ private:
         propsBtn->setEnabled(hasSel);
         unselectBtn->setEnabled(true);
         openWithBtn->setEnabled(singleFileSel);
-        extractBtn->setEnabled(canExtract);
+        extractBtn->setEnabled(canExtract && !extractionProcess);
     }
 
     QStringList selectedPathList() const {
@@ -1902,44 +1904,323 @@ private:
         listDirectory(currentPath);
     }
 
+    // Stream actual extracted bytes back to the address-bar progress gauge.
+    // The Python standard library handles ZIP without requiring the optional
+    // unzip package; it also supports the TAR variants already offered here.
+    static QString archiveExtractorScript() {
+        return QString::fromUtf8(R"ALTZIP(
+import ntpath
+import os
+import pathlib
+import stat
+import sys
+import tarfile
+import time
+import zipfile
+
+archive, root, kind = sys.argv[1:4]
+root = os.path.realpath(root)
+
+
+def inside(path):
+    resolved = os.path.realpath(path)
+    if os.path.commonpath((root, resolved)) != root:
+        raise ValueError('Archive entry would write outside the extraction folder: ' + path)
+
+
+def destination(name):
+    if not name or '\x00' in name or name.startswith('/') or ntpath.splitdrive(name)[0]:
+        raise ValueError('Unsafe archive entry: ' + repr(name))
+    bits = pathlib.PurePosixPath(name).parts
+    if '..' in bits:
+        raise ValueError('Unsafe archive entry: ' + repr(name))
+    path = os.path.join(root, *bits)
+    inside(path)
+    return path
+
+
+def create_parent(path):
+    inside(path)
+    parent = os.path.dirname(path)
+    inside(parent)
+    os.makedirs(parent, exist_ok=True)
+    inside(path)
+
+
+def output_file(path):
+    create_parent(path)
+    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0)
+    return os.fdopen(os.open(path, flags, 0o600), 'wb')
+
+
+work_total = 1
+work_done = 0
+last_progress = -1
+last_report = 0.0
+
+
+def report(force=False):
+    global last_progress, last_report
+    fraction = min(10000, (work_done * 10000) // work_total)
+    now = time.monotonic()
+    if force or (fraction != last_progress and now - last_report >= 0.04):
+        print('PROGRESS ' + str(fraction), flush=True)
+        last_progress = fraction
+        last_report = now
+
+
+def tick(value):
+    global work_done
+    work_done += max(1, value)
+    report()
+
+
+def copy_stream(src, dest, file_size):
+    global work_done
+    bytes_read = 0
+    with output_file(dest) as dst:
+        while True:
+            block = src.read(1024 * 1024)
+            if not block:
+                break
+            dst.write(block)
+            bytes_read += len(block)
+            work_done += len(block)
+            report()
+    if bytes_read != file_size:
+        raise IOError('Archive entry is truncated: ' + dest)
+    if file_size == 0:
+        tick(1)
+
+
+def symlink_at(path, target):
+    if not target or '\x00' in target or ntpath.splitdrive(target)[0] or os.path.isabs(target):
+        raise ValueError('Unsafe link target in archive: ' + repr(target))
+    create_parent(path)
+    inside(os.path.join(os.path.dirname(path), target))
+    if os.path.lexists(path):
+        raise ValueError('Duplicate or occupied archive link: ' + path)
+    os.symlink(target, path)
+
+
+def zip_extract():
+    global work_total
+    with zipfile.ZipFile(archive) as zf:
+        entries = zf.infolist()
+        for info in entries:
+            destination(info.filename)
+        work_total = max(1, sum(max(1, info.file_size) for info in entries))
+        report(True)
+        for info in entries:
+            path = destination(info.filename)
+            unix_mode = info.external_attr >> 16
+            if info.is_dir():
+                os.makedirs(path, exist_ok=True)
+                tick(1)
+            elif path == root:
+                raise ValueError('Archive file cannot replace the extraction folder')
+            elif stat.S_IFMT(unix_mode) == stat.S_IFLNK:
+                with zf.open(info) as src:
+                    target = os.fsdecode(src.read())
+                symlink_at(path, target)
+                tick(info.file_size)
+            else:
+                with zf.open(info) as src:
+                    copy_stream(src, path, info.file_size)
+                if unix_mode & 0o777:
+                    os.chmod(path, unix_mode & 0o777)
+                try:
+                    stamp = time.mktime(info.date_time + (0, 0, -1))
+                    os.utime(path, (stamp, stamp))
+                except (ValueError, OverflowError, OSError):
+                    pass
+        report(True)
+
+
+def tar_extract():
+    global work_total
+    with tarfile.open(archive, 'r:*') as tf:
+        entries = tf.getmembers()
+        for member in entries:
+            destination(member.name)
+            if member.issym():
+                path = os.path.join(os.path.dirname(destination(member.name)), member.linkname)
+                inside(path)
+            if member.islnk():
+                inside(destination(member.linkname))
+        work_total = max(1, sum(max(1, m.size if m.isfile() else 1) for m in entries))
+        report(True)
+        directory_modes = []
+        hard_links = []
+        for member in entries:
+            path = destination(member.name)
+            if member.isdir():
+                os.makedirs(path, exist_ok=True)
+                if path != root:
+                    directory_modes.append((path, member.mode, member.mtime))
+                tick(1)
+            elif path == root:
+                raise ValueError('Archive file cannot replace the extraction folder')
+            elif member.issym():
+                symlink_at(path, member.linkname)
+                tick(1)
+            elif member.islnk():
+                hard_links.append((path, destination(member.linkname)))
+                tick(1)
+            elif member.isfile():
+                src = tf.extractfile(member)
+                if src is None:
+                    raise IOError('Archive entry cannot be read: ' + member.name)
+                with src:
+                    copy_stream(src, path, member.size)
+                os.chmod(path, member.mode & 0o777)
+                try:
+                    os.utime(path, (member.mtime, member.mtime))
+                except (ValueError, OverflowError, OSError):
+                    pass
+            else:
+                raise ValueError('Unsupported special file in archive: ' + member.name)
+        # Hard links may occur before the file to which they refer.
+        while hard_links:
+            remaining = []
+            made = 0
+            for path, target in hard_links:
+                inside(path)
+                inside(target)
+                if os.path.isfile(target):
+                    create_parent(path)
+                    os.link(target, path, follow_symlinks=False)
+                    made += 1
+                else:
+                    remaining.append((path, target))
+            if not made:
+                raise ValueError('Unresolved archive hard link: ' + remaining[0][0])
+            hard_links = remaining
+        for path, mode, stamp in reversed(directory_modes):
+            inside(path)
+            os.chmod(path, mode & 0o777)
+            try:
+                os.utime(path, (stamp, stamp))
+            except (ValueError, OverflowError, OSError):
+                pass
+        report(True)
+
+
+try:
+    if kind == 'zip':
+        zip_extract()
+    else:
+        tar_extract()
+    work_done = work_total
+    report(True)
+except Exception as exc:
+    print(type(exc).__name__ + ': ' + str(exc), file=sys.stderr, flush=True)
+    sys.exit(1)
+
+)ALTZIP");
+    }
+
     void extractSelection() {
-        if (selectedPaths.size() != 1)
+        if (extractionProcess || selectedPaths.size() != 1) return;
+
+        const QString path = *selectedPaths.begin();
+        const QFileInfo info(path);
+        if (!info.isFile() || !isArchiveFilePath(path)) return;
+
+        const QString python = QStandardPaths::findExecutable("python3");
+        if (python.isEmpty()) {
+            QMessageBox::warning(this, "Extract archive",
+                "Python 3 was not found. Archive extraction requires python3 "
+                "(which is also used by Qtile). No files have been changed.");
             return;
+        }
 
-        QString path = *selectedPaths.begin();
-        QFileInfo info(path);
-        if (!info.isFile()) return;
-
-        QString lower = path.toLower();
-        if (!isArchiveFilePath(path)) return;
-
-        QString fileName = info.fileName();
+        const QString fileName = info.fileName();
+        const QString lower = fileName.toLower();
         QString baseName = info.completeBaseName();
-
-        if (lower.endsWith(".tar.gz")) baseName = fileName.left(fileName.size() - 7);
-        else if (lower.endsWith(".tar.xz")) baseName = fileName.left(fileName.size() - 7);
-        else if (lower.endsWith(".tar.bz2")) baseName = fileName.left(fileName.size() - 8);
+        if (lower.endsWith(".tar.gz") || lower.endsWith(".tar.xz"))
+            baseName = fileName.left(fileName.size() - 7);
+        else if (lower.endsWith(".tar.bz2"))
+            baseName = fileName.left(fileName.size() - 8);
 
         QString outDir = QDir(currentPath).absoluteFilePath(baseName + "_extracted");
         int i = 1;
         while (QFileInfo::exists(outDir))
-            outDir = QDir(currentPath).absoluteFilePath(baseName + "_extracted_" + QString::number(i++));
+            outDir = QDir(currentPath).absoluteFilePath(
+                baseName + "_extracted_" + QString::number(i++));
 
-        QDir().mkpath(outDir);
+        if (!QDir().mkpath(outDir)) {
+            QMessageBox::warning(this, "Extract archive",
+                "Could not create the extraction folder:\n" + outDir);
+            return;
+        }
 
-        QString cmd;
-        if (lower.endsWith(".zip"))
-            cmd = QString("unzip -o %1 -d %2").arg(quoteFilePath(path)).arg(quoteFilePath(outDir));
-        else if (lower.endsWith(".gz") || lower.endsWith(".tgz"))
-            cmd = QString("tar -xzf %1 -C %2").arg(quoteFilePath(path)).arg(quoteFilePath(outDir));
-        else if (lower.endsWith(".xz"))
-            cmd = QString("tar -xJf %1 -C %2").arg(quoteFilePath(path)).arg(quoteFilePath(outDir));
-        else if (lower.endsWith(".bz2"))
-            cmd = QString("tar -xjf %1 -C %2").arg(quoteFilePath(path)).arg(quoteFilePath(outDir));
-        else
-            cmd = QString("tar -xf %1 -C %2").arg(quoteFilePath(path)).arg(quoteFilePath(outDir));
+        const QString label = "Extracting " + fileName + "…";
+        const QString kind = lower.endsWith(".zip") ? "zip" : "tar";
+        QProcess *process = new QProcess(this);
+        extractionProcess = process;
+        extractionProgressBuffer.clear();
+        process->setProcessChannelMode(QProcess::SeparateChannels);
 
-        QProcess::startDetached("sh", QStringList() << "-c" << cmd);
+        connect(process, &QProcess::readyReadStandardOutput, this,
+                [this, process, label]() {
+            if (extractionProcess != process) return;
+            extractionProgressBuffer += process->readAllStandardOutput();
+            int newline = -1;
+            while ((newline = extractionProgressBuffer.indexOf('\n')) >= 0) {
+                const QByteArray line = extractionProgressBuffer.left(newline).trimmed();
+                extractionProgressBuffer.remove(0, newline + 1);
+                if (!line.startsWith("PROGRESS ")) continue;
+                bool ok = false;
+                const int units = line.mid(9).toInt(&ok);
+                if (ok) setPathBarProgress(qBound(0, units, 10000) / 10000.0, label);
+            }
+        });
+
+        // A failed or incomplete extraction must be visible to the user.
+        // Only remove a failed destination if it is empty; never delete any
+        // files that may already have been successfully extracted.
+        const auto complete = [this, process, outDir, fileName, label]
+                              (bool success, const QString &error) {
+            if (extractionProcess != process) return;
+            extractionProcess = nullptr;
+            extractionProgressBuffer.clear();
+            process->deleteLater();
+            if (success) setPathBarProgress(1.0, label);
+            resetPathBar();
+            const bool empty = QDir(outDir).entryList(
+                QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System).isEmpty();
+            if (!success && empty) QDir().rmdir(outDir);
+            listDirectory(currentPath);
+            if (!success) {
+                QString message = "Could not extract " + fileName + ".\n\n" +
+                    (error.trimmed().isEmpty() ? "The extraction process failed." : error.trimmed());
+                if (!empty)
+                    message += "\n\nSome files were extracted before the error. "
+                               "They have been left in:\n" + outDir;
+                QMessageBox::warning(this, "Extract archive", message);
+            }
+        };
+
+        connect(process, &QProcess::finished, this,
+                [process, complete](int code, QProcess::ExitStatus status) {
+            const bool ok = (status == QProcess::NormalExit && code == 0);
+            QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
+            if (!ok && error.isEmpty())
+                error = QString("Extractor exited with code %1.").arg(code);
+            complete(ok, error);
+        });
+        connect(process, &QProcess::errorOccurred, this,
+                [process, complete](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart)
+                complete(false, process->errorString());
+        });
+
+        extractBtn->setEnabled(false);
+        beginPathBarBusy(label);
+        process->start(python, QStringList()
+            << "-u" << "-c" << archiveExtractorScript()
+            << info.absoluteFilePath() << outDir << kind);
     }
 
     void showPropertiesDialog() {
