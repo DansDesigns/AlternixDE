@@ -2202,8 +2202,9 @@ except Exception as exc:
             }
         };
 
-        connect(process, &QProcess::finished, this,
-                [process, complete](int code, QProcess::ExitStatus status) {
+        connect(process,
+                static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+                this, [process, complete](int code, QProcess::ExitStatus status) {
             const bool ok = (status == QProcess::NormalExit && code == 0);
             QString error = QString::fromUtf8(process->readAllStandardError()).trimmed();
             if (!ok && error.isEmpty())
