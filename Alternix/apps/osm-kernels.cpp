@@ -11,7 +11,9 @@
 // Build:
 //   g++ -std=c++17 -Wall -Wextra -O2 -fPIC osm-kernels.cpp -o osm-kernels $(pkg-config --cflags --libs Qt5Widgets)
 //
-// Root actions run as:  sudo -A /bin/sh -c '<script>'   with SUDO_ASKPASS=osm-sudo
+// Root actions run through osm-sudo, which authenticates using osm-lock and then
+// launches commands via sudo -n. osm-sudo requires an appropriate sudoers policy;
+// the pattern is not a Unix password and is never passed to sudo as one.
 // Runtime needs: apt, dpkg, sudo, osm-sudo, curl or wget, sha256sum;
 //                gpg only when enabling the Liquorix/XanMod repos (installed on demand).
 
@@ -323,18 +325,19 @@ private:
         return QStringLiteral("wget -q -O %1 %2").arg(sq(out), sq(url));
     }
 
-    QProcessEnvironment *askpassEnv(QString *errOut)
+    QString osmSudoPath(QString *errOut) const
     {
-        static QProcessEnvironment env;
-        env = QProcessEnvironment::systemEnvironment();
-        QString ap = QStandardPaths::findExecutable(QStringLiteral("osm-sudo"));
-        if (ap.isEmpty()) ap = env.value(QStringLiteral("SUDO_ASKPASS"));
-        if (ap.isEmpty()) {
-            *errOut = QStringLiteral("osm-sudo was not found and SUDO_ASKPASS is not set, so administrator access cannot be requested.");
-            return nullptr;
-        }
-        env.insert(QStringLiteral("SUDO_ASKPASS"), ap);
-        return &env;
+        // osm-sudo accepts a COMMAND, not a sudo password prompt. Never invoke
+        // it as SUDO_ASKPASS or fall back to terminal password authentication.
+        QString path = QStandardPaths::findExecutable(QStringLiteral("osm-sudo"));
+        if (path.isEmpty())
+            path = QStandardPaths::findExecutable(QStringLiteral("osm-sudo"),
+                                                  {QStringLiteral("/usr/local/bin"),
+                                                   QStringLiteral("/usr/bin")});
+        if (path.isEmpty())
+            *errOut = QStringLiteral("osm-sudo is not installed or is not executable. "
+                                     "Administrator actions require the AlternixOS pattern authenticator.");
+        return path;
     }
 
     // ================================================================ UI
@@ -851,15 +854,15 @@ private:
     void runRoot(const QString &title, const QString &script, std::function<void(bool)> done = nullptr)
     {
         QString err;
-        QProcessEnvironment *env = askpassEnv(&err);
-        if (!env) { fail(err); return; }
+        const QString osmSudo = osmSudoPath(&err);
+        if (osmSudo.isEmpty()) { fail(err); return; }
 
         showLog(true);
         m_log->appendPlainText(QStringLiteral("\n=== ") + title + QStringLiteral(" ==="));
         setBusy(true, title + QStringLiteral("…"));
 
         auto *p = new QProcess(this);
-        QProcessEnvironment e = *env;
+        QProcessEnvironment e = QProcessEnvironment::systemEnvironment();
         e.insert(QStringLiteral("LC_ALL"), QStringLiteral("C"));
         p->setProcessEnvironment(e);
         p->setProcessChannelMode(QProcess::MergedChannels);
@@ -873,10 +876,23 @@ private:
         auto finish = [this, p, title, done, output, fired](int code) {
             if (*fired) return;
             *fired = true;
+            // Include any last output from osm-sudo/sudo before reporting the result.
+            const QString remaining = QString::fromUtf8(p->readAllStandardOutput());
+            if (!remaining.isEmpty()) { output->append(remaining); log(remaining); }
             setBusy(false);
             const bool ok = code == 0;
             if (!ok) {
-                banner(QStringLiteral("error"), title + QStringLiteral(" failed (exit code %1). The log below shows what went wrong.").arg(code));
+                const bool sudoDenied =
+                    output->contains(QLatin1String("a password is required"), Qt::CaseInsensitive) ||
+                    output->contains(QLatin1String("not in the sudoers"), Qt::CaseInsensitive) ||
+                    output->contains(QLatin1String("not allowed to execute"), Qt::CaseInsensitive);
+                if (sudoDenied)
+                    banner(QStringLiteral("error"), title + QStringLiteral(
+                        " was refused by sudo after pattern authentication. "
+                        "osm-sudo cannot turn a pattern into a Unix password: "
+                        "AlternixOS must authorise this privileged operation. See the log below."));
+                else
+                    banner(QStringLiteral("error"), title + QStringLiteral(" failed (exit code %1). The log below shows what went wrong.").arg(code));
                 log(QStringLiteral("ERROR: ") + title + QStringLiteral(" failed with exit code %1").arg(code));
             } else if (output->contains(QLatin1String("WARNING:"))) {
                 QString w;
@@ -893,12 +909,12 @@ private:
                 [finish](int code, QProcess::ExitStatus st) { finish(st == QProcess::NormalExit ? code : -1); });
         connect(p, &QProcess::errorOccurred, this, [finish, this](QProcess::ProcessError err) {
             if (err == QProcess::FailedToStart) {
-                log(QStringLiteral("ERROR: sudo could not be started (is it installed?)"));
+                log(QStringLiteral("ERROR: osm-sudo could not be started (is it installed and executable?)"));
                 finish(-1);
             }
         });
         const QString full = QStringLiteral("set -eu\nexport DEBIAN_FRONTEND=noninteractive\n") + script;
-        p->start(QStringLiteral("sudo"), {"-A", "--", "/bin/sh", "-c", full});
+        p->start(osmSudo, {QStringLiteral("/bin/sh"), QStringLiteral("-c"), full});
     }
 
     QTreeWidgetItem *selected(const Page &p)
@@ -1193,15 +1209,15 @@ private:
         if (f.open(QIODevice::ReadOnly)) { proceed(QString::fromUtf8(f.readAll())); return; }
 
         QString err;
-        QProcessEnvironment *env = askpassEnv(&err);
-        if (!env) { fail(err); return; }
+        const QString osmSudo = osmSudoPath(&err);
+        if (osmSudo.isEmpty()) { fail(err); return; }
         setBusy(true, QStringLiteral("Reading GRUB menu…"));
-        runAsync(QStringLiteral("sudo"), {"-A", "--", "cat", cfgPath},
+        runAsync(osmSudo, {QStringLiteral("cat"), cfgPath},
                  [this, proceed, cfgPath](int code, const QString &out, const QString &e) {
             setBusy(false);
             if (code != 0) { fail(QStringLiteral("Could not read %1: %2").arg(cfgPath, e.trimmed())); return; }
             proceed(out);
-        }, env);
+        });
     }
 
     void resetDefault()
