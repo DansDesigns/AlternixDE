@@ -29,6 +29,38 @@ if [ ! -d "$ALT_ROOT" ]; then
     exit 1
 fi
 
+# This script runs both for the ISO's prebuilt preview and for normal
+# installations. The prebuilt image cannot enrol a unique pattern/PIN while
+# running non-interactively inside live-build's chroot.
+ALT_IS_LIVE_BUILD=0
+if [ "${ALTERNIX_ISO_PREBUILD:-0}" = 1 ] || [ -e /etc/debian_chroot ]; then
+    ALT_IS_LIVE_BUILD=1
+elif [ -e /proc/1/root ]; then
+    # live-build bind-mounts /proc into its chroot. PID 1 belongs to the
+    # build host, whose root has a different device/inode than this chroot.
+    # /etc/debian_chroot is not guaranteed to survive every build hook.
+    ALT_PID1_ROOT="$(stat -Lc '%d:%i' /proc/1/root 2>/dev/null || true)"
+    ALT_CURRENT_ROOT="$(stat -Lc '%d:%i' / 2>/dev/null || true)"
+    if [ -n "$ALT_PID1_ROOT" ] && [ -n "$ALT_CURRENT_ROOT" ] && \
+       [ "$ALT_PID1_ROOT" != "$ALT_CURRENT_ROOT" ]; then
+        ALT_IS_LIVE_BUILD=1
+    fi
+fi
+
+# Detect an incomplete Git checkout before any costly package installation.
+# The ISO hook clones AlternixDE anew: files that only exist in a local working
+# tree are NOT available to it until they are committed and pushed.
+for auth_source in \
+    "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" \
+    "$ALT_ROOT/Alternix/apps/alternix-auth.c" \
+    "$ALT_ROOT/Alternix/apps/osm-lock.cpp"; do
+    if [ ! -f "$auth_source" ]; then
+        echo "ERROR: Required Alternix authentication source is missing: $auth_source" >&2
+        echo "Add the source to the AlternixDE repository and push it before rebuilding the ISO." >&2
+        exit 1
+    fi
+done
+
 # Ask for username
 while true; do
     read -rp "Enter the username for Alternix: " TARGET_USER
@@ -68,8 +100,12 @@ sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
 # Fail closed: if this installer aborts, never leave its temporary
 # passwordless rule active on a partly-installed system.
 ALT_TEMP_NP_ACTIVE=1
+ALT_AUTH_STAGE=""
 alternix_installer_exit_cleanup() {
     local code=$?
+    if [ -n "${ALT_AUTH_STAGE:-}" ] && [ -d "$ALT_AUTH_STAGE" ]; then
+        /usr/bin/sudo /bin/rm -rf -- "$ALT_AUTH_STAGE" || true
+    fi
     if [ "$ALT_TEMP_NP_ACTIVE" = 1 ]; then
         /usr/bin/sudo /bin/rm -f /etc/sudoers.d/alternix-nopasswd || true
     fi
@@ -1497,6 +1533,23 @@ sudo usermod -aG video,input "$TARGET_USER"
 # ────────────────────────────────────────────────
 
 echo " "
+# The source checkout is deliberately deleted here and replaced with a
+# user-owned directory for third-party applications. Authentication is enabled
+# only at the END of the installation, so retain the three source files in a
+# private, root-owned staging directory before removing the checkout.
+# Do not activate graphical authentication inside a live-build chroot.
+if [ "$ALT_IS_LIVE_BUILD" != 1 ]; then
+    echo "[Security] Preserving authentication sources before checkout cleanup..."
+    ALT_AUTH_STAGE="$(sudo mktemp -d /var/tmp/alternix-auth.XXXXXXXX)"
+    sudo chmod 0700 "$ALT_AUTH_STAGE"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$ALT_AUTH_STAGE/alternix-auth-setup.sh"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/alternix-auth.c" "$ALT_AUTH_STAGE/alternix-auth.c"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/osm-lock.cpp" "$ALT_AUTH_STAGE/osm-lock.cpp"
+fi
+
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
 # Never remove the directory from which this shell is currently running.
 cd /
@@ -1749,11 +1802,32 @@ if ! command -v nala >/dev/null 2>&1 || ! nala --version >/dev/null 2>&1; then
 fi
 
 # Activate sudo PAM only after every other installation step succeeds.
-# Install the authenticated verifier, migrate any existing pattern, and
-# revoke installation-only NOPASSWD permission before the installed OS boots.
-echo "[Security] Activating Alternix graphical sudo authentication..."
-sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$TARGET_USER" "$ALT_ROOT/Alternix/apps"
-ALT_TEMP_NP_ACTIVE=0
+# A live-build chroot has no interactive user and must NOT enrol a shared,
+# factory-set administrator pattern. Installed systems enrol their own pattern.
+# Never retain the temporary NOPASSWD: ALL rule in the finished live image.
+if [ "$ALT_IS_LIVE_BUILD" = 1 ]; then
+    echo "[Security] ISO prebuild: deferring interactive pattern/PIN enrolment."
+    echo "[Security] Retaining standard sudo/PAM until installed-system setup."
+    sudo rm -f /etc/sudoers.d/alternix-nopasswd
+    ALT_TEMP_NP_ACTIVE=0
+else
+    echo "[Security] Activating Alternix graphical sudo authentication..."
+    if [ -z "$ALT_AUTH_STAGE" ]; then
+        echo "ERROR: Authentication sources were not staged before checkout cleanup." >&2
+        exit 1
+    fi
+    # Keep the staging directory private (0700, root-owned) until setup exits.
+    # A root shell performs cleanup even after PAM has been activated, so no
+    # second graphical sudo prompt is required just to delete the stage.
+    sudo bash -c '
+        stage="$1"; login_user="$2"
+        cleanup_auth_stage() { rm -rf -- "$stage"; }
+        trap cleanup_auth_stage EXIT
+        bash "$stage/alternix-auth-setup.sh" "$login_user" "$stage"
+    ' _ "$ALT_AUTH_STAGE" "$TARGET_USER"
+    ALT_AUTH_STAGE=""
+    ALT_TEMP_NP_ACTIVE=0
+fi
 
 # ────────────────────────────────────────────────
 # Finish + prompt
