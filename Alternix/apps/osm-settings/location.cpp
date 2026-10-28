@@ -347,10 +347,10 @@ static QString runTimeHelper(const QString &action, const QString &argument,
     }
 
     if (!clockHelperAuthorised(helper)) {
-        return "Clock permission is not configured for this installed user. "
-               "The root-owned clock helper must be authorised through "
-               "/etc/sudoers.d/zz-alternix-time (NOPASSWD for this helper). "
-               "An osm-sudo pattern cannot supply a Unix sudo password. "
+        return "The installed user cannot run the clock helper as root with sudo -n. "
+               "This is a sudo authorisation failure, not an RTC or group detection result. "
+               "The installer must verify /etc/sudoers.d/zz-alternix-time "
+               "for the account actually running osm-settings. "
                "No clock command was attempted.";
     }
 
@@ -2240,6 +2240,22 @@ private:
             return false;
         }
 
+        // Chrony is already synchronising the clock in the background.
+        // Merely checking its status never needs root or an osm-sudo pattern.
+        // In particular, do not attempt the privileged helper for a clock
+        // that Chrony reports as synchronised: this is not a forced sync button.
+        const QString tracking = QString::fromLocal8Bit(probe.readAllStandardOutput());
+        if (tracking.contains(QRegularExpression(
+                "Leap status\\s*:\\s*Normal", QRegularExpression::CaseInsensitiveOption))) {
+            setTimeStatus("Clock already synchronised by Chrony. "
+                          "Automatic corrections are active; no manual clock change needed.",
+                          "#7CFC00");
+            timeHealthAge.invalidate();
+            updateClock();
+            return true;
+        }
+
+        // Only an unsynchronised Chrony needs a privileged intervention.
         bool reached = false;
         QString out;
         runWithSpinner(syncTimeButton, "Sync now", [&]() {
