@@ -21,21 +21,16 @@ update_exit_status() {
 }
 trap update_exit_status EXIT
 
-if [ ! -x /usr/local/bin/osm-sudo ]; then
-    echo "ERROR: /usr/local/bin/osm-sudo is missing or not executable." >&2
-    exit 1
-fi
 if ! command -v nala >/dev/null 2>&1; then
     echo "ERROR: Nala is not installed. System Update requires the nala package." >&2
     exit 1
 fi
 
-# The pattern prompt is only shown once. osm-sudo also verifies that the
-# installed sudo policy allows the requested command without a second prompt.
-echo "Authenticating with osm-sudo..."
-if ! /usr/local/bin/osm-sudo /usr/bin/true; then
-    echo "ERROR: Pattern authentication failed, or sudo -n denied access." >&2
-    echo "Check the system's existing sudo permissions; no permission changes were made." >&2
+# Ask sudo once. PAM displays the Alternix pattern/PIN window.
+# Further sudo operations can use sudo's normal per-session credential cache.
+echo "Authenticating with Alternix..."
+if ! /usr/bin/sudo -v; then
+    echo "ERROR: System authentication failed or elevation was denied." >&2
     exit 1
 fi
 
@@ -51,14 +46,14 @@ echo "       Current Version: $LOCAL_VERSION"
 echo "=============================================="
 echo "Checking for Linux System Updates..."
 echo " "
-if ! sudo -n nala update; then
+if ! sudo nala update; then
     echo "ERROR: Nala could not refresh the system package lists." >&2
     exit 1
 fi
 echo " "
 echo "Applying Upgrades…"
 echo " "
-if ! sudo -n nala upgrade -y; then
+if ! sudo nala upgrade -y; then
     echo "ERROR: Nala failed to upgrade the system packages." >&2
     exit 1
 fi
@@ -194,7 +189,7 @@ while true; do
                 sleep 1
                 echo "1.."
                 sleep 1
-                sudo -n reboot
+                sudo reboot
                 break
             elif [[ "$KEY" == "2" ]]; then
                 echo ""

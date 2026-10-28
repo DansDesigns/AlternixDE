@@ -35,6 +35,9 @@ test with:
 #include <QCloseEvent>
 #include <QKeyEvent>
 #include <QWindow>
+#include <QProcess>
+#include <QFileInfo>
+#include <unistd.h>
 
 struct ShapeItem {
     QString shape;
@@ -51,6 +54,8 @@ class LockScreen : public QWidget {
     QVector<QString> patternHash;
     QString passwordHash;
     bool enhancedSecurity = false;
+    bool secureAuth = false;
+    bool pamPrompt = false;
 
     QVector<QString> currentSeq;
     int attemptCount = 0;
@@ -64,6 +69,7 @@ class LockScreen : public QWidget {
     QLabel *titleLabel = nullptr;
     QPushButton *securityToggle = nullptr;
     QPushButton *cancelButton = nullptr;
+    QPushButton *pinButton = nullptr;
     QWidget *pinWidget = nullptr;
 
     bool firstRun = false;
@@ -71,6 +77,7 @@ class LockScreen : public QWidget {
 
 public:
     LockScreen() {
+        pamPrompt = QCoreApplication::arguments().contains(QStringLiteral("--pam-prompt"));
         setWindowTitle("OSM Lock");
         setWindowFlag(Qt::FramelessWindowHint);
         setWindowState(Qt::WindowFullScreen);
@@ -106,11 +113,29 @@ public:
             "QPushButton:hover { color:#ffaaaa; }");
         connect(cancelButton, &QPushButton::clicked, this, &LockScreen::cancelEntry);
 
+        if (pamPrompt) {
+            pinButton = new QPushButton("Use Fallback PIN", this);
+            pinButton->setFlat(true);
+            pinButton->setStyleSheet(
+                "QPushButton { background:transparent; color:white; font-size:16px; } "
+                "QPushButton:hover { color:#bbbbbb; }");
+            connect(pinButton, &QPushButton::clicked, this, [this]() {
+                if (firstRun) return;
+                pinModeActive = true;
+                pinSetupMode = false;
+                pinInput.clear();
+                titleLabel->setText("Enter Fallback PIN");
+                buildPinPad();
+                update();
+            });
+        }
+
         loadConfig();
+        if (pinButton) pinButton->setVisible(!firstRun);
 
         // Cancel only makes sense once a lock method already exists —
         // during first-run setup you have to finish creating one.
-        cancelButton->setVisible(!firstRun);
+        cancelButton->setVisible(!firstRun || secureAuth);
 
         // toggle visibility logic
         if (firstRun) {
@@ -125,7 +150,9 @@ public:
             }
         }
 
-        if (firstRun)
+        if (firstRun && secureAuth)
+            titleLabel->setText("Pattern not enrolled. Run Alternix installer as root.");
+        else if (firstRun)
             titleLabel->setText("Please select your pattern of shapes");
         else
             titleLabel->setText("Enter your pattern");
@@ -155,6 +182,8 @@ protected:
         securityToggle->setGeometry(10, 5, 220, 30);
         if (cancelButton)
             cancelButton->setGeometry(width() - 130, 5, 120, 30);
+        if (pinButton)
+            pinButton->setGeometry((width() - 210) / 2, 5, 210, 30);
 
     // estimate grid area (lower half of screen)
         int gridTop = height() * 0.5;  // start of grid roughly mid-screen
@@ -320,7 +349,51 @@ protected:
 
 private:
     // ---------- CONFIG ----------
+    static QString authPath() { return "/usr/local/libexec/alternix-auth"; }
+
+    bool authOperation(const QString &action, const QByteArray &payload = QByteArray()) {
+        QProcess p;
+        p.start(authPath(), {action});
+        if (!p.waitForStarted(3000)) return false;
+        if (!payload.isEmpty()) {
+            if (p.write(payload) != payload.size()) { p.kill(); p.waitForFinished(500); return false; }
+        }
+        p.closeWriteChannel();
+        if (!p.waitForFinished(10000)) { p.kill(); p.waitForFinished(500); return false; }
+        return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+    }
+
+    bool submitPam(const QByteArray &payload) {
+        if (!pamPrompt || payload.size() > 900) return false;
+        const QByteArray message = payload + "\n";
+        const ssize_t written = ::write(3, message.constData(), size_t(message.size()));
+        if (written != message.size()) { qApp->exit(1); return false; }
+        qApp->exit(0);
+        return true;
+    }
+
     void loadConfig() {
+        secureAuth = QFileInfo(authPath()).isExecutable();
+        if (secureAuth) {
+            QProcess status;
+            status.start(authPath(), {"--status"});
+            if (!status.waitForStarted(2000) || !status.waitForFinished(3000)) {
+                firstRun = true;
+                titleLabel->setText("Alternix authentication unavailable");
+                return;
+            }
+            QByteArray result = status.readAllStandardOutput().trimmed();
+            if (result == "READY:0" || result == "READY:1") {
+                firstRun = false;
+                enhancedSecurity = (result == "READY:1");
+            } else {
+                firstRun = true;
+                enhancedSecurity = false;
+            }
+            updateSecurityToggleStyle();
+            if (pamPrompt && firstRun) QTimer::singleShot(0, qApp, [](){ qApp->exit(1); });
+            return;
+        }
         QString cfg = QDir::homePath() + "/.config/Alternix/.osm_lockdata";
         QFile file(cfg);
         if (!file.exists()) {
@@ -349,7 +422,16 @@ private:
         }
     }
 
-    void saveConfig() {
+    bool saveConfig() {
+        if (secureAuth) {
+            const QString pattern = QStringList::fromVector(currentSeq).join(",");
+            const QByteArray payload = ("P:" + pattern + "\nI:" + passwordHash +
+                                        "\nE:" + (enhancedSecurity ? "1" : "0") + "\n").toLatin1();
+            // New sudo patterns are enrolled only by the privileged installer.
+            // No unprivileged process may create a new root credential.
+            Q_UNUSED(payload);
+            return false;
+        }
         QString path = QDir::homePath() + "/.config/Alternix/.osm_lockdata";
         QFile f(path);
         if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -359,10 +441,13 @@ private:
             out << "password=" << passwordHash << "\n";
             out << "enhanced=" << (enhancedSecurity ? "1" : "0") << "\n";
             f.close();
+            return true;
         }
+        return false;
     }
 
     void saveConfigEnhancedOnly() {
+        if (secureAuth) return;
         QString path = QDir::homePath() + "/.config/Alternix/.osm_lockdata";
         QFile f(path);
         if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
@@ -529,8 +614,8 @@ private:
                 if (pinInput == pinSetupFirst) {
                     passwordHash = sha256(pinInput);
                     patternHash = currentSeq;
-                    saveConfig();
-                    qApp->quit();
+                    if (saveConfig()) qApp->quit();
+                    else { titleLabel->setText("Could not securely save your pattern/PIN"); pinInput.clear(); update(); }
                 } else {
                     pinInput.clear();
                     pinSetupFirst.clear();
@@ -540,13 +625,23 @@ private:
                 }
             }
         } else {
-            if (sha256(pinInput) == passwordHash) qApp->quit();
+            const QString hash = sha256(pinInput);
+            if (pamPrompt) { submitPam(("I:" + hash).toLatin1()); return; }
+            bool valid = secureAuth ? authOperation("--verify", ("I:" + hash + "\n").toLatin1())
+                                    : (hash == passwordHash);
+            if (valid) qApp->quit();
             else { pinInput.clear(); update(); }
         }
     }
 
     void verifyPattern() {
-        bool ok = (currentSeq == patternHash);
+        if (pamPrompt) {
+            submitPam(("P:" + QStringList::fromVector(currentSeq).join(",")).toLatin1());
+            return;
+        }
+        bool ok = secureAuth
+                ? authOperation("--verify", ("P:" + QStringList::fromVector(currentSeq).join(",") + "\n").toLatin1())
+                : (currentSeq == patternHash);
         if (ok) qApp->quit();
         else {
             attemptCount++;
@@ -571,7 +666,7 @@ private:
     // like a failed attempt: it slides the lock screen back down instead
     // of unlocking.
     void cancelEntry() {
-        if (firstRun) return;
+        if (firstRun && !secureAuth) return;
         qApp->exit(1);
     }
 };
@@ -588,7 +683,8 @@ int main(int argc, char *argv[]) {
     // Bypassing the window manager, as osm-lockscreen itself does, puts
     // it on screen straight away and above the lockscreen. Typed PINs
     // still arrive through the keyboard grab in the constructor.
-    if (app.arguments().contains(QStringLiteral("--auth"))) {
+    if (app.arguments().contains(QStringLiteral("--auth")) ||
+        app.arguments().contains(QStringLiteral("--pam-prompt"))) {
         lock.setWindowFlags(lock.windowFlags()
                             | Qt::BypassWindowManagerHint
                             | Qt::WindowStaysOnTopHint);

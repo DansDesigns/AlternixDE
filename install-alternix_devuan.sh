@@ -62,9 +62,20 @@ fi
 # this, the sudo credential cache expires mid-script (default 15 min) and
 # a later sudo call fails silently under `set -e`, aborting the install
 # partway through with no clear error.
-echo "Setting NOPASSWD for $TARGET_USER..."
+echo "Setting temporary installation-only sudo permissions for $TARGET_USER..."
 echo "$TARGET_USER ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/alternix-nopasswd >/dev/null
 sudo chmod 440 /etc/sudoers.d/alternix-nopasswd
+# Fail closed: if this installer aborts, never leave its temporary
+# passwordless rule active on a partly-installed system.
+ALT_TEMP_NP_ACTIVE=1
+alternix_installer_exit_cleanup() {
+    local code=$?
+    if [ "$ALT_TEMP_NP_ACTIVE" = 1 ]; then
+        /usr/bin/sudo /bin/rm -f /etc/sudoers.d/alternix-nopasswd || true
+    fi
+    return "$code"
+}
+trap alternix_installer_exit_cleanup EXIT
 
 echo ""
 # Always use the selected account's actual home for user configuration,
@@ -146,7 +157,7 @@ echo "[System] Nala installed and verified: $(nala --version)"
 
 echo "[System] Installing Required Components.."
 sudo apt install -y \
-    build-essential git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
+    build-essential libssl-dev git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
     python3-venv qtile python3-cffi python3-xcffib picom redshift onboard fake-hwclock libcamera-ipa\
@@ -601,34 +612,14 @@ esac
 ALT_TIME_HELPER_CONTENT
 sudo chown root:root /usr/local/sbin/alternix-time-helper
 sudo chmod 0755 /usr/local/sbin/alternix-time-helper
-ALT_TIME_SUDOERS_TMP="$(mktemp)"
-printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/alternix-time-helper\n' "$TARGET_USER" > "$ALT_TIME_SUDOERS_TMP"
-if sudo visudo -cf "$ALT_TIME_SUDOERS_TMP" >/dev/null; then
-    sudo install -o root -g root -m 0440 "$ALT_TIME_SUDOERS_TMP" /etc/sudoers.d/zz-alternix-time
-else
-    rm -f "$ALT_TIME_SUDOERS_TMP"
-    echo "ERROR: Invalid clock helper sudoers rule. Aborting." >&2
+# No NOPASSWD clock exception: all administrative actions now use
+# sudo's standard PAM pattern/PIN prompt. Existing exceptions are removed
+# at the end of installation by alternix-auth-setup.sh.
+if ! sudo test -x /usr/local/sbin/alternix-time-helper; then
+    echo "ERROR: Alternix clock helper is missing or not executable." >&2
     exit 1
 fi
-rm -f "$ALT_TIME_SUDOERS_TMP"
-
-# Confirm the clock helper can actually be run by the installed desktop user.
-# A valid sudoers file alone does not prove that the effective rule works.
-if ! sudo visudo -c -q; then
-    echo "ERROR: Installed sudoers configuration is invalid; clock helper access cannot be verified." >&2
-    exit 1
-fi
-ALT_CLOCK_CHECK="$(sudo -u "$TARGET_USER" -H /usr/bin/sudo -n -- /usr/local/sbin/alternix-time-helper status 2>&1)" || {
-    echo "ERROR: Clock helper denied for installed user '$TARGET_USER'." >&2
-    echo "$ALT_CLOCK_CHECK" >&2
-    echo "Check /etc/sudoers.d/zz-alternix-time and the effective sudoers rule order." >&2
-    exit 1
-}
-if [ "$ALT_CLOCK_CHECK" != "TIME_HELPER_READY" ]; then
-    echo "ERROR: Clock helper returned an unexpected status: $ALT_CLOCK_CHECK" >&2
-    exit 1
-fi
-echo "[Time] Clock helper permissions verified for $TARGET_USER."
+echo "[Time] Clock helper installed (PAM authentication applies)."
 
 echo ""
 echo "[System] Installing Qtile, Qtile-Extras & mypy"
@@ -1757,6 +1748,13 @@ if ! command -v nala >/dev/null 2>&1 || ! nala --version >/dev/null 2>&1; then
     fi
 fi
 
+# Activate sudo PAM only after every other installation step succeeds.
+# Install the authenticated verifier, migrate any existing pattern, and
+# revoke installation-only NOPASSWD permission before the installed OS boots.
+echo "[Security] Activating Alternix graphical sudo authentication..."
+sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$TARGET_USER" "$ALT_ROOT/Alternix/apps"
+ALT_TEMP_NP_ACTIVE=0
+
 # ────────────────────────────────────────────────
 # Finish + prompt
 # ────────────────────────────────────────────────
@@ -1794,7 +1792,13 @@ while true; do
         sleep 1; echo "2.."
         sleep 1; echo "1.."
         sleep 1
-        sudo reboot
+        if (( EUID == 0 )); then
+            reboot
+        elif command -v loginctl >/dev/null 2>&1; then
+            loginctl reboot || echo "Please reboot from the System Power menu."
+        else
+            echo "Please reboot from the System Power menu."
+        fi
         break
     elif [[ "$KEY" == "2" ]]; then
         echo ""

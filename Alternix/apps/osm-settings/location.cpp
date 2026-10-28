@@ -296,88 +296,37 @@ static bool g_serialGpsEnabled = true;    // Location/serial_gps_enabled
 // ---------------------------------------------------------
 // Privileged clock operations
 //
-// Alternix's osm-sudo authenticates with osm-lock --auth, then invokes sudo.
-// It DOES NOT provide a Unix sudo password. A root-owned helper with a
-// restricted sudoers rule is needed so the pattern is the only prompt.
-// NEVER send user-controlled shell commands to this helper.
+// System sudo handles authentication through its PAM service. Applications
+// must not probe sudo -n or implement a second password dialog.
 // ---------------------------------------------------------
-static QString osmSudoPath()
-{
-    const QStringList candidates = {
-        "/usr/local/bin/osm-sudo", "/usr/bin/osm-sudo", "/usr/lib/alternix/osm-sudo"
-    };
-    for (const QString &candidate : candidates) {
-        QFileInfo f(candidate);
-        if (f.isFile() && f.isExecutable()) return candidate;
-    }
-    return QStandardPaths::findExecutable("osm-sudo");
-}
-
-// The pattern prompt authenticates the person, but does not give the process
-// root privileges. Check the fixed-helper sudo rule BEFORE showing a pattern;
-// otherwise a perfectly valid pattern is followed by a failed sudo password
-// prompt. This probe never asks for a password or changes the clock.
-static bool clockHelperAuthorised(const QString &helper)
-{
-    if (::geteuid() == 0) return true;
-    QProcess probe;
-    probe.setStandardInputFile(QProcess::nullDevice());
-    probe.start("/usr/bin/sudo", {"-n", "--", helper, "status"}, QIODevice::ReadOnly);
-    if (!probe.waitForStarted(1500)) return false;
-    if (!probe.waitForFinished(3000)) {
-        probe.kill();
-        probe.waitForFinished(500);
-        return false;
-    }
-    return probe.exitStatus() == QProcess::NormalExit &&
-           probe.exitCode() == 0 &&
-           QString::fromLocal8Bit(probe.readAllStandardOutput())
-               .contains("TIME_HELPER_READY");
-}
-
 static QString runTimeHelper(const QString &action, const QString &argument,
                              const QString &marker, int timeoutMs, bool *reached)
 {
     if (reached) *reached = false;
     const QString helper = "/usr/local/sbin/alternix-time-helper";
-    if (!QFileInfo(helper).isExecutable()) {
-        return "The Alternix clock helper is not installed on this system. "
-               "Updating the installer or source repository does not install "
-               "the helper on an existing AlternixOS installation.";
-    }
+    if (!QFileInfo(helper).isExecutable())
+        return "The Alternix clock helper is not installed on this system.";
 
-    if (!clockHelperAuthorised(helper)) {
-        return "The installed user cannot run the clock helper as root with sudo -n. "
-               "This is a sudo authorisation failure, not an RTC or group detection result. "
-               "The installer must verify /etc/sudoers.d/zz-alternix-time "
-               "for the account actually running osm-settings. "
-               "No clock command was attempted.";
-    }
-
-    QStringList args = {helper, action};
+    QStringList args = {"--", helper, action};
     if (!argument.isEmpty()) args << argument;
-    QString program;
+    QString program = "/usr/bin/sudo";
     if (::geteuid() == 0) {
         program = helper;
         args.removeFirst();
-    } else {
-        // Exactly ONE graphical authentication; never use SUDO_ASKPASS.
-        program = osmSudoPath();
-        if (program.isEmpty())
-            return "osm-sudo is missing or cannot be executed.";
+        args.removeFirst();
     }
 
     QProcess process;
-    // Never allow a nested sudo -S in an older installed osm-sudo wrapper
-    // to read a terminal/Unix password. stderr remains private on failure.
     process.setStandardInputFile(QProcess::nullDevice());
     process.start(program, args, QIODevice::ReadOnly);
-    if (!process.waitForStarted(1500))
-        return "The Alternix graphical clock action could not start.";
+    if (!process.waitForStarted(2000))
+        return "The Alternix clock action could not start.";
+    // The operation timeout is separate from the user's time entering a pattern.
+    const int totalTimeoutMs = timeoutMs + (::geteuid() == 0 ? 0 : 120000);
     QElapsedTimer timer;
     timer.start();
     while (!process.waitForFinished(80)) {
-        if (timer.elapsed() > timeoutMs) {
+        if (timer.elapsed() > totalTimeoutMs) {
             process.kill();
             process.waitForFinished(500);
             return "The clock action timed out.";
@@ -385,18 +334,14 @@ static QString runTimeHelper(const QString &action, const QString &argument,
         if (g_locTick) g_locTick();
         QCoreApplication::processEvents();
     }
-
     const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
-    // Only helper output with the expected marker is passed to the UI.
-    // sudo's CLI prompts/errors are never copied into the page or dialog.
-    if (output.contains(marker)) {
+    if (process.exitStatus() == QProcess::NormalExit &&
+        process.exitCode() == 0 && output.contains(marker)) {
         if (reached) *reached = true;
         return output.trimmed();
     }
-    return "The clock helper did not run after osm-sudo authentication. "
-           "Check that the INSTALLED /usr/local/bin/osm-sudo is the corrected "
-           "version using sudo -n (not sudo -S), and that the clock helper "
-           "is still authorised. No Unix password should be requested.";
+    return "Clock action was cancelled, denied by sudo/PAM, or failed. "
+           "Check Alternix authentication and the clock helper permissions.";
 }
 
 // ---------------------------------------------------------

@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # Root of the Alternix repo
 ALT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
@@ -34,7 +33,28 @@ echo "[Config] Updating Grub Entry.."
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
-sudo nala install fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez
+# Do not accidentally reinstall an outdated Location module. The updater
+# compiles the repository's location.cpp, not a copy bundled in this script.
+# Older versions contained the misleading clock-permission error and would
+# overwrite the corrected module even if the time helper is authorised.
+ALT_LOCATION_SOURCE="$ALT_ROOT/Alternix/apps/osm-settings/location.cpp"
+if [ ! -f "$ALT_LOCATION_SOURCE" ] || \
+   ! grep -Fq 'Clock already synchronised by Chrony' "$ALT_LOCATION_SOURCE" || \
+   ! grep -Fq 'System sudo handles authentication through its PAM service' "$ALT_LOCATION_SOURCE"; then
+    echo "ERROR: The repository does not contain the corrected location.cpp." >&2
+    echo "Install the corrected source at Alternix/apps/osm-settings/location.cpp" >&2
+    echo "before updating, or the old clock-permission failure will return." >&2
+    exit 1
+fi
+
+# The normal sudo PAM mechanism handles all privilege elevation.
+# No direct -n probe and no bypassing credential requests.
+if ! /usr/bin/sudo -v; then
+    echo "ERROR: Alternix sudo authentication failed or access was denied." >&2
+    exit 1
+fi
+
+sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez
 
 # The updater may be started either as the desktop user or via sudo.
 # The helper rule must belong to the actual desktop login, never root.
@@ -412,34 +432,14 @@ esac
 ALT_TIME_HELPER_CONTENT
 sudo chown root:root /usr/local/sbin/alternix-time-helper
 sudo chmod 0755 /usr/local/sbin/alternix-time-helper
-ALT_TIME_SUDOERS_TMP="$(mktemp)"
-printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/alternix-time-helper\n' "$ALT_TIME_USER" > "$ALT_TIME_SUDOERS_TMP"
-if sudo visudo -cf "$ALT_TIME_SUDOERS_TMP" >/dev/null; then
-    sudo install -o root -g root -m 0440 "$ALT_TIME_SUDOERS_TMP" /etc/sudoers.d/zz-alternix-time
-else
-    rm -f "$ALT_TIME_SUDOERS_TMP"
-    echo "ERROR: Invalid clock helper sudoers rule. Aborting." >&2
+# No NOPASSWD clock exception: all administrative actions now use
+# sudo's standard PAM pattern/PIN prompt. Existing exceptions are removed
+# at the end of installation by alternix-auth-setup.sh.
+if ! sudo test -x /usr/local/sbin/alternix-time-helper; then
+    echo "ERROR: Alternix clock helper is missing or not executable." >&2
     exit 1
 fi
-rm -f "$ALT_TIME_SUDOERS_TMP"
-
-# Confirm the clock helper can actually be run by the installed desktop user.
-# A valid sudoers file alone does not prove that the effective rule works.
-if ! sudo visudo -c -q; then
-    echo "ERROR: Installed sudoers configuration is invalid; clock helper access cannot be verified." >&2
-    exit 1
-fi
-ALT_CLOCK_CHECK="$(sudo -u "$ALT_TIME_USER" -H /usr/bin/sudo -n -- /usr/local/sbin/alternix-time-helper status 2>&1)" || {
-    echo "ERROR: Clock helper denied for installed user '$ALT_TIME_USER'." >&2
-    echo "$ALT_CLOCK_CHECK" >&2
-    echo "Check /etc/sudoers.d/zz-alternix-time and the effective sudoers rule order." >&2
-    exit 1
-}
-if [ "$ALT_CLOCK_CHECK" != "TIME_HELPER_READY" ]; then
-    echo "ERROR: Clock helper returned an unexpected status: $ALT_CLOCK_CHECK" >&2
-    exit 1
-fi
-echo "[Time] Clock helper permissions verified for $ALT_TIME_USER."
+echo "[Time] Clock helper installed (PAM authentication applies)."
 
 
 #echo "[Config] Installing updated configs..."
@@ -580,10 +580,17 @@ g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widget
 sudo install -m755 system.so /usr/local/bin/
 
 # Update Location alongside the clock helper so existing installations use
-# the same helper-based clock actions as fresh installations.
+# the same helper-based clock actions as fresh installations. Never deploy an
+# old/stale location.so if this compilation fails.
 echo "• Building location.so..."
-g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo install -m755 location.so /usr/local/bin/
+if ! g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
+    echo "ERROR: Could not compile location.cpp. Existing installed location.so was left unchanged." >&2
+    exit 1
+fi
+if ! sudo install -m755 location.so /usr/local/bin/location.so; then
+    echo "ERROR: Could not install the newly built location.so." >&2
+    exit 1
+fi
 
 
 cd "$ALT_ROOT/Alternix"
@@ -806,6 +813,11 @@ echo " "
 echo " "
 echo " "
 echo " "
+# Commit the sudo authentication policy as the LAST privileged operation.
+# This also installs the protected verifier and new osm-lock executable.
+echo "[Security] Activating Alternix sudo PAM authentication..."
+sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$ALT_TIME_USER" "$ALT_ROOT/Alternix/apps"
+
 echo "=============================================="
 echo "         Alternix Update Complete!"
 echo "=============================================="
