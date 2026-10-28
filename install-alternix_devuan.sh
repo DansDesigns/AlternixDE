@@ -612,6 +612,24 @@ else
 fi
 rm -f "$ALT_TIME_SUDOERS_TMP"
 
+# Confirm the clock helper can actually be run by the installed desktop user.
+# A valid sudoers file alone does not prove that the effective rule works.
+if ! sudo visudo -c -q; then
+    echo "ERROR: Installed sudoers configuration is invalid; clock helper access cannot be verified." >&2
+    exit 1
+fi
+ALT_CLOCK_CHECK="$(sudo -u "$TARGET_USER" -H /usr/bin/sudo -n -- /usr/local/sbin/alternix-time-helper status 2>&1)" || {
+    echo "ERROR: Clock helper denied for installed user '$TARGET_USER'." >&2
+    echo "$ALT_CLOCK_CHECK" >&2
+    echo "Check /etc/sudoers.d/zz-alternix-time and the effective sudoers rule order." >&2
+    exit 1
+}
+if [ "$ALT_CLOCK_CHECK" != "TIME_HELPER_READY" ]; then
+    echo "ERROR: Clock helper returned an unexpected status: $ALT_CLOCK_CHECK" >&2
+    exit 1
+fi
+echo "[Time] Clock helper permissions verified for $TARGET_USER."
+
 echo ""
 echo "[System] Installing Qtile, Qtile-Extras & mypy"
 pip3 install qtile qtile-extras mypy --break-system-packages
