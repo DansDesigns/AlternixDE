@@ -1535,20 +1535,25 @@ sudo usermod -aG video,input "$TARGET_USER"
 echo " "
 # The source checkout is deliberately deleted here and replaced with a
 # user-owned directory for third-party applications. Authentication is enabled
-# only at the END of the installation, so retain the three source files in a
-# private, root-owned staging directory before removing the checkout.
-# Do not activate graphical authentication inside a live-build chroot.
-if [ "$ALT_IS_LIVE_BUILD" != 1 ]; then
-    echo "[Security] Preserving authentication sources before checkout cleanup..."
-    ALT_AUTH_STAGE="$(sudo mktemp -d /var/tmp/alternix-auth.XXXXXXXX)"
-    sudo chmod 0700 "$ALT_AUTH_STAGE"
+# only at the END of the installation. Preserve root-owned sources before
+# removing the checkout. A live ISO must also carry the source so that its
+# *installed* copy can enrol an individual administrator later. Never enrol a
+# factory/default pattern in a shared ISO image.
+echo "[Security] Preserving authentication sources before checkout cleanup..."
+ALT_AUTH_STAGE="$(sudo mktemp -d /var/tmp/alternix-auth.XXXXXXXX)"
+sudo chmod 0700 "$ALT_AUTH_STAGE"
+for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
     sudo install -o root -g root -m 0600 \
-        "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$ALT_AUTH_STAGE/alternix-auth-setup.sh"
-    sudo install -o root -g root -m 0600 \
-        "$ALT_ROOT/Alternix/apps/alternix-auth.c" "$ALT_AUTH_STAGE/alternix-auth.c"
-    sudo install -o root -g root -m 0600 \
-        "$ALT_ROOT/Alternix/apps/osm-lock.cpp" "$ALT_AUTH_STAGE/osm-lock.cpp"
-fi
+        "$ALT_ROOT/Alternix/apps/$src" "$ALT_AUTH_STAGE/$src"
+done
+# Keep permanent root-owned installation sources in the live filesystem:
+# live-build's source checkout is deliberately removed further below.
+sudo install -d -o root -g root -m 0755 /usr/share/alternix/auth
+for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
+    sudo install -o root -g root -m 0644 "$ALT_AUTH_STAGE/$src" \
+        "/usr/share/alternix/auth/$src"
+done
+sudo chmod 0755 /usr/share/alternix/auth/alternix-auth-setup.sh
 
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
 # Never remove the directory from which this shell is currently running.
@@ -1807,7 +1812,8 @@ fi
 # Never retain the temporary NOPASSWD: ALL rule in the finished live image.
 if [ "$ALT_IS_LIVE_BUILD" = 1 ]; then
     echo "[Security] ISO prebuild: deferring interactive pattern/PIN enrolment."
-    echo "[Security] Retaining standard sudo/PAM until installed-system setup."
+    echo "[Security] Retaining standard sudo/PAM until installed-system enrolment."
+    echo "[Security] Protected setup sources are in /usr/share/alternix/auth."
     sudo rm -f /etc/sudoers.d/alternix-nopasswd
     ALT_TEMP_NP_ACTIVE=0
 else

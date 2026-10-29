@@ -26,8 +26,42 @@ if ! command -v nala >/dev/null 2>&1; then
     exit 1
 fi
 
-# Ask sudo once. PAM displays the Alternix pattern/PIN window.
-# Further sudo operations can use sudo's normal per-session credential cache.
+# Fresh ISO preview builds intentionally do not enrol a shared pattern.
+# An installed system must activate its own root-protected pattern first.
+# Activate at the FIRST updater run, while the user still has the standard
+# Unix-password sudo policy to authorise credential migration/enrolment.
+# Activation is a separate root-approved operation, never a NOPASSWD bypass.
+AUTH_SOURCE_DIR=/usr/share/alternix/auth
+# live-boot mounts only exist in the running live-preview session, not in the
+# installed system created by the installer. Never enrol credentials in the
+# throwaway preview environment.
+ALT_RUNNING_LIVE=0
+if [ -e /run/live/medium ] || [ -d /lib/live/mount/medium ] || [ -d /run/live/overlay ]; then
+    ALT_RUNNING_LIVE=1
+fi
+if [ "$ALT_RUNNING_LIVE" != 1 ] && ! grep -Eq '^auth[[:space:]]+requisite[[:space:]]+pam_exec\.so.*alternix-auth[[:space:]]+--pam' /etc/pam.d/sudo 2>/dev/null; then
+    if [ -f "$AUTH_SOURCE_DIR/alternix-auth-setup.sh" ] &&
+       [ -f "$AUTH_SOURCE_DIR/alternix-auth.c" ] &&
+       [ -f "$AUTH_SOURCE_DIR/osm-lock.cpp" ]; then
+        echo "[Security] This installation has not activated Alternix pattern authentication yet."
+        echo "[Security] One initial Unix administrator password is required to enrol/migrate the pattern."
+        if ! /usr/bin/sudo -v; then
+            echo "ERROR: Initial administrator authorisation failed." >&2
+            exit 1
+        fi
+        if ! /usr/bin/sudo /bin/bash "$AUTH_SOURCE_DIR/alternix-auth-setup.sh" \
+                "$(id -un)" "$AUTH_SOURCE_DIR"; then
+            echo "ERROR: Pattern/PIN setup did not complete; sudo has NOT been switched to pattern authentication." >&2
+            exit 1
+        fi
+        # Test a fresh PAM challenge rather than relying on an existing sudo ticket.
+        /usr/bin/sudo -k
+    else
+        echo "WARNING: Alternix PAM sources are not installed in $AUTH_SOURCE_DIR." >&2
+        echo "WARNING: Standard Unix-password sudo remains in use. Update/install the authentication sources first." >&2
+    fi
+fi
+# Ask sudo once. When activated, sudo/PAM displays the pattern/PIN window.
 echo "Authenticating with Alternix..."
 if ! /usr/bin/sudo -v; then
     echo "ERROR: System authentication failed or elevation was denied." >&2

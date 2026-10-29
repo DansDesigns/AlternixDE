@@ -813,6 +813,15 @@ echo " "
 echo " "
 echo " "
 echo " "
+# Keep the authentication sources in a protected system-owned location for
+# future updates and for the installed system to finish enrolment if needed.
+sudo install -d -o root -g root -m 0755 /usr/share/alternix/auth
+for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
+    sudo install -o root -g root -m 0644 \
+        "$ALT_ROOT/Alternix/apps/$src" "/usr/share/alternix/auth/$src"
+done
+sudo chmod 0755 /usr/share/alternix/auth/alternix-auth-setup.sh
+
 # Commit the sudo authentication policy as the LAST privileged operation.
 # This also installs the protected verifier and new osm-lock executable.
 echo "[Security] Activating Alternix sudo PAM authentication..."

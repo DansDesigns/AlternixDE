@@ -134,8 +134,22 @@ uid = sys.argv[1]
 cred = pathlib.Path('/var/lib/alternix-auth/credential-' + uid)
 if cred.exists():
     sys.exit(0)
-if not sys.stdin.isatty():
-    raise SystemExit('ERROR: No pattern is enrolled and no interactive root terminal is available. Sudo PAM was not changed.')
+# This Python program is supplied via a shell heredoc. sys.stdin is therefore
+# the script stream, never the interactive terminal. Read enrollment from the
+# controlling TTY explicitly, without taking input from the script itself.
+try:
+    tty_input = open('/dev/tty', 'r', encoding='utf-8', buffering=1)
+    tty_output = open('/dev/tty', 'w', encoding='utf-8', buffering=1)
+except OSError:
+    raise SystemExit('ERROR: Pattern/PIN not enrolled and no controlling terminal is available. sudo PAM was NOT changed. Run setup from an interactive terminal as an administrator.')
+
+def ask(prompt):
+    tty_output.write(prompt)
+    tty_output.flush()
+    answer = tty_input.readline()
+    if not answer:
+        raise SystemExit('ERROR: Enrolment cancelled. sudo PAM was NOT changed.')
+    return answer.strip()
 print('\n[Auth] Set the Alternix administrator pattern (one-time root-approved setup).')
 print('Each grid item consists of a shape and colour; the positions are randomised at login.')
 shapes = ('circle', 'triangle', 'square', 'pentagon')
@@ -144,13 +158,13 @@ choices = [f'{shape}-{color}' for shape in shapes for color in colors]
 for i, item in enumerate(choices, 1):
     print(f' {i:2}) {item}', end='\n' if i % 4 == 0 else '   ')
 while True:
-    enhanced = input('Enhanced Security (5 shapes / 5-character PIN)? [y/N]: ').strip().lower() in ('y', 'yes')
+    enhanced = ask('Enhanced Security (5 shapes / 5-character PIN)? [y/N]: ').lower() in ('y', 'yes')
     count = 5 if enhanced else 4
-    chosen = input(f'Enter {count} shape numbers in order, separated by spaces: ').split()
+    chosen = ask(f'Enter {count} shape numbers in order, separated by spaces: ').split()
     if len(chosen) != count or not all(x.isdigit() and 1 <= int(x) <= 16 for x in chosen):
         print('Invalid shape sequence; try again.'); continue
-    pin = getpass.getpass(f'Choose a {count}-character fallback PIN: ')
-    pin2 = getpass.getpass('Confirm fallback PIN: ')
+    pin = getpass.getpass(f'Choose a {count}-character fallback PIN: ', stream=tty_output)
+    pin2 = getpass.getpass('Confirm fallback PIN: ', stream=tty_output)
     charset = '0123456789!?<>' if enhanced else '0123456789'
     if len(pin) != count or any(c not in charset for c in pin) or pin != pin2:
         print('PIN mismatch or invalid characters; try again.'); continue
@@ -163,6 +177,8 @@ while True:
         raise SystemExit('ERROR: Protected root credential could not be created; sudo PAM was not changed.')
     print('[Auth] Pattern and fallback PIN securely enrolled.')
     break
+tty_input.close()
+tty_output.close()
 PY_ENROL
 
 # Check as the actual target user BEFORE making any PAM or sudoers changes.
