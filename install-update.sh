@@ -824,8 +824,14 @@ sudo chmod 0755 /usr/share/alternix/auth/alternix-auth-setup.sh
 
 # Commit the sudo authentication policy as the LAST privileged operation.
 # This also installs the protected verifier and new osm-lock executable.
-echo "[Security] Activating Alternix sudo PAM authentication..."
-sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$ALT_TIME_USER" "$ALT_ROOT/Alternix/apps"
+echo "[Security] Testing and activating Alternix sudo PAM authentication..."
+# Setup is a root-owned transaction: the old PAM/sudoers files are restored
+# automatically unless a fresh, real sudo/PAM challenge succeeds.
+if ! sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" \
+        "$ALT_TIME_USER" "$ALT_ROOT/Alternix/apps"; then
+    echo "ERROR: Pattern authentication did not pass its live test; activation was rolled back." >&2
+    exit 1
+fi
 
 echo "=============================================="
 echo "         Alternix Update Complete!"

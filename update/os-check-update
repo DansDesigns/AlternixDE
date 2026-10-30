@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Run the updater in the logged-in user's session. Authenticate once using
-# Alternix's existing pattern prompt; use non-interactive sudo for privileged
-# steps. Do not relaunch the whole script as root (which redirects user paths).
+# Run the updater in the logged-in user's session. Ordinary sudo invokes
+# Alternix PAM when installed; never hide prompts via sudo -n.
+# Do not relaunch the entire script as root (which redirects user paths).
 if (( EUID == 0 )); then
     echo "ERROR: System Update must be launched by the desktop user, not as root." >&2
     exit 1
@@ -51,11 +51,12 @@ if [ "$ALT_RUNNING_LIVE" != 1 ] && ! grep -Eq '^auth[[:space:]]+requisite[[:spac
         fi
         if ! /usr/bin/sudo /bin/bash "$AUTH_SOURCE_DIR/alternix-auth-setup.sh" \
                 "$(id -un)" "$AUTH_SOURCE_DIR"; then
-            echo "ERROR: Pattern/PIN setup did not complete; sudo has NOT been switched to pattern authentication." >&2
+            echo "ERROR: Pattern/PIN setup did not complete. Its root-owned transaction restores the previous sudo configuration on failure." >&2
+            echo "ERROR: System Update will not continue until authentication is working." >&2
             exit 1
         fi
-        # Test a fresh PAM challenge rather than relying on an existing sudo ticket.
-        /usr/bin/sudo -k
+        # The root-owned setup has already completed a live sudo/PAM test;
+        # do not invalidate that test or forcibly trigger another challenge.
     else
         echo "WARNING: Alternix PAM sources are not installed in $AUTH_SOURCE_DIR." >&2
         echo "WARNING: Standard Unix-password sudo remains in use. Update/install the authentication sources first." >&2
