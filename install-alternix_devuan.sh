@@ -1535,25 +1535,32 @@ sudo usermod -aG video,input "$TARGET_USER"
 echo " "
 # The source checkout is deliberately deleted here and replaced with a
 # user-owned directory for third-party applications. Authentication is enabled
-# only at the END of the installation. Preserve root-owned sources before
-# removing the checkout. A live ISO must also carry the source so that its
-# *installed* copy can enrol an individual administrator later. Never enrol a
-# factory/default pattern in a shared ISO image.
-echo "[Security] Preserving authentication sources before checkout cleanup..."
-ALT_AUTH_STAGE="$(sudo mktemp -d /var/tmp/alternix-auth.XXXXXXXX)"
-sudo chmod 0700 "$ALT_AUTH_STAGE"
-for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
-    sudo install -o root -g root -m 0600 \
-        "$ALT_ROOT/Alternix/apps/$src" "$ALT_AUTH_STAGE/$src"
-done
-# Keep permanent root-owned installation sources in the live filesystem:
-# live-build's source checkout is deliberately removed further below.
+# only at the END of the installation, so retain the three source files in a
+# private, root-owned staging directory before removing the checkout.
+# Persist the sources in the installed system BEFORE deleting the checkout.
+# This is needed especially for the live ISO: the initial desktop has no
+# per-user pattern, so the installed-system updater must be able to enrol and
+# activate authentication later without relying on a deleted source folder.
 sudo install -d -o root -g root -m 0755 /usr/share/alternix/auth
-for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
-    sudo install -o root -g root -m 0644 "$ALT_AUTH_STAGE/$src" \
-        "/usr/share/alternix/auth/$src"
+for auth_file in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
+    sudo install -o root -g root -m 0644 \
+        "$ALT_ROOT/Alternix/apps/$auth_file" \
+        "/usr/share/alternix/auth/$auth_file"
 done
 sudo chmod 0755 /usr/share/alternix/auth/alternix-auth-setup.sh
+
+# Do not activate graphical authentication inside a live-build chroot.
+if [ "$ALT_IS_LIVE_BUILD" != 1 ]; then
+    echo "[Security] Preserving authentication sources before checkout cleanup..."
+    ALT_AUTH_STAGE="$(sudo mktemp -d /var/tmp/alternix-auth.XXXXXXXX)"
+    sudo chmod 0700 "$ALT_AUTH_STAGE"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" "$ALT_AUTH_STAGE/alternix-auth-setup.sh"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/alternix-auth.c" "$ALT_AUTH_STAGE/alternix-auth.c"
+    sudo install -o root -g root -m 0600 \
+        "$ALT_ROOT/Alternix/apps/osm-lock.cpp" "$ALT_AUTH_STAGE/osm-lock.cpp"
+fi
 
 echo "[Cleanup] Removing Alternix source folder at $ALT_ROOT ..."
 # Never remove the directory from which this shell is currently running.
@@ -1812,8 +1819,7 @@ fi
 # Never retain the temporary NOPASSWD: ALL rule in the finished live image.
 if [ "$ALT_IS_LIVE_BUILD" = 1 ]; then
     echo "[Security] ISO prebuild: deferring interactive pattern/PIN enrolment."
-    echo "[Security] Retaining standard sudo/PAM until installed-system enrolment."
-    echo "[Security] Protected setup sources are in /usr/share/alternix/auth."
+    echo "[Security] Retaining standard sudo/PAM until installed-system setup."
     sudo rm -f /etc/sudoers.d/alternix-nopasswd
     ALT_TEMP_NP_ACTIVE=0
 else
@@ -1825,12 +1831,17 @@ else
     # Keep the staging directory private (0700, root-owned) until setup exits.
     # A root shell performs cleanup even after PAM has been activated, so no
     # second graphical sudo prompt is required just to delete the stage.
-    sudo bash -c '
+    # The setup script tests the pattern window first, switches PAM only
+    # provisionally, and restores the saved sudo/PAM configuration on failure.
+    if ! sudo bash -c '
         stage="$1"; login_user="$2"
         cleanup_auth_stage() { rm -rf -- "$stage"; }
         trap cleanup_auth_stage EXIT
         bash "$stage/alternix-auth-setup.sh" "$login_user" "$stage"
-    ' _ "$ALT_AUTH_STAGE" "$TARGET_USER"
+    ' _ "$ALT_AUTH_STAGE" "$TARGET_USER"; then
+        echo "ERROR: Alternix graphical sudo authentication failed verification; old PAM configuration restored." >&2
+        exit 1
+    fi
     ALT_AUTH_STAGE=""
     ALT_TEMP_NP_ACTIVE=0
 fi
