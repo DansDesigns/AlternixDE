@@ -1,3 +1,4 @@
+
 #!/bin/bash
 # AlternixOS sudo -> PAM -> osm-lock pattern/PIN authentication setup.
 # Run as root from the existing installer or the existing updater.
@@ -192,15 +193,46 @@ if [[ "$STATUS" != READY:0 && "$STATUS" != READY:1 ]]; then
 fi
 
 # Keep the user's normal sudoers command policy, but require authentication.
-# Remove the two Alternix-specific passwordless exceptions after PAM is ready.
+# In older AlternixOS installations, the power-management setup leaves an
+# explicit NOPASSWD command rule. Convert only THAT known legacy rule to
+# PASSWD, keeping the permitted commands and users exactly as they were.
+# Unknown passwordless policies must still stop setup rather than silently
+# bypassing the requested pattern prompt.
 mkdir -p /etc/sudoers.d
 printf '%s ALL=(ALL:ALL) ALL\n' "$LOGIN_USER" > "$TMP/alternix-pattern"
 visudo -cf "$TMP/alternix-pattern" >/dev/null
-# Reject unrelated passwordless sudo policies instead of claiming that
-# every sudo request reaches PAM when some sudoers rule could skip it.
-python3 - <<'PY_POLICY'
+python3 - "$TMP" <<'PY_POLICY'
 from pathlib import Path
-import re
+import os, re, stat, subprocess, sys
+stage = Path(sys.argv[1])
+power = Path('/etc/sudoers.d/90-alternix-power')
+modified_power = None
+if power.is_symlink():
+    raise SystemExit('ERROR: Unsafe symbolic link at ' + str(power) + '; PAM unchanged.')
+if power.exists():
+    st = power.stat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or (st.st_mode & 0o022):
+        raise SystemExit('ERROR: Unsafe ownership or permissions at ' + str(power) + '; PAM unchanged.')
+    try:
+        original = power.read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        raise SystemExit('ERROR: Cannot read ' + str(power) + '; PAM unchanged.')
+    rewritten = []
+    for line in original.splitlines(keepends=True):
+        rule, comment_mark, comment = line.partition('#')
+        if re.search(r'(?<!\w)!authenticate\b', rule, re.I):
+            raise SystemExit('ERROR: Unconditional sudo authentication bypass in ' + str(power) + '; PAM unchanged.')
+        rule = re.sub(r'\bNOPASSWD\s*:', 'PASSWD:', rule, flags=re.I)
+        rewritten.append(rule + comment_mark + comment)
+    normalized = ''.join(rewritten)
+    if normalized != original:
+        dest = stage / '90-alternix-power.password-required'
+        dest.write_text(normalized, encoding='utf-8')
+        cmd = subprocess.run(['visudo', '-cf', str(dest)], capture_output=True, text=True)
+        if cmd.returncode:
+            raise SystemExit('ERROR: Converted power rule failed visudo validation: ' + cmd.stderr.strip())
+        modified_power = normalized
+        print('[Auth] Legacy Alternix power sudoers rule will require authentication; its permitted commands are preserved.')
 files = [Path('/etc/sudoers')]
 directory = Path('/etc/sudoers.d')
 if directory.exists():
@@ -208,14 +240,14 @@ if directory.exists():
               ('alternix-nopasswd', 'zz-alternix-time', 'alternix-pattern')]
 for p in files:
     try:
-        data = p.read_text()
+        data = modified_power if p == power and modified_power is not None else p.read_text(encoding='utf-8')
     except (OSError, UnicodeError):
         raise SystemExit('ERROR: Cannot inspect sudoers source: ' + str(p))
     for line in data.splitlines():
-        rule = line.split('#', 1)[0].strip()
-        if re.search(r'\bNOPASSWD\s*:', rule, re.I) or re.search(r'\b!authenticate\b', rule, re.I):
+        rule = line.split('#', 1)[0]
+        if re.search(r'\bNOPASSWD\s*:', rule, re.I) or re.search(r'(?<!\w)!authenticate\b', rule, re.I):
             raise SystemExit('ERROR: Another passwordless sudo rule exists in ' + str(p) +
-                             '. Remove or scope that rule first; PAM was not changed.')
+                             '. Only the known Alternix power rule can be converted automatically; PAM was not changed.')
 PY_POLICY
 # Backup the original sudo PAM service exactly once, for root-shell recovery.
 if [[ ! -e /etc/pam.d/sudo.alternix-original ]]; then
@@ -240,11 +272,50 @@ for line in old.splitlines():
         clean.append(line)
 pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
 PY
+# Stage the existing policy for rollback before replacing any active rules.
+install -o root -g root -m 0600 /etc/pam.d/sudo "$TMP/pam-before"
+if [[ -f /etc/sudoers.d/alternix-pattern ]]; then
+    install -o root -g root -m 0600 /etc/sudoers.d/alternix-pattern "$TMP/pattern-before"
+fi
+if [[ -f "$TMP/90-alternix-power.password-required" ]]; then
+    install -o root -g root -m 0600 /etc/sudoers.d/90-alternix-power "$TMP/power-before"
+    # Backups live OUTSIDE /etc/sudoers.d so sudo cannot load old NOPASSWD rules.
+    install -d -o root -g root -m 0700 /var/backups/alternix-auth
+    if [[ ! -e /var/backups/alternix-auth/90-alternix-power.before-pattern ]]; then
+        install -o root -g root -m 0600 "$TMP/power-before" \
+            /var/backups/alternix-auth/90-alternix-power.before-pattern
+    fi
+    install -o root -g root -m 0440 "$TMP/90-alternix-power.password-required" \
+        /etc/sudoers.d/90-alternix-power
+fi
 install -o root -g root -m 0440 "$TMP/alternix-pattern" /etc/sudoers.d/alternix-pattern
 install -o root -g root -m 0644 "$TMP/sudo-pam" /etc/pam.d/sudo
 # Remove old Alternix NOPASSWD entries that defeated pattern authentication.
-rm -f /etc/sudoers.d/alternix-nopasswd /etc/sudoers.d/zz-alternix-time
-visudo -c -q || { echo 'ERROR: Invalid sudoers. Recover using root shell.' >&2; exit 1; }
+# Preserve their contents until validation succeeds to support rollback.
+for old_rule in alternix-nopasswd zz-alternix-time; do
+    if [[ -f "/etc/sudoers.d/$old_rule" ]]; then
+        install -o root -g root -m 0600 "/etc/sudoers.d/$old_rule" "$TMP/$old_rule.before"
+        rm -f "/etc/sudoers.d/$old_rule"
+    fi
+done
+if ! visudo -c -q; then
+    install -o root -g root -m 0644 "$TMP/pam-before" /etc/pam.d/sudo
+    if [[ -f "$TMP/power-before" ]]; then
+        install -o root -g root -m 0440 "$TMP/power-before" /etc/sudoers.d/90-alternix-power
+    fi
+    if [[ -f "$TMP/pattern-before" ]]; then
+        install -o root -g root -m 0440 "$TMP/pattern-before" /etc/sudoers.d/alternix-pattern
+    else
+        rm -f /etc/sudoers.d/alternix-pattern
+    fi
+    for old_rule in alternix-nopasswd zz-alternix-time; do
+        if [[ -f "$TMP/$old_rule.before" ]]; then
+            install -o root -g root -m 0440 "$TMP/$old_rule.before" "/etc/sudoers.d/$old_rule"
+        fi
+    done
+    echo 'ERROR: Invalid sudoers. Reverted PAM and sudoers to their previous contents.' >&2
+    exit 1
+fi
 echo '[Auth] sudo now uses Alternix PAM pattern/PIN authentication.'
 echo '[Auth] PAM backup: /etc/pam.d/sudo.alternix-original'
 echo '[Auth] For root-shell recovery: cp /etc/pam.d/sudo.alternix-original /etc/pam.d/sudo'
