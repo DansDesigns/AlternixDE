@@ -736,7 +736,8 @@ else
 fi
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
+echo "• Updating desktop widgets..."
+cd "$ALT_ROOT/Alternix/apps/osm-widgets/widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
 
 echo "• Building calendar widget..."
 g++ -std=c++11 -fPIC -shared calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
