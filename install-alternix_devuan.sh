@@ -1581,41 +1581,89 @@ THIRD_PARTY_DIR="$TARGET_HOME/Alternix"
 mkdir -p "$THIRD_PARTY_DIR"
 chown "$TARGET_USER:$TARGET_GROUP" "$THIRD_PARTY_DIR"
 
-# Download the AlternixOS release version from the known file on GitHub's
-# main branch into the selected user's home (not the installer/root home).
-# The github.com/.../blob/main/version page is HTML; use its raw file URL.
-echo "• Downloading AlternixOS version..."
+# Download the AlternixOS release version from GitHub, and preserve it in
+# the installed root filesystem as well as the selected user's home.
+# Live ISO installations can create a DIFFERENT user after the ISO preview
+# was built, so saving this file only in $TARGET_HOME is not sufficient.
+echo "• Installing AlternixOS version..."
 ALT_OS_VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixOS/main/version"
 ALT_OS_VERSION_DEST="$TARGET_HOME/Alternix/version"
+ALT_OS_VERSION_SYSTEM="/usr/share/alternix/os-version"
+ALT_OS_VERSION_SKEL="/etc/skel/Alternix/version"
 ALT_OS_VERSION_TMP="$(mktemp /tmp/alternixos-version.XXXXXX)"
 
+# Download first, but permit an offline installation to reuse the version
+# already bundled into the ISO. Do not accept an empty/HTML error response.
+ALT_OS_VERSION_SOURCE=""
 if curl -fL --show-error --silent --retry 3 --retry-delay 2 \
         --connect-timeout 10 --max-time 60 \
         --output "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_URL" && \
         [ -s "$ALT_OS_VERSION_TMP" ] && \
         [ "$(wc -c < "$ALT_OS_VERSION_TMP")" -le 512 ] && \
-        grep -q '[^[:space:]]' "$ALT_OS_VERSION_TMP"; then
-    # Write the version with ownership for the chosen account, even when
-    # this script is running as root inside the live ISO/build environment.
-    sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0755 "$TARGET_HOME/Alternix"
-    if sudo install -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0644 \
-            "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_DEST" && \
-            [ -s "$ALT_OS_VERSION_DEST" ]; then
-        echo "• AlternixOS version saved to $ALT_OS_VERSION_DEST"
-        echo "• AlternixOS version: $(head -n 1 "$ALT_OS_VERSION_DEST")"
-    else
-        echo "WARNING: Could not write $ALT_OS_VERSION_DEST (check permissions)."
-    fi
+        grep -q '[^[:space:]]' "$ALT_OS_VERSION_TMP" && \
+        ! grep -Eqi '<(!doctype|html|head|body)' "$ALT_OS_VERSION_TMP"; then
+    ALT_OS_VERSION_SOURCE="$ALT_OS_VERSION_TMP"
 else
-    echo "WARNING: Could not download a valid AlternixOS version from:"
-    echo "         $ALT_OS_VERSION_URL"
-    echo "WARNING: Check GitHub access/network connectivity in the installer environment."
-    if [ -s "$ALT_OS_VERSION_DEST" ]; then
-        echo "• Keeping the existing version at $ALT_OS_VERSION_DEST"
-    else
-        echo "WARNING: Missing $ALT_OS_VERSION_DEST; System Settings may show Unknown."
-    fi
+    echo "WARNING: Could not download AlternixOS version; checking for an ISO-bundled copy."
+    for saved_version in "$ALT_OS_VERSION_SYSTEM" "$ALT_OS_VERSION_SKEL" "$ALT_OS_VERSION_DEST"; do
+        if [ -s "$saved_version" ]; then
+            ALT_OS_VERSION_SOURCE="$saved_version"
+            break
+        fi
+    done
 fi
+
+if [ -z "$ALT_OS_VERSION_SOURCE" ]; then
+    rm -f -- "$ALT_OS_VERSION_TMP"
+    echo "ERROR: No AlternixOS version available from GitHub or the ISO." >&2
+    echo "ERROR: Cannot finish an installation that has no AlternixOS version file." >&2
+    exit 1
+fi
+
+# 1. Canonical system copy: survives a live ISO's squashfs-to-disk install.
+#    Keep distinct from /usr/share/alternix/version.txt (AlternixDE updater).
+sudo install -d -m 0755 /usr/share/alternix
+if [ "$ALT_OS_VERSION_SOURCE" != "$ALT_OS_VERSION_SYSTEM" ]; then
+    sudo install -m 0644 "$ALT_OS_VERSION_SOURCE" "$ALT_OS_VERSION_SYSTEM"
+fi
+
+# 2. User skeleton: useradd -m during the real OS installation inherits it.
+sudo install -d -m 0755 /etc/skel/Alternix
+sudo install -m 0644 "$ALT_OS_VERSION_SYSTEM" "$ALT_OS_VERSION_SKEL"
+
+# 3. The user selected by this run (including a live-preview user).
+sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0755 "$TARGET_HOME/Alternix"
+sudo install -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0644 \
+    "$ALT_OS_VERSION_SYSTEM" "$ALT_OS_VERSION_DEST"
+
+# 4. Fallback for live installers that create user homes without /etc/skel,
+#    or replace the home after copying the ISO. The first login restores the
+#    bundled file to exactly ~/Alternix/version, WITHOUT needing internet or
+#    overwriting a version that has since been updated.
+sudo tee /etc/profile.d/alternixos-version.sh >/dev/null <<'ALT_OS_VERSION_PROFILE'
+#!/bin/sh
+ALT_OS_VERSION_FILE=/usr/share/alternix/os-version
+if [ "$(id -u 2>/dev/null)" != 0 ] && [ -n "${HOME:-}" ] && \
+   [ -d "$HOME" ] && [ -s "$ALT_OS_VERSION_FILE" ] && \
+   [ ! -e "$HOME/Alternix/version" ] && [ ! -L "$HOME/Alternix/version" ]; then
+    ( umask 022
+      mkdir -p -- "$HOME/Alternix" &&
+      cp -n -- "$ALT_OS_VERSION_FILE" "$HOME/Alternix/version"
+    ) 2>/dev/null || :
+fi
+unset ALT_OS_VERSION_FILE
+ALT_OS_VERSION_PROFILE
+sudo chmod 0644 /etc/profile.d/alternixos-version.sh
+
+if [ ! -s "$ALT_OS_VERSION_SYSTEM" ] || [ ! -s "$ALT_OS_VERSION_SKEL" ] || \
+   [ ! -s "$ALT_OS_VERSION_DEST" ]; then
+    echo "ERROR: AlternixOS version installation did not verify." >&2
+    exit 1
+fi
+
+echo "• AlternixOS version: $(head -n 1 "$ALT_OS_VERSION_SYSTEM")"
+echo "• Installed for $TARGET_USER at $ALT_OS_VERSION_DEST"
+echo "• Bundled for installed users in $ALT_OS_VERSION_SYSTEM and $ALT_OS_VERSION_SKEL"
 rm -f -- "$ALT_OS_VERSION_TMP"
 
 # Build-time writes above must not leave the installed desktop owned by root.
