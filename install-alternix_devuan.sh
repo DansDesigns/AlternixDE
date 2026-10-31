@@ -1207,10 +1207,17 @@ echo "• Building osm-widgets-settings..."
 g++ osm-widgets-settings.cpp -o osm-widgets-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-widgets-settings  /usr/local/bin/
 
-echo "• Building clock.so widget..."
+echo "• Building clock widget..."
 g++ -I. -fPIC -shared widgets/clock.cpp -o clock.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo mv clock.so /usr/local/lib/alternix/widgets/
 
+echo "• Building calendar widget..."
+g++ -std=c++11 -fPIC -shared calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -Dm755 calendar.so /usr/local/lib/alternix/widgets/calendar.so
+
+echo "• Building 13-moon-calendar widget..."
+g++ -std=c++11 -fPIC -shared moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -Dm755 moon-calendar.so /usr/local/lib/alternix/widgets/moon-calendar.so
 
 
 if [ -f "$ALT_ROOT/Alternix/icons/osm-widgets.png" ]; then
