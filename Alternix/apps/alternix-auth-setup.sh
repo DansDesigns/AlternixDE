@@ -38,19 +38,38 @@ if ! find /lib /usr/lib -name pam_exec.so -type f -print -quit 2>/dev/null | gre
 fi
 [[ -f /etc/pam.d/sudo ]] || { echo 'ERROR: /etc/pam.d/sudo absent.' >&2; exit 1; }
 # Synaptic, GParted and other privileged graphical programs use PolicyKit,
-# NOT sudo. Install its daemon, pkexec and the X11 session agent before any
-# PAM changes; do not bring in systemd or change AlternixOS's SysVinit setup.
-if [[ ! -x /usr/bin/pkexec || ! -x /usr/bin/lxpolkit || ! -f /etc/pam.d/polkit-1 ]]; then
+# NOT sudo. Devuan Excalibur's polkitd package may install its default PAM
+# service in /usr/lib/pam.d/polkit-1 rather than /etc/pam.d/polkit-1.
+# This is normal: /etc/pam.d/polkit-1 is the local override, not a required
+# package file. Never treat its absence as a missing PolicyKit installation.
+# Use apt only for missing executables/PAM service, without changing SysVinit.
+if [[ ! -x /usr/bin/pkexec || ! -x /usr/bin/lxpolkit ]] ||
+   { [[ ! -f /etc/pam.d/polkit-1 && ! -f /usr/lib/pam.d/polkit-1 ]]; }; then
     command -v apt-get >/dev/null || { echo 'ERROR: apt-get is required to install PolicyKit support.' >&2; exit 1; }
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends polkitd pkexec lxpolkit || {
         echo 'ERROR: Could not install the PolicyKit components. PAM unchanged.' >&2
         exit 1
     }
 fi
-[[ -x /usr/bin/pkexec && -x /usr/bin/lxpolkit && -f /etc/pam.d/polkit-1 ]] || {
-    echo 'ERROR: PolicyKit or its graphical agent is unavailable. PAM unchanged.' >&2
+if [[ ! -x /usr/bin/pkexec ]]; then
+    echo 'ERROR: /usr/bin/pkexec is missing after PolicyKit installation. PAM unchanged.' >&2
     exit 1
-}
+fi
+if [[ ! -x /usr/bin/lxpolkit ]]; then
+    echo 'ERROR: /usr/bin/lxpolkit graphical agent is missing after installation. PAM unchanged.' >&2
+    exit 1
+fi
+# Prefer an existing administrator override, otherwise read the unmodified
+# packaged service. The new configuration is always installed into /etc/pam.d.
+if [[ -f /etc/pam.d/polkit-1 ]]; then
+    POLKIT_PAM_SOURCE=/etc/pam.d/polkit-1
+elif [[ -f /usr/lib/pam.d/polkit-1 ]]; then
+    POLKIT_PAM_SOURCE=/usr/lib/pam.d/polkit-1
+else
+    echo 'ERROR: Neither /etc/pam.d/polkit-1 nor /usr/lib/pam.d/polkit-1 exists. PAM unchanged.' >&2
+    exit 1
+fi
+echo "[Auth] Using PolicyKit PAM source: $POLKIT_PAM_SOURCE"
 visudo -c -q
 umask 077
 TMP="$(mktemp -d)"
@@ -64,8 +83,13 @@ rollback_auth_policy() {
         mv -f /etc/pam.d/.sudo.alternix-rollback /etc/pam.d/sudo
     fi
     if [[ -f "$TMP/polkit-pam-before" ]]; then
+        # Restore the previous /etc override, if one existed.
         install -o root -g root -m 0644 "$TMP/polkit-pam-before" /etc/pam.d/.polkit-1.alternix-rollback
         mv -f /etc/pam.d/.polkit-1.alternix-rollback /etc/pam.d/polkit-1
+    elif [[ -f "$TMP/polkit-pam-was-absent" ]]; then
+        # On a stock Excalibur installation there may be no /etc override.
+        # Removing ours lets PAM use the original /usr/lib/pam.d service.
+        rm -f /etc/pam.d/polkit-1
     fi
     # These files are created by this setup; restore pre-existing versions
     # exactly when a new sudo or PolicyKit challenge fails.
@@ -388,7 +412,7 @@ PY
 # package service definition on reruns, not from our already-modified one.
 # Keep account/session checks and do not edit common-auth (login stays intact).
 if [[ ! -e /etc/pam.d/polkit-1.alternix-original ]]; then
-    install -o root -g root -m 0600 /etc/pam.d/polkit-1 /etc/pam.d/polkit-1.alternix-original
+    install -o root -g root -m 0600 "$POLKIT_PAM_SOURCE" /etc/pam.d/polkit-1.alternix-original
 fi
 python3 - /etc/pam.d/polkit-1.alternix-original "$TMP/polkit-pam" <<'PY_POLKIT_PAM'
 import pathlib, re, sys
@@ -429,7 +453,13 @@ POLKIT_XSESSION
 # Snapshot every sudo/PAM file that we might change. An EXIT trap restores
 # this snapshot on *any* failure during the provisional activation.
 install -o root -g root -m 0600 /etc/pam.d/sudo "$TMP/pam-before"
-install -o root -g root -m 0600 /etc/pam.d/polkit-1 "$TMP/polkit-pam-before"
+if [[ -f /etc/pam.d/polkit-1 ]]; then
+    install -o root -g root -m 0600 /etc/pam.d/polkit-1 "$TMP/polkit-pam-before"
+else
+    # Record that /etc/pam.d had no PolicyKit service before activation.
+    # On rollback, delete only our override, leaving the vendor file alone.
+    touch "$TMP/polkit-pam-was-absent"
+fi
 if [[ -e /etc/polkit-1/rules.d/00-alternix-auth.rules ]]; then
     install -o root -g root -m 0600 /etc/polkit-1/rules.d/00-alternix-auth.rules "$TMP/polkit-rule-before"
 fi
@@ -512,8 +542,14 @@ echo '[Auth] Confirm your Alternix pattern/PIN in the graphical window.'
 POLKIT_TEST_OUTPUT=''
 if ! POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
     setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
-    env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec /usr/bin/id -u)" || [[ "$POLKIT_TEST_OUTPUT" != 0 ]]; then
+    env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec --disable-internal-agent /usr/bin/id -u \
+    2>"$TMP/polkit-test-errors")" || [[ "$POLKIT_TEST_OUTPUT" != 0 ]]; then
     echo 'ERROR: PolicyKit graphical challenge failed; restoring the original sudo and polkit policies.' >&2
+    if [[ -s "$TMP/polkit-test-errors" ]]; then
+        echo '[Auth] PolicyKit diagnostic output:' >&2
+        cat "$TMP/polkit-test-errors" >&2
+    fi
+    echo '[Auth] Check that the graphical agent is registered in this login session and that the system D-Bus and elogind services are running.' >&2
     exit 1
 fi
 
