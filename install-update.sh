@@ -631,7 +631,6 @@ echo "• Building osm-notify..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
-
 echo "• Building osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
@@ -737,8 +736,17 @@ else
 fi
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
 
+echo "• Building calendar widget..."
+g++ -std=c++11 -fPIC -shared calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -Dm755 calendar.so /usr/local/lib/alternix/widgets/calendar.so
 
+echo "• Building 13-moon-calendar widget..."
+g++ -std=c++11 -fPIC -shared moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -Dm755 moon-calendar.so /usr/local/lib/alternix/widgets/moon-calendar.so
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 echo "• Updating Icons..."
 cd "$ALT_ROOT/Alternix"
