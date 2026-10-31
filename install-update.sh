@@ -476,7 +476,11 @@ sudo sed -i 's/^#*HandlePowerKey=.*/HandlePowerKey=ignore/' /etc/elogind/logind.
 
 echo "[✓] elogind sleep prevention configured (effective after restart)."
 
-visor update
+if command -v visor >/dev/null 2>&1; then
+    visor update
+else
+    echo "• Visor command not found; skipping Visor update."
+fi
 
 
 echo ""
@@ -716,7 +720,14 @@ LOCKD
 sudo chmod +x /usr/local/bin/osm-lockd
 
 echo "• Installing dbus-fast for Qtile..."
-"$HOME/.qtile_venv/bin/pip" install dbus-fast
+if [ -x "$HOME/.qtile_venv/bin/pip" ]; then
+    "$HOME/.qtile_venv/bin/pip" install dbus-fast
+elif [ -x "$HOME/.qtile_venv/bin/python3" ] && \
+     "$HOME/.qtile_venv/bin/python3" -m pip --version >/dev/null 2>&1; then
+    "$HOME/.qtile_venv/bin/python3" -m pip install dbus-fast
+else
+    echo "• Qtile virtual environment pip not found; skipping optional dbus-fast installation."
+fi
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
