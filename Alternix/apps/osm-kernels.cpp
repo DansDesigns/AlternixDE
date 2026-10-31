@@ -1,10 +1,11 @@
 // osm-kernels.cpp — AlternixDE kernel manager
 //
-// Lists, installs and removes kernels from four sources:
+// Lists, installs and removes kernels from five sources:
 //   Repository  Devuan/Debian archive (incl. backports) via apt
 //   Mainline    Ubuntu mainline builds from kernel.ubuntu.com/mainline
 //   Liquorix    liquorix.net apt repo (amd64 only)
 //   XanMod      deb.xanmod.org apt repo (amd64 only, filtered by x86-64 psABI level)
+//   Custom      user-added, fingerprint-verified HTTPS APT kernel repositories
 // and sets which installed kernel GRUB boots by default
 // (via /etc/default/grub.d/99-osm-kernels.cfg, so /etc/default/grub is never edited).
 //
@@ -15,10 +16,12 @@
 // launches commands via sudo -n. osm-sudo requires an appropriate sudoers policy;
 // the pattern is not a Unix password and is never passed to sudo as one.
 // Runtime needs: apt, dpkg, sudo, osm-sudo, curl or wget, sha256sum;
-//                gpg only when enabling the Liquorix/XanMod repos (installed on demand).
+//                gpg for signed custom repositories and Liquorix/XanMod repos.
 
 #include <QtWidgets>
 #include <functional>
+#include <QCryptographicHash>
+#include <QUrl>
 
 namespace {
 
@@ -27,7 +30,7 @@ const QString kGrubOverride = QStringLiteral("/etc/default/grub.d/99-osm-kernels
 const QString kAptOpts = QStringLiteral(
     "-o DPkg::Lock::Timeout=120 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold");
 
-enum Src { SrcRepo = 0, SrcMainline, SrcLiquorix, SrcXanmod };
+enum Src { SrcRepo = 0, SrcMainline, SrcLiquorix, SrcXanmod, SrcCustom };
 
 QString srcName(int s)
 {
@@ -35,6 +38,7 @@ QString srcName(int s)
     case SrcMainline: return QStringLiteral("Mainline");
     case SrcLiquorix: return QStringLiteral("Liquorix");
     case SrcXanmod:   return QStringLiteral("XanMod");
+    case SrcCustom:   return QStringLiteral("Custom");
     default:          return QStringLiteral("Repository");
     }
 }
@@ -181,9 +185,34 @@ bool aptSourcesMention(const QString &needle)
 }
 
 struct KPkg {
-    QString name, release, version, suite;
+    QString name, release, version, suite, customName;
     int src = SrcRepo;
 };
+
+struct CustomSource {
+    QString id, name, url, suite, components;
+    QString listPath() const {
+        return QStringLiteral("/etc/apt/sources.list.d/osm-kernels-custom-") + id + QStringLiteral(".list");
+    }
+    QString keyPath() const {
+        return QStringLiteral("/etc/apt/keyrings/osm-kernels-custom-") + id + QStringLiteral(".gpg");
+    }
+};
+
+bool validHttpsUrl(const QString &input)
+{
+    const QUrl u(input, QUrl::StrictMode);
+    return u.isValid() && u.scheme() == QLatin1String("https") && !u.host().isEmpty()
+        && u.userInfo().isEmpty() && u.query().isEmpty() && u.fragment().isEmpty()
+        && !input.contains(QRegularExpression(QStringLiteral("\\s")));
+}
+
+bool validAptField(const QString &value)
+{
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9.+_~/-]*$"));
+    return re.match(value).hasMatch();
+}
+
 
 struct MLVer {
     QString tag;              // v6.17.2
@@ -227,6 +256,7 @@ public:
         if (!QStandardPaths::findExecutable(QStringLiteral("curl")).isEmpty()) m_fetch = QStringLiteral("curl");
         else if (!QStandardPaths::findExecutable(QStringLiteral("wget")).isEmpty()) m_fetch = QStringLiteral("wget");
 
+        loadCustomSources();
         buildUi();
         refreshHeader();
         reloadLocal();
@@ -250,17 +280,21 @@ private:
     int m_cpuLevel = 0;
     bool m_isPi = false, m_hasGrub = false, m_sbOn = false, m_busy = false, m_mlLoaded = false;
     QMap<QString, QString> m_images;      // installed concrete image pkg -> version
-    QSet<QString> m_installed;            // all installed linux-* packages
+    QSet<QString> m_installed;            // fully configured linux-* packages
+    QSet<QString> m_present;              // also include unpacked / half-configured packages for removal
     QVector<KPkg> m_apt;
     QSet<QString> m_aptHeaders;
     QVector<MLVer> m_ml;
+    QVector<CustomSource> m_customSources;
     QString m_grubDefaultRel, m_grubDefaultDesc;
 
     // ---------------------------------------------------------------- widgets
     QLabel *m_hRunning = nullptr, *m_hDefault = nullptr, *m_hSystem = nullptr, *m_hBoot = nullptr, *m_hCmdline = nullptr;
     QStackedWidget *m_stack = nullptr;
-    Page m_pInst, m_pRepo, m_pMl, m_pLiq, m_pXan;
+    Page m_pInst, m_pRepo, m_pMl, m_pLiq, m_pXan, m_pCustom;
     QCheckBox *m_headers = nullptr, *m_showRc = nullptr;
+    QPushButton *m_removeBtn = nullptr, *m_customRemoveBtn = nullptr;
+    QListWidget *m_customRepos = nullptr;
     QLabel *m_banner = nullptr, *m_status = nullptr;
     QPushButton *m_bannerClose = nullptr, *m_logToggle = nullptr;
     QWidget *m_bannerRow = nullptr;
@@ -338,6 +372,77 @@ private:
             *errOut = QStringLiteral("osm-sudo is not installed or is not executable. "
                                      "Administrator actions require the AlternixOS pattern authenticator.");
         return path;
+    }
+
+    // Read only repositories managed by this application; never modify unrelated APT sources.
+    void loadCustomSources()
+    {
+        m_customSources.clear();
+        QDir d(QStringLiteral("/etc/apt/sources.list.d"));
+        const QStringList names = d.entryList({QStringLiteral("osm-kernels-custom-*.list")}, QDir::Files);
+        static const QRegularExpression idRe(QStringLiteral("^osm-kernels-custom-([a-f0-9]{12})\\.list$"));
+        static const QRegularExpression lineRe(QStringLiteral(
+            "^deb \\[arch=[A-Za-z0-9_]+ signed-by=/etc/apt/keyrings/osm-kernels-custom-([a-f0-9]{12})\\.gpg\\] "
+            "(https://[^ ]+) ([^ ]+) ([^\\n]+)$"));
+        for (const QString &filename : names) {
+            const auto idMatch = idRe.match(filename);
+            if (!idMatch.hasMatch()) continue;
+            const QString id = idMatch.captured(1);
+            const QString contents = readFile(d.absoluteFilePath(filename));
+            CustomSource source;
+            source.id = id;
+            for (const QString &raw : contents.split(QLatin1Char('\n'))) {
+                const QString line = raw.trimmed();
+                if (line.startsWith(QLatin1String("# osm-kernels-name: ")))
+                    source.name = line.mid(20).trimmed();
+                const auto match = lineRe.match(line);
+                if (match.hasMatch() && match.captured(1) == id) {
+                    source.url = match.captured(2);
+                    source.suite = match.captured(3);
+                    source.components = match.captured(4);
+                }
+            }
+            if (source.name.isEmpty()) source.name = id;
+            if (validHttpsUrl(source.url) && validAptField(source.suite))
+                m_customSources << source;
+        }
+    }
+
+    void fillCustomRepos()
+    {
+        if (!m_customRepos) return;
+        const QString previousId = m_customRepos->currentItem()
+            ? m_customRepos->currentItem()->data(Qt::UserRole).toString() : QString();
+        m_customRepos->clear();
+        for (const CustomSource &source : m_customSources) {
+            auto *item = new QListWidgetItem(source.name + QStringLiteral("  —  ")
+                + source.url + QStringLiteral("  [") + source.suite + QLatin1Char(']'));
+            item->setData(Qt::UserRole, source.id);
+            item->setToolTip(source.components + QStringLiteral(" · ") + source.listPath());
+            m_customRepos->addItem(item);
+            if (source.id == previousId) m_customRepos->setCurrentItem(item);
+        }
+        updateCustomRemoveButton();
+    }
+
+    void updateCustomRemoveButton()
+    {
+        if (m_customRemoveBtn)
+            m_customRemoveBtn->setEnabled(!m_busy && m_customRepos && m_customRepos->currentItem());
+    }
+
+    void updateRemoveButton()
+    {
+        if (!m_removeBtn || !m_pInst.tree) return;
+        const auto chosen = m_pInst.tree->selectedItems();
+        const QString rel = chosen.isEmpty() ? QString() : chosen.first()->data(0, Qt::UserRole + 1).toString();
+        const bool isRunning = rel == m_running;
+        const bool lastKernel = m_images.size() <= 1;
+        m_removeBtn->setEnabled(!m_busy && !rel.isEmpty() && !isRunning && !lastKernel);
+        m_removeBtn->setToolTip(rel.isEmpty() ? QStringLiteral("Select an installed kernel first")
+            : isRunning ? QStringLiteral("Cannot uninstall the running kernel")
+            : lastKernel ? QStringLiteral("Cannot uninstall the only installed kernel")
+            : QStringLiteral("Uninstall the selected kernel, its modules and matching headers"));
     }
 
     // ================================================================ UI
@@ -430,7 +535,7 @@ private:
         auto *group = new QButtonGroup(this);
         group->setExclusive(true);
         m_stack = new QStackedWidget;
-        const QStringList names = {"Installed", "Repository", "Mainline", "Liquorix", "XanMod"};
+        const QStringList names = {"Installed", "Repository", "Mainline", "Liquorix", "XanMod", "Custom"};
         for (int i = 0; i < names.size(); ++i) {
             auto *b = new QPushButton(names.at(i));
             b->setCheckable(true);
@@ -451,9 +556,11 @@ private:
         m_pInst = makePage({"Kernel", "Source", "Status"},
             {grubBtn(btn("Boot by default", [this] { setDefault(); })),
              grubBtn(btn("Newest by default", [this] { resetDefault(); })),
-             btn("Remove", [this] { removeSelected(); }),
+             (m_removeBtn = btn("Uninstall selected", [this] { removeSelected(); })),
              grubBtn(btn("Update GRUB menu", [this] { updateGrub(); })),
              btn("Refresh", [this] { reloadLocal(); })});
+        connect(m_pInst.tree, &QTreeWidget::itemSelectionChanged, this, [this] { updateRemoveButton(); });
+        updateRemoveButton();
         m_pRepo = makePage({"Kernel", "Version", "Suite", "Status"},
             {btn("Install", [this] { installApt(m_pRepo); }),
              btn("Update package lists", [this] { aptUpdate(); }),
@@ -463,6 +570,7 @@ private:
         connect(m_showRc, &QCheckBox::toggled, this, [this](bool) { fillMainline(); });
         m_pMl = makePage({"Version", "Kernel", "Status"},
             {btn("Install", [this] { installMainline(); }),
+             btn("Retry headers", [this] { installMainline(true); }),
              btn("Refresh", [this] { loadMainline(); })}, m_showRc);
 
         m_pLiq = makePage({"Kernel", "Version", "Suite", "Status"},
@@ -477,7 +585,29 @@ private:
         m_pXan.enableBtn = btn("Enable XanMod repository", [this] { enableRepo(SrcXanmod); });
         m_pXan.w->layout()->addWidget(m_pXan.enableBtn);
 
-        for (Page *p : {&m_pInst, &m_pRepo, &m_pMl, &m_pLiq, &m_pXan}) m_stack->addWidget(p->w);
+        auto *customTop = new QWidget;
+        auto *customLayout = new QVBoxLayout(customTop);
+        customLayout->setContentsMargins(0, 0, 0, 0);
+        customLayout->addWidget(new QLabel(QStringLiteral("Configured custom kernel repositories:")));
+        m_customRepos = new QListWidget;
+        m_customRepos->setMaximumHeight(110);
+        m_customRepos->setSelectionMode(QAbstractItemView::SingleSelection);
+        customLayout->addWidget(m_customRepos);
+        auto *customButtons = new QHBoxLayout;
+        customButtons->addWidget(btn("Add custom source", [this] { addCustomSource(); }));
+        m_customRemoveBtn = btn("Remove source", [this] { removeCustomSource(); });
+        customButtons->addWidget(m_customRemoveBtn);
+        customButtons->addStretch();
+        customLayout->addLayout(customButtons);
+        connect(m_customRepos, &QListWidget::itemSelectionChanged, this,
+                [this] { updateCustomRemoveButton(); });
+        m_pCustom = makePage({"Kernel", "Version", "Suite", "Source", "Status"},
+            {btn("Install", [this] { installApt(m_pCustom); }),
+             btn("Update package lists", [this] { aptUpdate(); }),
+             btn("Refresh", [this] { reloadLocal(); })}, customTop);
+        for (Page *p : {&m_pInst, &m_pRepo, &m_pMl, &m_pLiq, &m_pXan, &m_pCustom})
+            m_stack->addWidget(p->w);
+        fillCustomRepos();
         root->addWidget(m_stack, 1);
 
         // ---- banner (persistent until dismissed or replaced)
@@ -557,6 +687,8 @@ private:
         for (QWidget *w : m_actions) w->setEnabled(!on);
         m_status->setText(on ? msg : QString());
         if (!on) applyNotes();   // re-apply per-page enable rules
+        updateRemoveButton();
+        updateCustomRemoveButton();
     }
 
     void applyNotes()
@@ -598,6 +730,9 @@ private:
         thirdParty(m_pLiq, QStringLiteral("Liquorix"), liqOn, QString());
         thirdParty(m_pXan, QStringLiteral("XanMod"), xanOn,
                    m_cpuLevel ? QStringLiteral(" Showing builds for x86-64-v%1 and below (this CPU's level).").arg(m_cpuLevel) : QString());
+        note(m_pCustom, m_customSources.isEmpty()
+            ? QStringLiteral("No custom sources yet. Add an HTTPS APT repository with its signing key and verified fingerprint.")
+            : QStringLiteral("Custom APT repositories are signed and verified. Removing a source does not uninstall its kernels."));
     }
 
     // ================================================================ header
@@ -678,6 +813,7 @@ private:
                  [this](int code, const QString &out, const QString &err) {
             m_images.clear();
             m_installed.clear();
+            m_present.clear();
             if (code != 0 && out.isEmpty()) {
                 setBusy(false);
                 fail(QStringLiteral("dpkg-query failed: ") + err.trimmed());
@@ -685,10 +821,16 @@ private:
             }
             for (const QString &line : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
                 const QStringList f = line.split(QLatin1Char('\t'));
-                if (f.size() < 3 || !f.at(2).startsWith(QLatin1String("ii"))) continue;
+                if (f.size() < 3 || f.at(2).isEmpty()) continue;
+                // Status abbreviation: ii = installed, iU/iF/iH = broken/partial.
+                // Ignore removed packages with only config files remaining (rc).
+                if (f.at(2).at(0) == QLatin1Char('i')) m_present.insert(f.at(0));
+                if (!f.at(2).startsWith(QLatin1String("ii"))) continue;
                 m_installed.insert(f.at(0));
                 if (!releaseOf(f.at(0)).isEmpty()) m_images.insert(f.at(0), f.at(1));
             }
+            loadCustomSources();
+            fillCustomRepos();
             refreshHeader();
             fillInstalled();
             loadApt();
@@ -710,7 +852,7 @@ private:
             for (const QString &line : out.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
                 const QString n = line.section(QStringLiteral(" - "), 0, 0).trimmed();
                 if (!safeToken(n) || n.endsWith(QLatin1String("-dbg")) || n.contains(QLatin1String("dbgsym"))
-                    || n.contains(QLatin1String("-unsigned"))) continue;
+                    ) continue;
                 if (n.startsWith(QLatin1String("linux-headers-"))) m_aptHeaders.insert(n);
                 else images << n;
             }
@@ -742,15 +884,28 @@ private:
                     if (url.contains(QLatin1String("liquorix"))) k.src = SrcLiquorix;
                     else if (url.contains(QLatin1String("xanmod"))) k.src = SrcXanmod;
                     else k.src = SrcRepo;
+                    // Keep custom packages out of the ordinary repository tab.
+                    for (const CustomSource &source : m_customSources) {
+                        if (url == source.url || url.startsWith(source.url + QLatin1Char('/'))) {
+                            if (k.suite == source.suite || source.suite == QLatin1String("./")) {
+                                k.src = SrcCustom;
+                                k.customName = source.name;
+                                break;
+                            }
+                        }
+                    }
                     if (k.src == SrcXanmod) {
                         static const QRegularExpression lv(QStringLiteral("x64v(\\d)"));
                         const auto m = lv.match(k.name);
                         if (m.hasMatch() && m.captured(1).toInt() > m_cpuLevel) continue;
                     }
-                    auto it = best.find(k.name);
-                    if (it == best.end() || verCmp(k.version, it->version) > 0) best.insert(k.name, k);
+                    const QString indexKey = QString::number(k.src) + QLatin1Char(':')
+                        + k.customName + QLatin1Char(':') + k.name;
+                    auto it = best.find(indexKey);
+                    if (it == best.end() || verCmp(k.version, it->version) > 0) best.insert(indexKey, k);
                 }
                 m_apt = best.values().toVector();
+                fillInstalled();
                 std::sort(m_apt.begin(), m_apt.end(), [](const KPkg &a, const KPkg &b) {
                     const int c = verCmp(a.release, b.release);
                     return c != 0 ? c > 0 : a.name < b.name;
@@ -816,19 +971,29 @@ private:
             QStringList st;
             if (r == m_running) st << QStringLiteral("Running");
             if (r == m_grubDefaultRel || (newestIsDefault && i == 0)) st << QStringLiteral("Boot default");
-            auto *item = new QTreeWidgetItem({r, srcName(classifyRelease(r)), st.join(QStringLiteral(" · "))});
+            QString sourceLabel = srcName(classifyRelease(r));
+            for (const KPkg &candidate : m_apt)
+                if (candidate.release == r && candidate.src == SrcCustom) {
+                    sourceLabel = candidate.customName;
+                    break;
+                }
+            auto *item = new QTreeWidgetItem({r, sourceLabel, st.join(QStringLiteral(" · "))});
             item->setData(0, Qt::UserRole, pkgOf.value(r));
             item->setData(0, Qt::UserRole + 1, r);
             m_pInst.tree->addTopLevelItem(item);
         }
+        updateRemoveButton();
     }
 
     void fillApt()
     {
-        for (Page *p : {&m_pRepo, &m_pLiq, &m_pXan}) p->tree->clear();
+        for (Page *p : {&m_pRepo, &m_pLiq, &m_pXan, &m_pCustom}) p->tree->clear();
         for (const KPkg &k : m_apt) {
-            Page &p = k.src == SrcLiquorix ? m_pLiq : k.src == SrcXanmod ? m_pXan : m_pRepo;
-            auto *item = new QTreeWidgetItem({k.release, k.version, k.suite, statusFor(k.release)});
+            Page &p = k.src == SrcLiquorix ? m_pLiq : k.src == SrcXanmod ? m_pXan
+                      : k.src == SrcCustom ? m_pCustom : m_pRepo;
+            auto *item = new QTreeWidgetItem(k.src == SrcCustom
+                ? QStringList{k.release, k.version, k.suite, k.customName, statusFor(k.release)}
+                : QStringList{k.release, k.version, k.suite, statusFor(k.release)});
             item->setData(0, Qt::UserRole, k.name);
             item->setData(0, Qt::UserRole + 1, k.release);
             item->setData(0, Qt::UserRole + 2, k.suite);
@@ -842,7 +1007,11 @@ private:
         int shown = 0;
         for (const MLVer &v : m_ml) {
             if (v.rc && !m_showRc->isChecked()) continue;
-            auto *item = new QTreeWidgetItem({v.tag, v.release(), statusFor(v.release())});
+            QString status = statusFor(v.release());
+            if (status.contains(QLatin1String("Installed"))
+                && !m_installed.contains(QStringLiteral("linux-headers-") + v.release()))
+                status += QStringLiteral(" · Headers missing");
+            auto *item = new QTreeWidgetItem({v.tag, v.release(), status});
             item->setData(0, Qt::UserRole, v.tag);
             item->setData(0, Qt::UserRole + 1, v.release());
             m_pMl.tree->addTopLevelItem(item);
@@ -954,7 +1123,14 @@ private:
         const QString suite = it->data(0, Qt::UserRole + 2).toString();
         if (!safeToken(pkg) || !safeToken(suite)) { fail(QStringLiteral("Refusing unexpected package name: ") + pkg); return; }
 
-        QStringList pkgs = {pkg};
+        // Pin the selected binary version, particularly for custom sources where
+        // another configured repository may offer the same package name.
+        const QString chosenVersion = it->text(1).trimmed();
+        if (!safeToken(chosenVersion)) {
+            fail(QStringLiteral("Refusing unexpected package version: ") + chosenVersion);
+            return;
+        }
+        QStringList pkgs = {pkg + QLatin1Char('=') + chosenVersion};
         const QString hdr = QStringLiteral("linux-headers-") + rel;
         const bool wantHdr = m_headers->isChecked();
         if (wantHdr && m_aptHeaders.contains(hdr)) pkgs << hdr;
@@ -996,43 +1172,61 @@ private:
         return hit;
     }
 
-    void installMainline()
+    void installMainline(bool headersOnly = false)
     {
         QTreeWidgetItem *it = selected(m_pMl);
         if (!it) return;
         const QString tag = it->data(0, Qt::UserRole).toString();
+        const QString release = it->data(0, Qt::UserRole + 1).toString();
+        if (headersOnly && !statusFor(release).contains(QLatin1String("Installed"))) {
+            fail(QStringLiteral("Install the kernel image before retrying its headers."));
+            return;
+        }
         setBusy(true, QStringLiteral("Looking up build files for ") + tag + QStringLiteral("…"));
         mlTryDirs(tag, {kMainlineBase + tag + QLatin1Char('/') + m_arch + QLatin1Char('/'),
-                        kMainlineBase + tag + QLatin1Char('/')});
+                        kMainlineBase + tag + QLatin1Char('/')}, headersOnly);
     }
 
-    void mlTryDirs(const QString &tag, QStringList dirs)
+    void mlTryDirs(const QString &tag, QStringList dirs, bool headersOnly)
     {
         const QString dir = dirs.takeFirst();
-        fetchText(dir, [this, tag, dir, dirs](bool ok, const QString &html) {
+        fetchText(dir, [this, tag, dir, dirs, headersOnly](bool ok, const QString &html) {
             const QStringList debs = ok ? parseDebs(html) : QStringList();
             const QString a = QRegularExpression::escape(m_arch);
             const QString img = pickLast(debs, QStringLiteral("^linux-image-(unsigned-)?[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
             if (img.isEmpty()) {
-                if (!dirs.isEmpty()) { mlTryDirs(tag, dirs); return; }
+                if (!dirs.isEmpty()) { mlTryDirs(tag, dirs, headersOnly); return; }
                 setBusy(false);
                 fail(QStringLiteral("No %1 generic kernel build was found for %2. Ubuntu's build for this version may have failed for your architecture.").arg(m_arch, tag));
                 return;
             }
-            QStringList files = {img};
-            const QString mods = pickLast(debs, QStringLiteral("^linux-modules-[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
-            if (!mods.isEmpty()) files << mods;
-            const int required = files.size();
-            if (m_headers->isChecked()) {
+            QStringList requiredFiles;
+            if (!headersOnly) {
+                requiredFiles << img;
+                const QString mods = pickLast(debs, QStringLiteral("^linux-modules-[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
+                if (!mods.isEmpty()) requiredFiles << mods;
+            }
+            QStringList headerFiles;
+            const bool wantHeaders = headersOnly || m_headers->isChecked();
+            if (wantHeaders) {
                 const QString hAll = pickLast(debs, QStringLiteral("^linux-headers-[^_]+_[^_]+_all\\.deb$"));
                 const QString hGen = pickLast(debs, QStringLiteral("^linux-headers-[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
-                if (!hAll.isEmpty()) files << hAll;
-                if (!hGen.isEmpty()) files << hGen;
+                // A matching pair is mandatory. An incomplete build is not usable by DKMS.
+                if (!hAll.isEmpty() && !hGen.isEmpty()) headerFiles << hAll << hGen;
+                else if (headersOnly) {
+                    if (!dirs.isEmpty()) { mlTryDirs(tag, dirs, headersOnly); return; }
+                    setBusy(false);
+                    fail(QStringLiteral("Both header packages for %1 are not available in the mainline archive (%2). Retry with an earlier compatible build.").arg(tag, m_arch));
+                    return;
+                }
             }
+            const QStringList files = requiredFiles + headerFiles;
             for (const QString &f : files)
                 if (!safeToken(f)) { setBusy(false); fail(QStringLiteral("Refusing unexpected file name: ") + f); return; }
 
-            fetchText(dir + QStringLiteral("CHECKSUMS"), [this, tag, dir, files, required](bool okSum, const QString &sums) {
+            fetchText(dir + QStringLiteral("CHECKSUMS"),
+                      [this, tag, dir, files, requiredFiles, headerFiles, headersOnly, wantHeaders]
+                      (bool okSum, const QString &sums) {
                 setBusy(false);
                 QMap<QString, QString> sha;
                 if (okSum) {
@@ -1044,19 +1238,26 @@ private:
                 bool verified = true;
                 for (const QString &f : files) if (!sha.contains(f)) verified = false;
 
-                QString text = QStringLiteral("Install mainline %1?\n\nFiles:\n  %2").arg(tag, files.join(QStringLiteral("\n  ")));
-                text += QStringLiteral("\n\nThis kernel is unsigned, uses Ubuntu's configuration and will not receive updates through apt.");
-                if (!verified) text += QStringLiteral("\n\nWARNING: SHA-256 checksums are not published for every file, so the download cannot be fully verified.");
-                text += sbWarning();
-                if (!confirm(QStringLiteral("Install mainline kernel"), text)) return;
-                mlRun(tag, dir, files, required, sha);
+                QString text = headersOnly
+                    ? QStringLiteral("Retry installing headers for %1?\n\nFiles:\n  %2").arg(tag, files.join(QStringLiteral("\n  ")))
+                    : QStringLiteral("Install mainline %1?\n\nFiles:\n  %2").arg(tag, files.join(QStringLiteral("\n  ")));
+                if (!headersOnly)
+                    text += QStringLiteral("\n\nThis kernel is unsigned, uses Ubuntu's configuration and will not receive updates through apt.");
+                if (wantHeaders && headerFiles.isEmpty())
+                    text += QStringLiteral("\n\nWARNING: The archive does not offer a complete header pair. DKMS support will be unavailable.");
+                if (!verified)
+                    text += QStringLiteral("\n\nWARNING: SHA-256 checksums are not published for every file, so the download cannot be fully verified.");
+                if (!headersOnly) text += sbWarning();
+                if (!confirm(headersOnly ? QStringLiteral("Retry mainline headers") : QStringLiteral("Install mainline kernel"), text)) return;
+                mlRun(tag, dir, requiredFiles, headerFiles, sha, wantHeaders);
             });
         });
     }
 
-    void mlRun(const QString &tag, const QString &dir, const QStringList &files, int required,
-               const QMap<QString, QString> &sha)
+    void mlRun(const QString &tag, const QString &dir, const QStringList &requiredFiles,
+               const QStringList &headerFiles, const QMap<QString, QString> &sha, bool wantHeaders)
     {
+        const QStringList files = requiredFiles + headerFiles;
         QString s;
         s += QStringLiteral("work=$(mktemp -d /var/tmp/osm-kernels.XXXXXX)\ntrap 'rm -rf \"$work\"' EXIT\ncd \"$work\"\n");
         for (const QString &f : files) {
@@ -1068,21 +1269,44 @@ private:
             if (sha.contains(f)) s += QStringLiteral("printf '%s  %s\\n' %1 %2 | sha256sum -c -\n").arg(sq(sha.value(f)), sq(f));
             else s += QStringLiteral("echo 'WARNING: no published checksum for %1; installed unverified'\n").arg(f);
         }
-        QStringList q;
-        for (const QString &f : files) q << sq(f);
-        s += QStringLiteral("echo '==> Installing packages'\n");
-        s += QStringLiteral("if ! dpkg -i %1; then\n  echo '==> dpkg reported problems; asking apt to resolve dependencies'\n  apt-get %2 install -f -y\nfi\n")
-                 .arg(q.join(QLatin1Char(' ')), kAptOpts);
-        for (int i = 0; i < files.size(); ++i) {
-            const QString pkg = files.at(i).section(QLatin1Char('_'), 0, 0);
-            const QString check = QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii'").arg(sq(pkg));
-            if (i < required)
-                s += QStringLiteral("if ! %1; then echo 'ERROR: %2 is not installed after dpkg/apt' >&2; exit 1; fi\n").arg(check, pkg);
-            else
-                s += QStringLiteral("if ! %1; then echo 'WARNING: %2 could not be installed (often a newer libc requirement); the kernel itself is fine but DKMS modules will not build'; fi\n").arg(check, pkg);
+        if (headerFiles.size() == 2) {
+            // APT solves missing dependencies using only the system's configured repositories.
+            // It must never remove a package merely to satisfy a mainline header build.
+            s += QStringLiteral("echo '==> Installing the common and architecture-specific headers together'\n");
+            const QString a = QStringLiteral("./") + headerFiles.at(0);
+            const QString b = QStringLiteral("./") + headerFiles.at(1);
+            s += QStringLiteral("if apt-get %1 --no-remove install --no-upgrade -y %2 %3; then\n")
+                    .arg(kAptOpts, sq(a), sq(b));
+            s += QStringLiteral("  echo '==> Checking both headers are configured'\n");
+            for (const QString &f : headerFiles) {
+                const QString pkg = f.section(QLatin1Char('_'), 0, 0);
+                s += QStringLiteral("  if ! dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii'; then echo 'WARNING: headers package %2 was not configured; DKMS may fail'; fi\n")
+                    .arg(sq(pkg), pkg);
+            }
+            s += QStringLiteral("else\n");
+            s += QStringLiteral("  echo 'WARNING: mainline headers cannot be installed on this system. Read the APT dependency or DKMS errors above; no existing packages were upgraded to force compatibility.'\n");
+            s += QStringLiteral("  echo '==> Declared header dependencies:'\n");
+            for (const QString &f : headerFiles)
+                s += QStringLiteral("  dpkg-deb -f %1 Depends || true\n").arg(sq(f));
+            s += QStringLiteral("fi\n");
+        } else if (wantHeaders) {
+            s += QStringLiteral("echo 'WARNING: missing common/generic header pair in the mainline archive; DKMS modules cannot be built for this release.'\n");
         }
-        s += QStringLiteral("echo '==> Done. Reboot to use the new kernel.'\n");
-        runRoot(QStringLiteral("Install mainline ") + tag, s, [this](bool) { reloadLocal(); });
+        if (!requiredFiles.isEmpty()) {
+            QStringList q;
+            for (const QString &f : requiredFiles) q << sq(f);
+            s += QStringLiteral("echo '==> Installing kernel image and modules'\n");
+            s += QStringLiteral("if ! dpkg -i %1; then\n  echo '==> Checking whether APT can fix kernel dependencies'\n  apt-get %2 --no-remove install -f -y\nfi\n")
+                    .arg(q.join(QLatin1Char(' ')), kAptOpts);
+            for (const QString &f : requiredFiles) {
+                const QString pkg = f.section(QLatin1Char('_'), 0, 0);
+                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: required kernel package %2 is not installed'; exit 1; }\n")
+                    .arg(sq(pkg), pkg);
+            }
+        }
+        s += QStringLiteral("echo '==> Done. Kernel changes take effect after reboot.'\n");
+        runRoot((requiredFiles.isEmpty() ? QStringLiteral("Install headers ") : QStringLiteral("Install mainline ")) + tag,
+                s, [this](bool) { reloadLocal(); });
     }
 
     void enableRepo(int which)
@@ -1117,6 +1341,126 @@ private:
         runRoot(QStringLiteral("Enable ") + name + QStringLiteral(" repository"), s, [this](bool) { applyNotes(); reloadLocal(); });
     }
 
+    // Create only a signed HTTPS APT source, with a user-supplied expected
+    // fingerprint; do not install unchecked signing keys or use trusted=yes.
+    void addCustomSource()
+    {
+        if (m_fetch.isEmpty()) { fail(QStringLiteral("curl or wget is required to add a source.")); return; }
+        QDialog dlg(this);
+        dlg.setWindowTitle(QStringLiteral("Add custom kernel repository"));
+        dlg.setMinimumWidth(580);
+        auto *layout = new QVBoxLayout(&dlg);
+        auto *form = new QFormLayout;
+        auto *nameEdit = new QLineEdit;
+        auto *urlEdit = new QLineEdit;
+        auto *suiteEdit = new QLineEdit(m_codename.isEmpty() ? QStringLiteral("stable") : m_codename);
+        auto *compEdit = new QLineEdit(QStringLiteral("main"));
+        auto *keyEdit = new QLineEdit;
+        auto *fingerEdit = new QLineEdit;
+        nameEdit->setPlaceholderText(QStringLiteral("e.g. My kernel repository"));
+        urlEdit->setPlaceholderText(QStringLiteral("https://example.org/debian"));
+        keyEdit->setPlaceholderText(QStringLiteral("https://example.org/repository-key.asc"));
+        fingerEdit->setPlaceholderText(QStringLiteral("40- or 64-digit OpenPGP key fingerprint"));
+        form->addRow(QStringLiteral("Display name"), nameEdit);
+        form->addRow(QStringLiteral("APT repository URL"), urlEdit);
+        form->addRow(QStringLiteral("Distribution / suite"), suiteEdit);
+        form->addRow(QStringLiteral("Components"), compEdit);
+        form->addRow(QStringLiteral("Signing key HTTPS URL"), keyEdit);
+        form->addRow(QStringLiteral("Expected key fingerprint"), fingerEdit);
+        layout->addLayout(form);
+        auto *hint = new QLabel(QStringLiteral(
+            "Only add repositories you trust. Verify the OpenPGP fingerprint independently "
+            "with the publisher before proceeding. The key is restricted to this source."));
+        hint->setWordWrap(true);
+        layout->addWidget(hint);
+        auto *actions = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        connect(actions, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(actions, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        layout->addWidget(actions);
+        if (dlg.exec() != QDialog::Accepted) return;
+
+        const QString name = nameEdit->text().trimmed();
+        const QString url = urlEdit->text().trimmed();
+        const QString suite = suiteEdit->text().trimmed();
+        const QString keyUrl = keyEdit->text().trimmed();
+        const QStringList components = compEdit->text().simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        QString finger = fingerEdit->text().toUpper();
+        finger.remove(QLatin1Char(' '));
+        static const QRegularExpression fprRe(QStringLiteral("^(?:[A-F0-9]{40}|[A-F0-9]{64})$"));
+        static const QRegularExpression nameRe(QStringLiteral("^[^\r\n#]{1,80}$"));
+        if (!nameRe.match(name).hasMatch() || !validHttpsUrl(url) || !validHttpsUrl(keyUrl)
+            || !validAptField(suite) || components.isEmpty() || !fprRe.match(finger).hasMatch()) {
+            fail(QStringLiteral("Invalid repository details. Use HTTPS URLs, a simple suite, "
+                                "components and the publisher's full signing key fingerprint."));
+            return;
+        }
+        for (const QString &component : components)
+            if (!validAptField(component)) {
+                fail(QStringLiteral("Invalid APT component: ") + component);
+                return;
+            }
+        const QString id = QString::fromLatin1(QCryptographicHash::hash(
+            (url + QLatin1Char('|') + suite).toUtf8(), QCryptographicHash::Sha256).toHex().left(12));
+        for (const CustomSource &source : m_customSources)
+            if (source.id == id) { fail(QStringLiteral("That source is already configured. Remove it before changing its details.")); return; }
+        CustomSource source;
+        source.id = id; source.name = name; source.url = url;
+        source.suite = suite; source.components = components.join(QLatin1Char(' '));
+        const QString debLine = QStringLiteral("deb [arch=%1 signed-by=%2] %3 %4 %5")
+            .arg(m_arch, source.keyPath(), url, suite, source.components);
+        if (!confirm(QStringLiteral("Trust custom kernel source?"),
+                     QStringLiteral("Add %1?\n\n%2\n\nRequired fingerprint:\n%3\n\n"
+                        "This source will be allowed to provide APT packages. Only proceed if you verified the publisher.")
+                        .arg(name, debLine, finger))) return;
+
+        // The source path, key path, and file name are all generated locally.
+        // All external inputs are shell-quoted and validated before privilege escalation.
+        QString s;
+        s += QStringLiteral("if ! command -v gpg >/dev/null 2>&1; then\n  echo '==> Installing gpg'\n  apt-get %1 --no-remove install -y --no-install-recommends gpg\nfi\n").arg(kAptOpts);
+        s += QStringLiteral("work=$(mktemp -d /var/tmp/osm-kernels-repo.XXXXXX)\ntrap 'rm -rf \"$work\"' EXIT\n");
+        s += QStringLiteral("umask 077\nmkdir -p /etc/apt/keyrings /etc/apt/sources.list.d \"$work/gnupg\"\nchmod 0755 /etc/apt/keyrings /etc/apt/sources.list.d\nchmod 700 \"$work/gnupg\"\n");
+        s += QStringLiteral("test ! -e %1 || { echo 'ERROR: repository source already exists'; exit 1; }\n").arg(sq(source.listPath()));
+        s += QStringLiteral("test ! -e %1 || { echo 'ERROR: repository key already exists'; exit 1; }\n").arg(sq(source.keyPath()));
+        s += QStringLiteral("echo '==> Downloading repository signing key'\n");
+        s += dlCmd(keyUrl, QStringLiteral("$work/download.key"))
+            .replace(QStringLiteral("'$work/download.key'"), QStringLiteral("\"$work/download.key\"")) + QLatin1Char('\n');
+        s += QStringLiteral("actual=$(gpg --homedir \"$work/gnupg\" --batch --show-keys --with-colons --fingerprint \"$work/download.key\" | awk -F: '$1==\"pub\" { count++ } $1==\"fpr\" && !found { finger=toupper($10); found=1 } END { if (count!=1 || !found) exit 1; print finger }')\n");
+        s += QStringLiteral("test \"$actual\" = %1 || { echo 'ERROR: signing key fingerprint mismatch; source NOT added'; exit 1; }\n").arg(sq(finger));
+        s += QStringLiteral("if grep -aq 'BEGIN PGP PUBLIC KEY BLOCK' \"$work/download.key\"; then\n");
+        s += QStringLiteral("  gpg --homedir \"$work/gnupg\" --batch --yes --dearmor -o \"$work/keyring.gpg\" \"$work/download.key\"\n");
+        s += QStringLiteral("else cp \"$work/download.key\" \"$work/keyring.gpg\"; fi\n");
+        s += QStringLiteral("install -m 0644 \"$work/keyring.gpg\" %1\n").arg(sq(source.keyPath()));
+        s += QStringLiteral("printf '%s\\n' %1 %2 > \"$work/source.list\"\n")
+                .arg(sq(QStringLiteral("# osm-kernels-name: ") + name), sq(debLine));
+        s += QStringLiteral("install -m 0644 \"$work/source.list\" %1\n").arg(sq(source.listPath()));
+        s += QStringLiteral("echo '==> Updating APT lists'\n");
+        s += QStringLiteral("if ! apt-get %1 update; then\n").arg(kAptOpts);
+        s += QStringLiteral("  echo 'ERROR: APT update failed. Rolling back the new source.'\n");
+        s += QStringLiteral("  rm -f %1 %2\n  exit 1\nfi\n").arg(sq(source.listPath()), sq(source.keyPath()));
+        runRoot(QStringLiteral("Add custom source ") + name, s, [this](bool) { reloadLocal(); });
+    }
+
+    void removeCustomSource()
+    {
+        if (!m_customRepos || !m_customRepos->currentItem()) {
+            fail(QStringLiteral("Select a custom repository first.")); return;
+        }
+        const QString id = m_customRepos->currentItem()->data(Qt::UserRole).toString();
+        for (const CustomSource &source : m_customSources) {
+            if (source.id != id) continue;
+            if (!confirm(QStringLiteral("Remove custom source?"),
+                         QStringLiteral("Remove %1 from APT?\n\n%2\n\n"
+                                        "Already-installed kernels from this source will remain installed.")
+                             .arg(source.name, source.url))) return;
+            const QString s = QStringLiteral("rm -f %1 %2\napt-get %3 update\n")
+                .arg(sq(source.listPath()), sq(source.keyPath()), kAptOpts);
+            runRoot(QStringLiteral("Remove custom source ") + source.name, s,
+                    [this](bool) { reloadLocal(); });
+            return;
+        }
+        fail(QStringLiteral("Selected source is no longer available."));
+    }
+
     void removeSelected()
     {
         QTreeWidgetItem *it = selected(m_pInst);
@@ -1129,7 +1473,7 @@ private:
                              "linux-modules-extra-" + rel, "linux-headers-" + rel};
         if (rel.endsWith(QLatin1String("-generic"))) cands << QStringLiteral("linux-headers-") + rel.chopped(8);
         QStringList pkgs;
-        for (const QString &c : cands) if (m_installed.contains(c) && safeToken(c)) pkgs << c;
+        for (const QString &c : cands) if (m_present.contains(c) && safeToken(c)) pkgs << c;
         if (pkgs.isEmpty()) { fail(QStringLiteral("No installed packages found for ") + rel); return; }
 
         setBusy(true, QStringLiteral("Checking what removal would affect…"));
@@ -1143,18 +1487,19 @@ private:
                 const QString n = line.section(QLatin1Char(' '), 1, 1);
                 if (!pkgs.contains(n) && !extra.contains(n)) extra << n;
             }
-            QString text = QStringLiteral("Remove kernel %1?\n\nPackages: %2").arg(rel, pkgs.join(QStringLiteral(", ")));
+            QString text = QStringLiteral("Uninstall kernel %1?\n\nPackages to purge: %2").arg(rel, pkgs.join(QStringLiteral(", ")));
             if (!extra.isEmpty())
                 text += QStringLiteral("\n\nWARNING: apt will ALSO remove:\n  %1\n\nIf that includes a metapackage such as linux-image-amd64, you will stop receiving kernel updates from it.")
                             .arg(extra.join(QStringLiteral("\n  ")));
-            if (!confirm(QStringLiteral("Remove kernel"), text)) return;
+            text += QStringLiteral("\n\nThis deletes the kernel and its installed matching modules/headers. The running kernel is protected.");
+            if (!confirm(QStringLiteral("Uninstall kernel"), text)) return;
 
             QStringList q;
             for (const QString &p : pkgs) q << sq(p);
             QString s = QStringLiteral("echo '==> Removing %1'\napt-get %2 purge -y %3\n").arg(rel, kAptOpts, q.join(QLatin1Char(' ')));
             if (rel == m_grubDefaultRel && m_hasGrub)
                 s += QStringLiteral("echo '==> Removed kernel was the boot default; reverting to newest'\nrm -f %1\nupdate-grub\n").arg(sq(kGrubOverride));
-            runRoot(QStringLiteral("Remove ") + rel, s, [this](bool) { reloadLocal(); });
+            runRoot(QStringLiteral("Uninstall ") + rel, s, [this](bool) { reloadLocal(); });
         });
     }
 
