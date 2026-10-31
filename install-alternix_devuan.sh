@@ -1809,14 +1809,13 @@ echo "[✓] Rounded-Corers Installed..."
 # ──────────────────────────────────────────────── 
 # 15. install Merlin
 # ────────────────────────────────────────────────
-echo " "
-
-echo "• Installing Merlin Browser..."
-clone_for_target https://github.com/DansDesigns/merlin-browser "$THIRD_PARTY_DIR/merlin-browser"
-cd "$THIRD_PARTY_DIR/merlin-browser"
-chmod +x install.sh
-as_target ./install.sh
-echo "[✓] Merlin Browser Installed..."
+#echo " "
+#echo "• Installing Merlin Browser..."
+#clone_for_target https://github.com/DansDesigns/merlin-browser "$THIRD_PARTY_DIR/merlin-browser"
+#cd "$THIRD_PARTY_DIR/merlin-browser"
+#chmod +x install.sh
+#as_target ./install.sh
+#echo "[✓] Merlin Browser Installed..."
 
 
 
@@ -1848,14 +1847,14 @@ echo "[✓] auto-cpufreq Installed..."
 # ────────────────────────────────────────────────
 # 18. Wave PLayer
 # ────────────────────────────────────────────────
-echo " "
-echo "• Installing Wave Music Player.."
-clone_for_target https://github.com/DansDesigns/music_player "$TARGET_HOME/music_player"
-cd "$TARGET_HOME/music_player"
-chmod +x install_music_player.sh
-as_target ./install_music_player.sh
-echo "[✓] Wave PLayer Installed..."
-cd /
+#echo " "
+#echo "• Installing Wave Music Player.."
+#clone_for_target https://github.com/DansDesigns/music_player "$TARGET_HOME/music_player"
+#cd "$TARGET_HOME/music_player"
+#chmod +x install_music_player.sh
+#as_target ./install_music_player.sh
+#echo "[✓] Wave PLayer Installed..."
+#cd /
 
 
 # Final Nala check: a later package operation must not leave the updater broken.
