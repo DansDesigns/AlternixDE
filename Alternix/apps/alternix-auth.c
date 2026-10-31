@@ -1,6 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
 #include <errno.h>
+#include <dirent.h>
+#include <ctype.h>
+#include <limits.h>
+#include <sys/socket.h>
+#include <syslog.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <openssl/crypto.h>
@@ -165,6 +170,127 @@ static int record_from_stdin(uid_t uid){
  int r=create_credential(uid,p+2,pin+2,enhanced);
  wipe(p,sizeof(p));wipe(pin,sizeof(pin));return r==0?0:1;
 }
+/* pam_exec creates a fresh PAM-only environment; it does NOT forward the
+ * caller's X11 variables.  Recover local X11 session hints from processes
+ * belonging to the verified requesting UID, after dropping privileges.
+ * Never use these hints to decide WHO is authenticated; only PAM_RUSER (sudo)
+ * or the kernel-provided real UID may do that.
+ */
+#define DISP_LEN 128
+#define XAUTH_LEN 1024
+#define RT_LEN 512
+#define DBUS_LEN 1024
+struct gui_env {
+ char display[DISP_LEN], xauth[XAUTH_LEN], runtime[RT_LEN], dbus[DBUS_LEN];
+};
+static int local_display(const char *v){
+ if(!v || *v!=':')return 0;
+ v++;if(!isdigit((unsigned char)*v))return 0;
+ while(isdigit((unsigned char)*v))v++;
+ if(*v=='.'){v++;if(!isdigit((unsigned char)*v))return 0;
+  while(isdigit((unsigned char)*v))v++;}
+ return !*v;
+}
+static int safe_xauth(uid_t uid,const char *path){
+ struct stat st;
+ return path && *path=='/' && strlen(path)<XAUTH_LEN &&
+   lstat(path,&st)==0 && S_ISREG(st.st_mode) && st.st_uid==uid &&
+   (st.st_mode & 022)==0;
+}
+static int safe_runtime(uid_t uid,const char *path){
+ struct stat st;
+ return path && *path=='/' && strlen(path)<RT_LEN &&
+   lstat(path,&st)==0 && S_ISDIR(st.st_mode) && st.st_uid==uid &&
+   (st.st_mode & 077)==0;
+}
+static void set_if_empty(char *dst,size_t cap,const char *v,size_t vlen){
+ if(!dst[0] && vlen && vlen<cap){memcpy(dst,v,vlen);dst[vlen]=0;}
+}
+static int proc_gui_env(pid_t pid,uid_t uid,struct gui_env *candidate){
+ char path[80];struct stat st;
+ if(snprintf(path,sizeof(path),"/proc/%ld",(long)pid)>=(int)sizeof(path) ||
+    stat(path,&st)!=0 || st.st_uid!=uid)return 0;
+ if(snprintf(path,sizeof(path),"/proc/%ld/environ",(long)pid)>=(int)sizeof(path))return 0;
+ int fd=open(path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+ if(fd<0)return 0;
+ char buf[65536];ssize_t n=read(fd,buf,sizeof(buf));close(fd);
+ if(n<=0)return 0;
+ for(size_t at=0;at<(size_t)n;){
+  size_t len=strnlen(buf+at,(size_t)n-at);
+  if(at+len>=(size_t)n)break;
+  const char *entry=buf+at;
+  if(len>8 && !strncmp(entry,"DISPLAY=",8))
+   set_if_empty(candidate->display,sizeof(candidate->display),entry+8,len-8);
+  else if(len>11 && !strncmp(entry,"XAUTHORITY=",11))
+   set_if_empty(candidate->xauth,sizeof(candidate->xauth),entry+11,len-11);
+  else if(len>16 && !strncmp(entry,"XDG_RUNTIME_DIR=",16))
+   set_if_empty(candidate->runtime,sizeof(candidate->runtime),entry+16,len-16);
+  else if(len>25 && !strncmp(entry,"DBUS_SESSION_BUS_ADDRESS=",25))
+   set_if_empty(candidate->dbus,sizeof(candidate->dbus),entry+25,len-25);
+  at+=len+1;
+ }
+ if(!local_display(candidate->display))return 0;
+ if(!safe_xauth(uid,candidate->xauth))candidate->xauth[0]=0;
+ if(!safe_runtime(uid,candidate->runtime))candidate->runtime[0]=0;
+ if(strncmp(candidate->dbus,"unix:",5))candidate->dbus[0]=0;
+ return 1;
+}
+static void find_gui_env(uid_t uid,struct gui_env *result){
+ DIR *d=opendir("/proc");if(!d)return;
+ struct dirent *item;int best=-1,tries=0;
+ while((item=readdir(d))!=NULL && tries<4096){
+  if(!isdigit((unsigned char)item->d_name[0]))continue;
+  char *end=NULL;long id=strtol(item->d_name,&end,10);
+  if(!end||*end||id<=0)continue;
+  tries++;
+  struct gui_env candidate={0};
+  if(!proc_gui_env((pid_t)id,uid,&candidate))continue;
+  int score=1 + (candidate.xauth[0]?4:0) +
+             (candidate.runtime[0]?2:0) + (candidate.dbus[0]?1:0);
+  if(score>best){*result=candidate;best=score;}
+  if(score==8)break;
+ }
+ closedir(d);
+}
+static void configure_gui_env(uid_t uid,const struct passwd *pw){
+ struct gui_env session={0};
+ const char *display=getenv("DISPLAY"),*xa=getenv("XAUTHORITY");
+ const char *rt=getenv("XDG_RUNTIME_DIR"),*dbus=getenv("DBUS_SESSION_BUS_ADDRESS");
+ /* Direct calls can provide DISPLAY. PAM normally cannot. */
+ if(local_display(display))
+  set_if_empty(session.display,sizeof(session.display),display,strlen(display));
+ if(safe_xauth(uid,xa))
+  set_if_empty(session.xauth,sizeof(session.xauth),xa,strlen(xa));
+ if(safe_runtime(uid,rt))
+  set_if_empty(session.runtime,sizeof(session.runtime),rt,strlen(rt));
+ if(dbus && !strncmp(dbus,"unix:",5))
+  set_if_empty(session.dbus,sizeof(session.dbus),dbus,strlen(dbus));
+ if(!session.display[0] || !session.xauth[0] || !session.runtime[0]){
+  struct gui_env discovered={0};find_gui_env(uid,&discovered);
+  if(!session.display[0])memcpy(session.display,discovered.display,sizeof(session.display));
+  if(!session.xauth[0])memcpy(session.xauth,discovered.xauth,sizeof(session.xauth));
+  if(!session.runtime[0])memcpy(session.runtime,discovered.runtime,sizeof(session.runtime));
+  if(!session.dbus[0])memcpy(session.dbus,discovered.dbus,sizeof(session.dbus));
+ }
+ /* Standard Qtile/Xorg fallback for a session that does not publish its env. */
+ if(!session.display[0]){
+  struct stat st;
+  if(stat("/tmp/.X11-unix/X0",&st)==0 && S_ISSOCK(st.st_mode))
+   strcpy(session.display,":0");
+ }
+ if(!session.xauth[0] && strlen(pw->pw_dir)<XAUTH_LEN-12){
+  char path[XAUTH_LEN];snprintf(path,sizeof(path),"%s/.Xauthority",pw->pw_dir);
+  if(safe_xauth(uid,path))strcpy(session.xauth,path);
+ }
+ if(!session.runtime[0]){
+  char path[RT_LEN];snprintf(path,sizeof(path),"/run/user/%lu",(unsigned long)uid);
+  if(safe_runtime(uid,path))strcpy(session.runtime,path);
+ }
+ if(session.display[0])setenv("DISPLAY",session.display,1);
+ if(session.xauth[0])setenv("XAUTHORITY",session.xauth,1);
+ if(session.runtime[0])setenv("XDG_RUNTIME_DIR",session.runtime,1);
+ if(session.dbus[0])setenv("DBUS_SESSION_BUS_ADDRESS",session.dbus,1);
+}
 static int launch_prompt(uid_t uid,char *line,size_t limit){
  int p[2];if(pipe2(p,O_CLOEXEC)!=0)return -1;
  pid_t pid=fork();if(pid<0){close(p[0]);close(p[1]);return -1;}
@@ -175,17 +301,19 @@ static int launch_prompt(uid_t uid,char *line,size_t limit){
   /* Unprivileged Qt child only. Never execute the GUI as root. */
   struct passwd *pw=getpwuid(uid);
   if(!pw||setgroups(0,NULL)!=0||setgid(pw->pw_gid)!=0||setuid(uid)!=0)_exit(125);
+  /* Read user-owned session hints only after setuid; PAM provides none. */
+  configure_gui_env(uid,pw);
   const char *display0=getenv("DISPLAY"),*xa0=getenv("XAUTHORITY"),*runtime0=getenv("XDG_RUNTIME_DIR");
   const char *dbus0=getenv("DBUS_SESSION_BUS_ADDRESS");
   char *display=display0?strdup(display0):NULL,*xa=xa0?strdup(xa0):NULL;
   char *runtime=runtime0?strdup(runtime0):NULL,*dbus=dbus0?strdup(dbus0):NULL;
   char *home=strdup(pw->pw_dir),*name=strdup(pw->pw_name);
-  if(!home||!name)_exit(125);
+  if(!home||!name||!display)_exit(125);
   clearenv();setenv("PATH","/usr/bin:/bin",1);setenv("HOME",home,1);setenv("USER",name,1);
-  if(display&&strlen(display)<256)setenv("DISPLAY",display,1);
-  if(xa&&strlen(xa)<4096)setenv("XAUTHORITY",xa,1);
-  if(runtime&&strlen(runtime)<4096)setenv("XDG_RUNTIME_DIR",runtime,1);
-  if(dbus&&strlen(dbus)<4096)setenv("DBUS_SESSION_BUS_ADDRESS",dbus,1);
+  if(display)setenv("DISPLAY",display,1);
+  if(xa)setenv("XAUTHORITY",xa,1);
+  if(runtime)setenv("XDG_RUNTIME_DIR",runtime,1);
+  if(dbus)setenv("DBUS_SESSION_BUS_ADDRESS",dbus,1);
   char *const a[]={ (char*)GUI,(char*)"--pam-prompt",NULL};execv(GUI,a);_exit(126);
  }
  close(p[1]);int r=read_secret(p[0],line,limit,120000);close(p[0]);
@@ -201,9 +329,9 @@ int main(int argc,char **argv){
    * PAM_RUSER is populated by pam_exec from the PAM handle, not by us.
    * This fallback is only reachable by an already-root caller. */
   const char *requester=getenv("PAM_RUSER");
-  if(!requester || !*requester)return 1;
+  if(!requester || !*requester){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: sudo PAM_RUSER unavailable");return 1;}
   struct passwd *p=getpwnam(requester);
-  if(!p || p->pw_uid<100)return 1;
+  if(!p || p->pw_uid<100){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: unrecognised sudo PAM_RUSER");return 1;}
   owner=p->pw_uid;
  }
  if(owner==0 && strcmp(argv[1],"--import"))return 1;
@@ -224,16 +352,16 @@ int main(int argc,char **argv){
  if(!strcmp(argv[1],"--verify")){
   char line[SECRET_MAX];char *k,*v;
   if(read_secret(STDIN_FILENO,line,sizeof(line),15000)!=0||get_payload(line,&k,&v)!=0)return 1;
-  int r=limited_check(owner,k,v);wipe(line,sizeof(line));return r==0?0:1;
+  int r=limited_check(owner,k,v);wipe(line,sizeof(line));if(r!=0)syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: pattern/PIN rejected for UID %lu",(unsigned long)owner);return r==0?0:1;
  }
  if(!strcmp(argv[1],"--pam")){
   /* PAM_EXEC with seteuid runs us as euid=root, ruid=login user.
    * GUI returns a candidate, never an approval decision. */
   int e;unsigned char a[16],b[32],c[32];
-  if(load_credential(owner,&e,a,b,c)!=0)return 1;
+  if(load_credential(owner,&e,a,b,c)!=0){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: missing protected credential for UID %lu",(unsigned long)owner);return 1;}
   char line[SECRET_MAX];char *k,*v;
-  if(launch_prompt(owner,line,sizeof(line))!=0||get_payload(line,&k,&v)!=0)return 1;
-  int r=limited_check(owner,k,v);wipe(line,sizeof(line));return r==0?0:1;
+  if(launch_prompt(owner,line,sizeof(line))!=0||get_payload(line,&k,&v)!=0){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: graphical prompt unavailable or cancelled for UID %lu",(unsigned long)owner);return 1;}
+  int r=limited_check(owner,k,v);wipe(line,sizeof(line));if(r!=0)syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: pattern/PIN rejected for UID %lu",(unsigned long)owner);return r==0?0:1;
  }
  return 1;
 }
