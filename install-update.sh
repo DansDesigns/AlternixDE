@@ -656,6 +656,13 @@ echo "• Building osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
+echo "• Installing osm-paper-restore..."
+sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
+
+echo "• Building osm-lockscreen..."
+g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 osm-lockscreen /usr/local/bin/
+
 echo "• Building osm-launcher-lock-cleaner..."
 # Resolve the source in the repository instead of assuming it is in the working directory.
 LOCKCLEAN_SRC="$(find "$ALT_ROOT" -type f -name 'osm-launcher-lockclean' -print -quit)"
