@@ -24,6 +24,7 @@
 #include <QVector>
 #include <QDir>
 #include <QLockFile>
+#include <unistd.h>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
@@ -103,6 +104,19 @@ static QList<AppEntry> loadDesktopEntries() {
     std::sort(apps.begin(), apps.end(),
               [](const AppEntry &a, const AppEntry &b){ return a.name.toLower() < b.name.toLower(); });
     return apps;
+}
+
+// Privileged desktop applications such as Synaptic use PolicyKit/pkexec,
+// not sudo. Qtile does not necessarily launch XDG autostart applications,
+// so make sure the installed graphical PolicyKit agent is running before
+// starting any .desktop Exec line. Authentication itself remains in PAM:
+// polkitd -> alternix-auth -> the same osm-lock pattern/PIN dialog as sudo.
+static void ensurePolkitAgent() {
+    if (!QFileInfo("/usr/bin/lxpolkit").isExecutable()) return;
+    const QString userId = QString::number(static_cast<unsigned int>(getuid()));
+    if (QProcess::execute("/usr/bin/pgrep", {"-u", userId, "-x", "lxpolkit"}) == 0)
+        return;
+    QProcess::startDetached("/usr/bin/lxpolkit", {});
 }
 
 // ──────────────────────────────  AppTile (lazy icon loading)
@@ -270,6 +284,9 @@ int main(int argc, char **argv) {
         // Another osm-launcher is already running
         return 0;
     }
+
+    // Also supports sessions which bypass /etc/X11/Xsession.d startup.
+    ensurePolkitAgent();
 
     QList<AppEntry> apps = loadDesktopEntries();
 

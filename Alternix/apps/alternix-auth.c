@@ -324,15 +324,44 @@ static int launch_prompt(uid_t uid,char *line,size_t limit){
 int main(int argc,char **argv){
  owner=getuid();
  if(geteuid()!=0||argc<2)return 1;
- if(owner==0 && argc==2 && !strcmp(argv[1],"--pam")){
-  /* Some sudo builds temporarily use ruid=root during PAM setup.
-   * PAM_RUSER is populated by pam_exec from the PAM handle, not by us.
-   * This fallback is only reachable by an already-root caller. */
-  const char *requester=getenv("PAM_RUSER");
-  if(!requester || !*requester){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: sudo PAM_RUSER unavailable");return 1;}
-  struct passwd *p=getpwnam(requester);
-  if(!p || p->pw_uid<100){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: unrecognised sudo PAM_RUSER");return 1;}
-  owner=p->pw_uid;
+ if(argc==2 && !strcmp(argv[1],"--pam")){
+  /* PAM, not the caller, selects the identity being authenticated.
+   * sudo authenticates its requesting user (PAM_RUSER, in the root-ruid
+   * case); polkit authenticates its chosen administrator (PAM_USER).
+   * An ordinary setuid caller may only authenticate its OWN identity.
+   * Neither path ever executes a privileged user-supplied command. */
+  const char *service=getenv("PAM_SERVICE");
+  const char *type=getenv("PAM_TYPE");
+  if(!service || !type || strcmp(type,"auth"))return 1;
+  if(!strcmp(service,"polkit-1")){
+   const char *name=getenv("PAM_USER");
+   if(!name || !*name)return 1;
+   struct passwd *p=getpwnam(name);
+   if(!p || p->pw_uid<100 || (owner!=0 && owner!=p->pw_uid))return 1;
+   /* Polkit authorization still decides if the action is permitted.
+    * Require a real sudo-group administrator for the Alternix pattern. */
+   struct group *g=getgrnam("sudo");
+   int member=0;
+   if(g){
+    member=(p->pw_gid==g->gr_gid);
+    for(char **m=g->gr_mem; m && *m; m++)
+     if(!strcmp(*m,p->pw_name)){member=1;break;}
+   }
+   if(!member){syslog(LOG_AUTHPRIV|LOG_WARNING,"alternix-auth: polkit identity is not a sudo administrator");return 1;}
+   owner=p->pw_uid;
+  }else if(!strcmp(service,"sudo")){
+   if(owner==0){
+    /* Some sudo builds invoke PAM with a root real UID. */
+    const char *name=getenv("PAM_RUSER");
+    if(!name || !*name)return 1;
+    struct passwd *p=getpwnam(name);
+    if(!p || p->pw_uid<100)return 1;
+    owner=p->pw_uid;
+   }
+  }else{
+   /* Never allow login, su, screen-unlock, etc. to use this verifier. */
+   return 1;
+  }
  }
  if(owner==0 && strcmp(argv[1],"--import"))return 1;
  if(!strcmp(argv[1],"--import")){

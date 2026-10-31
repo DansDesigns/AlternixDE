@@ -1,5 +1,5 @@
 #!/bin/bash
-# AlternixOS sudo -> PAM -> osm-lock pattern/PIN authentication setup.
+# AlternixOS sudo + polkit -> PAM -> osm-lock pattern/PIN authentication setup.
 # Run as root from the existing installer or the existing updater.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -37,6 +37,20 @@ if ! find /lib /usr/lib -name pam_exec.so -type f -print -quit 2>/dev/null | gre
     echo 'ERROR: pam_exec.so is not installed; refusing to modify sudo PAM.' >&2; exit 1
 fi
 [[ -f /etc/pam.d/sudo ]] || { echo 'ERROR: /etc/pam.d/sudo absent.' >&2; exit 1; }
+# Synaptic, GParted and other privileged graphical programs use PolicyKit,
+# NOT sudo. Install its daemon, pkexec and the X11 session agent before any
+# PAM changes; do not bring in systemd or change AlternixOS's SysVinit setup.
+if [[ ! -x /usr/bin/pkexec || ! -x /usr/bin/lxpolkit || ! -f /etc/pam.d/polkit-1 ]]; then
+    command -v apt-get >/dev/null || { echo 'ERROR: apt-get is required to install PolicyKit support.' >&2; exit 1; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends polkitd pkexec lxpolkit || {
+        echo 'ERROR: Could not install the PolicyKit components. PAM unchanged.' >&2
+        exit 1
+    }
+fi
+[[ -x /usr/bin/pkexec && -x /usr/bin/lxpolkit && -f /etc/pam.d/polkit-1 ]] || {
+    echo 'ERROR: PolicyKit or its graphical agent is unavailable. PAM unchanged.' >&2
+    exit 1
+}
 visudo -c -q
 umask 077
 TMP="$(mktemp -d)"
@@ -48,6 +62,22 @@ rollback_auth_policy() {
     if [[ -f "$TMP/pam-before" ]]; then
         install -o root -g root -m 0644 "$TMP/pam-before" /etc/pam.d/.sudo.alternix-rollback
         mv -f /etc/pam.d/.sudo.alternix-rollback /etc/pam.d/sudo
+    fi
+    if [[ -f "$TMP/polkit-pam-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-pam-before" /etc/pam.d/.polkit-1.alternix-rollback
+        mv -f /etc/pam.d/.polkit-1.alternix-rollback /etc/pam.d/polkit-1
+    fi
+    # These files are created by this setup; restore pre-existing versions
+    # exactly when a new sudo or PolicyKit challenge fails.
+    if [[ -f "$TMP/polkit-rule-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-rule-before" /etc/polkit-1/rules.d/00-alternix-auth.rules
+    else
+        rm -f /etc/polkit-1/rules.d/00-alternix-auth.rules
+    fi
+    if [[ -f "$TMP/polkit-agent-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-agent-before" /etc/X11/Xsession.d/96alternix-polkit-agent
+    else
+        rm -f /etc/X11/Xsession.d/96alternix-polkit-agent
     fi
     if [[ -f "$TMP/power-before" ]]; then
         install -o root -g root -m 0440 "$TMP/power-before" /etc/sudoers.d/90-alternix-power
@@ -304,7 +334,7 @@ if [[ -z "${DISPLAY:-}" ]]; then
     echo 'Run authentication activation from the user desktop (with a terminal and root approval).' >&2
     exit 1
 fi
-for dep in runuser timeout; do
+for dep in runuser setpriv timeout; do
     command -v "$dep" >/dev/null || { echo "ERROR: Missing dependency: $dep. PAM unchanged." >&2; exit 1; }
 done
 AUTH_SESSION_ENV=("HOME=$USER_HOME" "USER=$LOGIN_USER" "LOGNAME=$LOGIN_USER"
@@ -354,9 +384,58 @@ for line in old.splitlines():
         clean.append(line)
 pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
 PY
+# PolicyKit has a separate PAM service from sudo. Start from the pristine
+# package service definition on reruns, not from our already-modified one.
+# Keep account/session checks and do not edit common-auth (login stays intact).
+if [[ ! -e /etc/pam.d/polkit-1.alternix-original ]]; then
+    install -o root -g root -m 0600 /etc/pam.d/polkit-1 /etc/pam.d/polkit-1.alternix-original
+fi
+python3 - /etc/pam.d/polkit-1.alternix-original "$TMP/polkit-pam" <<'PY_POLKIT_PAM'
+import pathlib, re, sys
+old = pathlib.Path(sys.argv[1]).read_text()
+if len(re.findall(r'^\s*@include\s+common-auth\s*$', old, re.M)) != 1:
+    raise SystemExit('ERROR: Unsupported PolicyKit PAM configuration; no policies modified.')
+if any(re.match(r'^\s*auth\s+', line) for line in old.splitlines()):
+    raise SystemExit('ERROR: Custom PolicyKit PAM auth rules found; refusing to override.')
+clean = []
+for line in old.splitlines():
+    if re.match(r'^\s*@include\s+common-auth\s*$', line):
+        clean.append('auth requisite pam_exec.so seteuid quiet /usr/local/libexec/alternix-auth --pam')
+    else:
+        clean.append(line)
+pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
+PY_POLKIT_PAM
+
+# Select the current sudo-group member as the PolicyKit administrator. This
+# chooses WHO enters the pattern; it does NOT grant blanket authorization or
+# change any action's approval rules. Non-sudo users use default polkit rules.
+cat > "$TMP/00-alternix-auth.rules" <<'POLKIT_RULE'
+polkit.addAdminRule(function(action, subject) {
+    if (subject.isInGroup("sudo")) {
+        return ["unix-user:" + subject.user];
+    }
+});
+POLKIT_RULE
+
+# A Qtile/X11 session is not guaranteed to implement XDG autostart. Xsession
+# runs this *unprivileged* agent for any local X11 login, independent of init.
+cat > "$TMP/96alternix-polkit-agent" <<'POLKIT_XSESSION'
+# AlternixOS PolicyKit agent: authenticated requests use osm-lock via PAM.
+if [ -n "${DISPLAY:-}" ] && [ -x /usr/bin/lxpolkit ]; then
+    /usr/bin/lxpolkit >/dev/null 2>&1 &
+fi
+POLKIT_XSESSION
+
 # Snapshot every sudo/PAM file that we might change. An EXIT trap restores
 # this snapshot on *any* failure during the provisional activation.
 install -o root -g root -m 0600 /etc/pam.d/sudo "$TMP/pam-before"
+install -o root -g root -m 0600 /etc/pam.d/polkit-1 "$TMP/polkit-pam-before"
+if [[ -e /etc/polkit-1/rules.d/00-alternix-auth.rules ]]; then
+    install -o root -g root -m 0600 /etc/polkit-1/rules.d/00-alternix-auth.rules "$TMP/polkit-rule-before"
+fi
+if [[ -e /etc/X11/Xsession.d/96alternix-polkit-agent ]]; then
+    install -o root -g root -m 0600 /etc/X11/Xsession.d/96alternix-polkit-agent "$TMP/polkit-agent-before"
+fi
 if [[ -f /etc/sudoers.d/alternix-pattern ]]; then
     install -o root -g root -m 0600 /etc/sudoers.d/alternix-pattern "$TMP/pattern-before"
 fi
@@ -389,6 +468,12 @@ rm -f /etc/sudoers.d/alternix-pattern
 # of a new service file.
 install -o root -g root -m 0644 "$TMP/sudo-pam" /etc/pam.d/.sudo.alternix-candidate
 mv -f /etc/pam.d/.sudo.alternix-candidate /etc/pam.d/sudo
+install -o root -g root -m 0644 "$TMP/polkit-pam" /etc/pam.d/.polkit-1.alternix-candidate
+mv -f /etc/pam.d/.polkit-1.alternix-candidate /etc/pam.d/polkit-1
+# Install an identity-selection rule, never an allow-unauthenticated rule.
+install -d -o root -g root -m 0755 /etc/polkit-1/rules.d /etc/X11/Xsession.d
+install -o root -g root -m 0644 "$TMP/00-alternix-auth.rules" /etc/polkit-1/rules.d/00-alternix-auth.rules
+install -o root -g root -m 0644 "$TMP/96alternix-polkit-agent" /etc/X11/Xsession.d/96alternix-polkit-agent
 for old_rule in alternix-nopasswd zz-alternix-time; do
     rm -f "/etc/sudoers.d/$old_rule"
 done
@@ -408,9 +493,33 @@ if ! timeout --kill-after=5s 150s \
     echo 'ERROR: The real sudo/PAM challenge failed; reverting to the previous authentication configuration.' >&2
     exit 1
 fi
+# Bring up the graphical PolicyKit agent in the already-running desktop,
+# while the Xsession hook handles subsequent logins. If another agent has
+# already registered, lxpolkit simply cannot register a second agent.
+echo '[Auth] Starting the PolicyKit session agent for this desktop...'
+# setpriv preserves the caller's elogind/ConsoleKit session, unlike runuser
+# which can open a second login session not owned by the desktop agent.
+setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
+    env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/lxpolkit </dev/null >/dev/null 2>&1 &
+# Allow it to register with the system D-Bus service before the live test.
+sleep 2
+
+# Unlike sudo, PolicyKit asks for an administrator identity through PAM_USER.
+# Exercise the real pkexec -> polkitd -> PAM -> osm-lock -> authorization path.
+# A failed request restores BOTH the original sudo and polkit PAM stacks.
+echo '[Auth] Testing a real PolicyKit request (Synaptic uses this mechanism)...'
+echo '[Auth] Confirm your Alternix pattern/PIN in the graphical window.'
+POLKIT_TEST_OUTPUT=''
+if ! POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
+    setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
+    env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec /usr/bin/id -u)" || [[ "$POLKIT_TEST_OUTPUT" != 0 ]]; then
+    echo 'ERROR: PolicyKit graphical challenge failed; restoring the original sudo and polkit policies.' >&2
+    exit 1
+fi
+
 # The privileged root setup process, not an unprivileged updater check,
 # commits the transaction. Any earlier nonzero exit already triggered rollback.
 ACTIVATION_IN_PROGRESS=0
-echo '[Auth] Live sudo/PAM challenge passed. Alternix pattern/PIN authentication is active.'
-echo '[Auth] Original PAM backup: /etc/pam.d/sudo.alternix-original'
+echo '[Auth] Live sudo and PolicyKit challenges passed. Alternix pattern/PIN authentication is active.'
+echo '[Auth] Original PAM backups: /etc/pam.d/sudo.alternix-original and /etc/pam.d/polkit-1.alternix-original'
 echo '[Auth] Recovery from a root shell: cp /etc/pam.d/sudo.alternix-original /etc/pam.d/sudo'
