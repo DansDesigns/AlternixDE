@@ -737,14 +737,14 @@ fi
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 echo "• Updating desktop widgets..."
-cd "$ALT_ROOT/Alternix/apps/osm-widgets/widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
+cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
 
 echo "• Building calendar widget..."
-g++ -std=c++11 -fPIC -shared calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+g++ -I. -std=c++11 -fPIC -shared widgets/calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 calendar.so /usr/local/lib/alternix/widgets/calendar.so
 
 echo "• Building 13-moon-calendar widget..."
-g++ -std=c++11 -fPIC -shared moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
+g++ -I. -std=c++11 -fPIC -shared widgets/moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 moon-calendar.so /usr/local/lib/alternix/widgets/moon-calendar.so
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
