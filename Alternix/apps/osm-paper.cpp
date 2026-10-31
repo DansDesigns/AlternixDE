@@ -28,6 +28,21 @@
 #include <QSettings>
 #include <QFile>
 
+static QString osmPaperConfigPath()
+{
+    const QString configDir = QDir::homePath() + "/.config/Alternix";
+    QDir().mkpath(configDir);
+    return configDir + "/osm-paper.conf";
+}
+
+static QString expandWallpaperHome(const QString &rawPath)
+{
+    const QString path = rawPath.trimmed();
+    if (path == "~") return QDir::homePath();
+    if (path.startsWith("~/")) return QDir::homePath() + path.mid(1);
+    return path;
+}
+
 class WallpaperBrowser : public QWidget
 {
 public:
@@ -235,7 +250,7 @@ private:
     // ───────────────────── Persistence ───────────────────────
     void saveLastFolder(const QString &folder)
     {
-        QSettings s(QDir::homePath() + "/.config/Alternix/osm-paper.conf", QSettings::IniFormat);
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
         s.beginGroup("last");
         s.setValue("folder", folder);
         s.endGroup();
@@ -244,15 +259,15 @@ private:
 
     void loadLastFolder()
     {
-        QSettings s(QDir::homePath() + "/.config/Alternix/osm-paper.conf", QSettings::IniFormat);
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
         s.beginGroup("last");
-        lastFolder = s.value("folder").toString();
+        lastFolder = expandWallpaperHome(s.value("folder").toString());
         s.endGroup();
     }
 
     void saveLastWallpaper(const QString &modeName, const QString &path)
     {
-        QSettings s(QDir::homePath() + "/.config/Alternix/osm-paper.conf", QSettings::IniFormat);
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
         s.beginGroup("last");
         s.setValue("wallpaper", path);
         s.setValue("mode", modeName);
@@ -264,9 +279,9 @@ private:
 
     void loadLastWallpaperSettings()
     {
-        QSettings s(QDir::homePath() + "/.config/Alternix/osm-paper.conf", QSettings::IniFormat);
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
         s.beginGroup("last");
-        lastWallpaperPath = s.value("wallpaper").toString();
+        lastWallpaperPath = expandWallpaperHome(s.value("wallpaper").toString());
         lastMode = s.value("mode").toString();
         s.endGroup();
     }

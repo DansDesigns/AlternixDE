@@ -10,6 +10,8 @@
 #include <QScreen>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QSettings>
 #include <QTextStream>
 #include <QProcess>
 #include <QGraphicsOpacityEffect>
@@ -307,27 +309,25 @@ private:
     qreal scaleFactor = 1.0; // devicePixelRatio()
 
     void loadWallpaper() {
-        QString cfg = QDir::homePath() + "/.config/Alternix/osm-paper.conf";
-        QString path;
+        // Shared wallpaper configuration used by osm-paper and
+        // osm-paper-restore, including on the first installed launch.
+        const QString home = QDir::homePath();
+        const QString cfg = home + "/.config/Alternix/osm-paper.conf";
+        QSettings settings(cfg, QSettings::IniFormat);
 
-        if (QFile::exists(cfg)) {
-            QFile f(cfg);
-            if (f.open(QIODevice::ReadOnly|QIODevice::Text)) {
-                QTextStream in(&f);
-                while (!in.atEnd()) {
-                    QString line = in.readLine().trimmed();
-                    if (line.startsWith("wallpaper=")) {
-                        path = line.section('=',1);
-                        break;
-                    }
-                }
-            }
-        }
+        QString path = settings.value("last/wallpaper").toString().trimmed();
+        if (path.isEmpty())
+            path = settings.value("wallpaper").toString().trimmed();
 
-        if (!path.isEmpty() && QFile::exists(path))
+        // The installed default can contain a home-relative path.
+        if (path == "~")
+            path = home;
+        else if (path.startsWith("~/"))
+            path = home + path.mid(1);
+
+        wallpaper = QPixmap();
+        if (!path.isEmpty() && QFileInfo(path).isFile())
             wallpaper.load(path);
-        else
-            wallpaper = QPixmap();
     }
 
     // ──────────────────────────────────────

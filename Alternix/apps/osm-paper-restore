@@ -3,20 +3,22 @@ import os
 import configparser
 import subprocess
 
+# The same configuration file used by osm-paper and osm-lockscreen.
 config_path = os.path.expanduser("~/.config/Alternix/osm-paper.conf")
-if not os.path.exists(config_path):
+if not os.path.isfile(config_path):
     raise SystemExit(0)
 
-cfg = configparser.ConfigParser()
-cfg.read(config_path)
-
-if "last" not in cfg:
+cfg = configparser.ConfigParser(interpolation=None)
+try:
+    cfg.read(config_path)
+    if not cfg.has_section("last"):
+        raise SystemExit(0)
+    wall = os.path.expanduser(cfg.get("last", "wallpaper", fallback="").strip())
+    mode = cfg.get("last", "mode", fallback="zoom").strip()
+except (OSError, configparser.Error):
     raise SystemExit(0)
 
-wall = cfg["last"].get("wallpaper", "").strip()
-mode = cfg["last"].get("mode", "zoom").strip()
-
-if not wall or not os.path.exists(wall):
+if not wall or not os.path.isfile(wall):
     raise SystemExit(0)
 
 mode_map = {
@@ -26,7 +28,4 @@ mode_map = {
     "center": "--center",
 }
 
-flag = mode_map.get(mode, "--zoom")
-
-subprocess.Popen(["xwallpaper", flag, wall])
-
+subprocess.Popen(["xwallpaper", mode_map.get(mode, "--zoom"), wall])
