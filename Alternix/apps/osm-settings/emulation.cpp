@@ -16,6 +16,9 @@
 #include <QTextStream>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QFileDialog>
+#include <QLineEdit>
+#include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QEventLoop>
@@ -83,9 +86,11 @@ static QString runCmd(const QString &cmd, int timeoutMs = 5000)
 // The bracketed first letter stops pgrep matching the /bin/sh that is running
 // the pgrep itself — without it these checks always report "running".
 static const char *WAYDROID_CONTAINER_CHECK =
-    "pgrep -f '[w]aydroid container' >/dev/null 2>&1 && echo running || echo stopped";
+    "waydroid status 2>/dev/null | grep -Eiq '^[[:space:]]*Container:[[:space:]]*RUNNING' "
+    "&& echo running || echo stopped";
 static const char *WAYDROID_SESSION_CHECK =
-    "pgrep -f '[w]aydroid session' >/dev/null 2>&1 && echo running || echo stopped";
+    "waydroid status 2>/dev/null | grep -Eiq '^[[:space:]]*Session:[[:space:]]*RUNNING' "
+    "&& echo running || echo stopped";
 
 // -----------------------------------------------------
 // Root privileges for the setup actions.
@@ -120,6 +125,7 @@ static QString binderState()
     return runCmd(
         "if [ -e /dev/binderfs/binder-control ]; then echo binderfs; "
         "elif [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then echo legacy; "
+        "elif [ -e /dev/anbox-binder ] && [ -e /dev/anbox-hwbinder ] && [ -e /dev/anbox-vndbinder ]; then echo anbox; "
         "else echo none; fi").trimmed();
 }
 
@@ -132,6 +138,13 @@ static QString runtimeDir()
         rt = QString("/tmp/alternix-runtime-%1").arg(getuid());
     return rt;
 }
+
+// Raven is built in the user's home, not installed globally or over Wine.
+static QString ravenSource() { return QDir::homePath() + "/.local/share/Alternix/raven/source"; }
+static QString ravenBin()    { return ravenSource() + "/build/native/raven"; }
+static QString ravenComponents() { return QDir::homePath() + "/.local/share/Alternix/raven/components"; }
+static QString ravenDefaultPrefix() { return QDir::homePath() + "/.local/share/Alternix/raven/prefixes/default"; }
+static bool ravenInstalled() { return QFileInfo(ravenBin()).isExecutable(); }
 
 static QString protonRoot()   { return QDir::homePath() + "/.local/share/Alternix/proton"; }
 static QString protonPrefix() { return QDir::homePath() + "/.local/share/Alternix/proton-prefix"; }
@@ -192,6 +205,9 @@ private:
     QLabel      *m_winDetail       = nullptr;
     QPushButton *m_runnerWine      = nullptr;
     QPushButton *m_runnerProton    = nullptr;
+    QPushButton *m_runnerRaven     = nullptr;
+    QPushButton *m_btnInstallRaven = nullptr;
+    QPushButton *m_btnRavenPrefix  = nullptr;
     QComboBox   *m_protonCombo     = nullptr;
     QPushButton *m_btnInstallWine  = nullptr;
     QPushButton *m_btnGetProton    = nullptr;
@@ -239,6 +255,8 @@ private:
     void installWine();
     void downloadProton();
     void removeProton();
+    void installRaven();
+    void chooseRavenPrefix();
     void configureRunner();
 
     void setWaydroidImage(const QString &img);
@@ -363,7 +381,7 @@ QWidget* EmulationPage::buildMainPage()
     outerLay->addWidget(cardWaydroid);
 
     // =================================================
-    // Windows apps card (Wine / Proton)
+    // Windows apps card (Wine / Proton / Raven)
     // =================================================
     QFrame *cardWine = new QFrame(outer);
     cardWine->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
@@ -371,7 +389,7 @@ QWidget* EmulationPage::buildMainPage()
     wineLay->setContentsMargins(30, 30, 30, 30);
     wineLay->setSpacing(16);
 
-    QLabel *wineLabel = new QLabel("Windows apps (Wine / Proton)");
+    QLabel *wineLabel = new QLabel("Windows apps (Wine / Proton / Raven)");
     wineLabel->setAlignment(Qt::AlignCenter);
     wineLabel->setStyleSheet("font-size:28px; font-weight:bold;");
     wineLay->addWidget(wineLabel);
@@ -463,8 +481,9 @@ QWidget* EmulationPage::buildWindowsPage()
 
     QLabel *rHelp = new QLabel(
         "Wine is the plain compatibility layer and is enough for most desktop "
-        "programs. Proton adds DirectX translation for games. Proton is optional "
-        "— leave this on Wine if you do not need it.");
+        "programs. Proton adds game compatibility. Raven is an experimental "
+        "Windows runtime, currently built from source. Choose the runner used "
+        "by alternix-exe; these runtimes remain separate.");
     rHelp->setWordWrap(true);
     rHelp->setAlignment(Qt::AlignCenter);
     rHelp->setStyleSheet("QLabel { background:#3a3a3a; border-radius:20px; font-size:22px; padding:16px; }");
@@ -474,8 +493,10 @@ QWidget* EmulationPage::buildWindowsPage()
     rRow->setSpacing(16);
     m_runnerWine   = makeBtn("Wine");
     m_runnerProton = makeBtn("Proton");
+    m_runnerRaven  = makeBtn("Raven");
     rRow->addWidget(m_runnerWine);
     rRow->addWidget(m_runnerProton);
+    rRow->addWidget(m_runnerRaven);
     rLay->addLayout(rRow);
 
     outerLay->addWidget(cardRunner);
@@ -564,12 +585,44 @@ QWidget* EmulationPage::buildWindowsPage()
 
     outerLay->addWidget(cardProton);
 
+    // ---- Raven: separate source-built Windows runtime ----
+    QFrame *cardRaven = new QFrame(outer);
+    cardRaven->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+    QVBoxLayout *rvLay = new QVBoxLayout(cardRaven);
+    rvLay->setContentsMargins(30, 30, 30, 30);
+    rvLay->setSpacing(16);
+    QLabel *rvTitle = new QLabel("Raven (experimental)");
+    rvTitle->setAlignment(Qt::AlignCenter);
+    rvTitle->setStyleSheet("font-size:28px; font-weight:bold;");
+    rvLay->addWidget(rvTitle);
+    QLabel *rvHelp = new QLabel(
+        "Raven runs Windows executables directly on x86-64 Linux. This builds "
+        "Raven from its official source and provisions common Windows controls "
+        "and installer components. Its X11 desktop is experimental, and "
+        "compatibility is not yet equivalent to Wine. Build may take a long time. "
+        "Graphics support depends on the provisioned components and drivers.");
+    rvHelp->setAlignment(Qt::AlignCenter);
+    rvHelp->setWordWrap(true);
+    rvHelp->setStyleSheet("QLabel { background:#3a3a3a; border-radius:20px; font-size:20px; padding:16px; }");
+    rvLay->addWidget(rvHelp);
+    QHBoxLayout *rvRow = new QHBoxLayout();
+    rvRow->setSpacing(16);
+    m_btnInstallRaven = makeBtn("Build Raven");
+    m_btnRavenPrefix  = makeBtn("Raven prefix");
+    rvRow->addWidget(m_btnInstallRaven);
+    rvRow->addWidget(m_btnRavenPrefix);
+    rvLay->addLayout(rvRow);
+    outerLay->addWidget(cardRaven);
+
     wrapLay->addWidget(outer);
     wrapLay->addStretch();
     scroll->setWidget(wrap);
 
     connect(m_runnerWine,     &QPushButton::clicked, this, [this]() { setRunner("wine");   });
     connect(m_runnerProton,   &QPushButton::clicked, this, [this]() { setRunner("proton"); });
+    connect(m_runnerRaven,    &QPushButton::clicked, this, [this]() { setRunner("raven");  });
+    connect(m_btnInstallRaven,&QPushButton::clicked, this, [this]() { installRaven();     });
+    connect(m_btnRavenPrefix, &QPushButton::clicked, this, [this]() { chooseRavenPrefix(); });
     connect(m_btnInstallWine, &QPushButton::clicked, this, [this]() { installWine();    });
     connect(m_btnConfigure,   &QPushButton::clicked, this, [this]() { configureRunner(); });
     connect(m_btnGetProton,   &QPushButton::clicked, this, [this]() { downloadProton(); });
@@ -798,10 +851,21 @@ bool EmulationPage::runTask(QLabel *status, const QString &busyText, const QStri
     timer.start();
     qint64 lastTick = -1;
     bool timedOut = false;
+    QByteArray captured;
+    const int maxCaptured = 256 * 1024;
+    auto readOutput = [&]() {
+        captured += p.readAllStandardOutput();
+        captured += p.readAllStandardError();
+        if (captured.size() > maxCaptured)
+            captured.remove(0, captured.size() - maxCaptured);
+    };
 
     while (p.state() != QProcess::NotRunning) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
         p.waitForFinished(50);
+        // Drain pipes continuously: apt, git, CMake and Raven's provision
+        // scripts can otherwise fill QProcess output buffers and deadlock.
+        readOutput();
 
         const qint64 tick = timer.elapsed() / 500;
         if (status && tick != lastTick) {
@@ -825,8 +889,8 @@ bool EmulationPage::runTask(QLabel *status, const QString &busyText, const QStri
         }
     }
 
-    output = QString::fromLocal8Bit(p.readAllStandardOutput())
-           + QString::fromLocal8Bit(p.readAllStandardError());
+    readOutput();
+    output = QString::fromLocal8Bit(captured);
 
     setEnabled(true);
 
@@ -917,6 +981,12 @@ QString EmulationPage::buildWaydroidInfoHtml()
         html += "<br><span style='color:#FFAA00;'>Weston is not installed. It is "
                 "needed to run Waydroid inside an X11 session.</span>";
 
+    const QString launcher = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (launcher.isEmpty())
+        html += "<br><span style='color:#FF5555;'>The Alternix Waydroid launcher is missing from PATH.</span>";
+    if (runCmd("command -v dbus-send >/dev/null 2>&1 && dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo yes || echo no", 3000) != "yes")
+        html += "<br><span style='color:#FF5555;'>System D-Bus is not responding.</span>";
+
     return html;
 }
 
@@ -930,10 +1000,10 @@ QString EmulationPage::buildWineInfoHtml()
     QString hasWine = runCmd("command -v wine >/dev/null 2>&1 && echo yes || echo no");
     const bool wineOk = (hasWine.trimmed() == "yes");
 
-    if (!wineOk && builds.isEmpty()) {
+    if (!wineOk && builds.isEmpty() && !ravenInstalled()) {
         return "No Windows compatibility layer installed.<br>"
-               "<span style='color:#FFAA00;'>Use Install / setup to add Wine, and "
-               "optionally Proton.</span>";
+               "<span style='color:#FFAA00;'>Use Install / setup to add Wine, "
+               "Proton, or Raven.</span>";
     }
 
     QString running = runCmd("pidof wineserver >/dev/null 2>&1 && echo running || echo stopped");
@@ -952,6 +1022,10 @@ QString EmulationPage::buildWineInfoHtml()
             html += QString("Runner: <span style='color:#7CFC00;'>Proton (%1)</span><br>")
                     .arg(QFileInfo(protonDir).fileName().toHtmlEscaped());
         }
+    } else if (runner == "raven") {
+        html += ravenInstalled()
+            ? "Runner: <span style='color:#7CFC00;'>Raven (experimental)</span><br>"
+            : "Runner: <span style='color:#FF5555;'>Raven not built</span><br>";
     } else {
         html += "Runner: <b>Wine</b><br>";
     }
@@ -964,6 +1038,11 @@ QString EmulationPage::buildWineInfoHtml()
     }
 
     html += QString("Proton builds installed: %1<br>").arg(builds.size());
+    html += QString("Raven: %1<br>").arg(ravenInstalled() ? "built" : "not installed");
+    if (runner == "raven") {
+        QString rp = cfg()->value("Emulation/RavenPrefix", ravenDefaultPrefix()).toString();
+        html += "Raven prefix: " + rp.toHtmlEscaped() + "<br>";
+    }
     html += QString("Wineserver: <span style='color:%1;'>%2</span><br>")
             .arg(runColor, running.toHtmlEscaped());
 
@@ -1000,8 +1079,11 @@ void EmulationPage::refreshWine()
 void EmulationPage::refreshWindowsPage()
 {
     const QString runner = cfg()->value("Emulation/Runner", "wine").toString();
-    setToggled(m_runnerWine,   runner != "proton");
+    setToggled(m_runnerWine,   runner == "wine");
     setToggled(m_runnerProton, runner == "proton");
+    setToggled(m_runnerRaven,  runner == "raven");
+    if (m_btnInstallRaven)
+        m_btnInstallRaven->setText(ravenInstalled() ? "Update / rebuild Raven" : "Build Raven");
 
     const QVector<ProtonBuild> builds = findProtonBuilds();
     const QString saved = cfg()->value("Emulation/ProtonBuild").toString();
@@ -1030,7 +1112,7 @@ void EmulationPage::refreshWindowsPage()
     if (m_btnDelProton)
         m_btnDelProton->setEnabled(!builds.isEmpty());
     if (m_btnConfigure)
-        m_btnConfigure->setEnabled(wineOk || !builds.isEmpty());
+        m_btnConfigure->setEnabled(wineOk || !builds.isEmpty() || ravenInstalled());
 
     if (m_winDetail)
         m_winDetail->setText(buildWineInfoHtml());
@@ -1073,164 +1155,59 @@ void EmulationPage::refreshWaydroidPage()
 // detached rather than waited on.
 void EmulationPage::startWaydroid()
 {
-    if (runCmd("command -v waydroid >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
-        QMessageBox::warning(
-            this,
-            "Waydroid not installed",
-            "Waydroid is not installed.\n\n"
-            "Use Install / setup on this page to install it first."
-        );
+    // Use the SAME helper as Qtile, so the desktop and Settings cannot start
+    // different Weston sessions or race a half-started container.
+    const QString helper = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (helper.isEmpty()) {
+        QMessageBox::warning(this, "Waydroid launcher missing",
+            "alternix-waydroid-session is not installed or not executable.\n\n"
+            "Install the updated launcher in /usr/local/bin together with this page. "
+            "The older embedded startup path has been removed because it masked errors.");
         return;
     }
-
-    if (!QFile::exists("/var/lib/waydroid/waydroid.cfg")) {
-        QMessageBox::warning(
-            this,
-            "Waydroid cannot start",
-            "The Android system image has not been downloaded.\n\n"
-            "Use Install / setup, then 'Download Android system'."
-        );
-        return;
+    QString output;
+    // QProcess does not interpret shell arguments; script paths may contain spaces.
+    const QString cmd = QString("\"%1\" --start").arg(helper);
+    const bool ok = runTask(m_wayStatus, "Starting Waydroid", cmd, output, 130000);
+    if (!ok) {
+        // Include the real helper log (Waydroid/Weston/DBus/sudo failures).
+        const QString logPath = QDir::homePath() + "/.cache/Alternix/waydroid-session.log";
+        QFile log(logPath);
+        if (log.open(QIODevice::ReadOnly))
+            output += "\n\nRecent Waydroid log:\n" +
+                QString::fromLocal8Bit(log.readAll()).right(3000);
     }
-
-    if (binderState() == "none") {
-        QMessageBox::warning(
-            this,
-            "Waydroid cannot start",
-            "No binder interface is available.\n\n"
-            "The binder kernel module is not loaded, and neither binderfs nor the "
-            "binder device nodes are present.\n\n"
-            "Use Install / setup, then 'Set up binder'."
-        );
-        return;
-    }
-
-    if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
-        // NOPASSWD fast path first, osm-sudo askpass fallback — same pattern as wifi.cpp.
-        QProcess::startDetached("/bin/sh", QStringList()
-            << "-c"
-            << "sudo -n waydroid container start >/dev/null 2>&1 || "
-               "{ SUDO_ASKPASS=$(command -v osm-sudo) sudo -A waydroid container start >/dev/null 2>&1; }");
-
-        // Wait for it without freezing the page.
-        QElapsedTimer timer;
-        timer.start();
-        while (timer.elapsed() < 20000) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
-            if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() == "running")
-                break;
-        }
-
-        if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
-            QMessageBox::warning(
-                this,
-                "Waydroid start failed",
-                "The Waydroid container did not start.\n\n"
-                "Check that the Android system has been downloaded and that the "
-                "binder module is loaded."
-            );
-            return;
-        }
-    }
-
-    // Waydroid only renders to a Wayland compositor. Alternix runs Qtile on X11,
-    // so when there is no compositor of our own, Weston is started nested inside
-    // the X session on a private socket and Waydroid is pointed at that.
-    const QString rt = runtimeDir();
-    QString wl = qEnvironmentVariable("WAYLAND_DISPLAY");
-
-    if (wl.isEmpty()) {
-        if (qEnvironmentVariableIsEmpty("DISPLAY")) {
-            QMessageBox::warning(
-                this,
-                "Waydroid cannot start",
-                "There is no Wayland compositor and no X display to nest one in."
-            );
-            return;
-        }
-
-        if (runCmd("command -v weston >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
-            QMessageBox::warning(
-                this,
-                "Weston not installed",
-                "Waydroid draws through Wayland, so it needs Weston to run inside "
-                "this X11 session.\n\n"
-                "Use Install / setup to install Waydroid again — that installs Weston too."
-            );
-            return;
-        }
-
-        if (!QFile::exists(rt + "/waydroid-0")) {
-            // --backend=x11 on Weston 13+, the older module name as a fallback.
-            const QString westonCmd = QString(
-                "RT=\"%1\"\n"
-                "mkdir -p \"$RT\" && chmod 700 \"$RT\"\n"
-                "export XDG_RUNTIME_DIR=\"$RT\"\n"
-                "LOG=\"$HOME/.cache/Alternix/weston.log\"\n"
-                "mkdir -p \"$(dirname \"$LOG\")\"\n"
-                "weston --socket=waydroid-0 --backend=x11 >\"$LOG\" 2>&1 || "
-                "weston --socket=waydroid-0 --backend=x11-backend.so >>\"$LOG\" 2>&1\n"
-            ).arg(rt);
-
-            QProcess::startDetached("/bin/sh", QStringList() << "-c" << westonCmd);
-
-            QElapsedTimer wt;
-            wt.start();
-            while (wt.elapsed() < 15000 && !QFile::exists(rt + "/waydroid-0"))
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
-
-            if (!QFile::exists(rt + "/waydroid-0")) {
-                QMessageBox::warning(
-                    this,
-                    "Weston did not start",
-                    "Weston was started but its Wayland socket never appeared.\n\n"
-                    "See ~/.cache/Alternix/weston.log for the reason."
-                );
-                return;
-            }
-        }
-
-        wl = "waydroid-0";
-    }
-
-    const QString sessionCmd = QString(
-        "export XDG_RUNTIME_DIR=\"%1\"\n"
-        "export WAYLAND_DISPLAY=\"%2\"\n"
-        "LOG=\"$HOME/.cache/Alternix/waydroid-session.log\"\n"
-        "mkdir -p \"$(dirname \"$LOG\")\"\n"
-        "waydroid session start >\"$LOG\" 2>&1 &\n"
-        "i=0\n"
-        "while [ $i -lt 30 ]; do\n"
-        "  pgrep -f '[w]aydroid session' >/dev/null 2>&1 && break\n"
-        "  sleep 1\n"
-        "  i=$((i+1))\n"
-        "done\n"
-        "waydroid show-full-ui >>\"$LOG\" 2>&1\n"
-    ).arg(rt, wl);
-
-    QProcess::startDetached("/bin/sh", QStringList() << "-c" << sessionCmd);
+    reportTask(m_wayStatus, "Start Waydroid", ok, output);
+    refreshWaydroid();
+    refreshWaydroidPage();
 }
 
-// Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::stopWaydroid()
 {
-    QString out;
-    bool ok = runCmdOk("waydroid session stop; "
-                       "pkill -f 'weston.*--socket=waydroid-0' >/dev/null 2>&1; true",
-                       out, 30000);
-    if (!ok) {
-        QMessageBox::warning(
-            this,
-            "Waydroid stop failed",
-            "Could not stop Waydroid session.\n\n" + out
-        );
+    const QString helper = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (helper.isEmpty()) {
+        QMessageBox::warning(this, "Waydroid launcher missing",
+            "alternix-waydroid-session is not installed or not executable.");
+        return;
     }
+    QString output;
+    const bool ok = runTask(m_wayStatus, "Stopping Waydroid",
+                             QString("\"%1\" --stop").arg(helper), output, 60000);
+    reportTask(m_wayStatus, "Stop Waydroid", ok, output);
+    refreshWaydroid();
+    refreshWaydroidPage();
 }
 
 // Wine has no lifecycle to start — wineserver spawns on demand when a Windows
 // program runs and exits on its own. Only the force-close escape hatch remains.
 void EmulationPage::stopWine()
 {
+    if (cfg()->value("Emulation/Runner", "wine").toString() == "raven") {
+        QMessageBox::information(this, "Raven processes",
+            "Raven does not use wineserver. Close the Raven application normally "
+            "or terminate its process in Task Manager.");
+        return;
+    }
     if (runCmd("pidof wineserver >/dev/null 2>&1 && echo running || echo stopped")
             .trimmed() != "running")
         return;   // nothing running is not an error
@@ -1251,6 +1228,11 @@ void EmulationPage::stopWine()
 // -----------------------------------------------------
 void EmulationPage::setRunner(const QString &runner)
 {
+    if (runner == "raven" && !ravenInstalled()) {
+        QMessageBox::warning(this, "Raven not built",
+                             "Build Raven first. It is not provided as a prebuilt package.");
+        return;
+    }
     if (runner == "proton" && selectedProtonDir().isEmpty()) {
         QMessageBox::warning(
             this,
@@ -1427,6 +1409,19 @@ void EmulationPage::configureRunner()
     const QString runner    = cfg()->value("Emulation/Runner", "wine").toString();
     const QString protonDir = selectedProtonDir();
 
+    if (runner == "raven") {
+        if (!ravenInstalled()) {
+            QMessageBox::warning(this, "Raven not built", "Build Raven first.");
+            return;
+        }
+        const QString exe = QFileDialog::getOpenFileName(
+            this, "Choose a Windows program or installer for Raven", QDir::homePath(),
+            "Windows programs (*.exe);;All files (*)");
+        if (!exe.isEmpty() && !QProcess::startDetached("alternix-exe", {exe}))
+            QMessageBox::warning(this, "Cannot launch", "alternix-exe was not found. Install the updated Alternix launcher.");
+        return;
+    }
+
     if (runner == "proton" && !protonDir.isEmpty()) {
         if (runCmd("command -v python3 >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
             QMessageBox::warning(
@@ -1460,6 +1455,91 @@ void EmulationPage::configureRunner()
     }
 
     QProcess::startDetached("/bin/sh", QStringList() << "-c" << "winecfg >/dev/null 2>&1");
+}
+
+// Raven is source-only. Keep its checkout, build and prefixes in the user's home.
+// Do not overwrite existing Wine/Proton files or the user's modified source.
+void EmulationPage::installRaven()
+{
+    if (runCmd("uname -m") != "x86_64") {
+        QMessageBox::warning(this, "Unsupported architecture",
+            "Raven currently supports x86-64 Linux only. Wine and Proton have not been changed.");
+        return;
+    }
+    if (QMessageBox::question(this, "Build Raven",
+        "Build Raven from github.com/mirkobrombin/raven in your home directory?\n\n"
+        "This installs compiler dependencies with apt, downloads source and "
+        "provisions guest Windows components. It may download several gigabytes. "
+        "The X11 backend is still experimental.",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    // All user-owned paths are derived from the home directory, and expanded
+    // inside the shell via $HOME; no privileged source checkout/build.
+    const QString cmd = QString(SUDO_PREAMBLE) +
+        "set -e\n"
+        "export DEBIAN_FRONTEND=noninteractive\n"
+        "$SUDOX apt-get update\n"
+        "$SUDOX apt-get -y install git cmake build-essential ninja-build pkg-config "
+        "python3 python3-venv ca-certificates clang bison patch mingw-w64 "
+        "mingw-w64-tools libwayland-dev libxkbcommon-dev libpixman-1-dev "
+        "libfreetype-dev libvulkan-dev libxcb1-dev libxcb-xkb-dev "
+        "libxcb-xfixes0-dev libxcb-xinput-dev libxkbcommon-x11-dev libpng-dev\n"
+        "SRC=\"$HOME/.local/share/Alternix/raven/source\"\n"
+        "COMP=\"$HOME/.local/share/Alternix/raven/components\"\n"
+        "mkdir -p \"$(dirname \"$SRC\")\" \"$COMP\"\n"
+        "if [ -d \"$SRC/.git\" ]; then\n"
+        "  git -C \"$SRC\" pull --ff-only\n"
+        "elif [ -e \"$SRC\" ]; then\n"
+        "  echo 'ERROR: Raven source directory exists but is not a Git checkout.' >&2; exit 1\n"
+        "else\n"
+        "  git clone https://github.com/mirkobrombin/raven.git \"$SRC\"\n"
+        "fi\n"
+        "cd \"$SRC\"\n"
+        "python3 scripts/provision-controls.py --output \"$COMP/controls64\" --arch x64\n"
+        "python3 scripts/provision-controls.py --output \"$COMP/controls32\" --arch x86\n"
+        "python3 scripts/provision-installer.py --output \"$COMP/installer64\" --arch x64\n"
+        "python3 scripts/provision-installer.py --output \"$COMP/installer32\" --arch x86\n"
+        "python3 scripts/provision-text.py --output \"$COMP/text\"\n"
+        "python3 scripts/provision-rtl.py --output \"$COMP/rtl\"\n"
+        "python3 scripts/provision-roots.py --output \"$COMP/roots\"\n"
+        "GFX_ARGS=''\n"
+        "if python3 scripts/provision-graphics.py --destination \"$COMP/graphics\"; then\n"
+        "  GFX_ARGS=\"-DRAVEN_DXVK_PE64_DIR=$COMP/graphics/dxvk/pe64 "
+        "-DRAVEN_DXVK_PE32_DIR=$COMP/graphics/dxvk/pe32 "
+        "-DRAVEN_VKD3D_PE64_DIR=$COMP/graphics/vkd3d-proton/pe64\"\n"
+        "else echo 'WARNING: graphics DLL provisioning failed; building without Direct3D acceleration.'; fi\n"
+        "cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo "
+        "-DRAVEN_CONTROLS_COMPONENT_DIR=\"$COMP/controls64\" "
+        "-DRAVEN_CONTROLS32_COMPONENT_DIR=\"$COMP/controls32\" "
+        "-DRAVEN_INSTALLER_COMPONENT_DIR=\"$COMP/installer64\" "
+        "-DRAVEN_INSTALLER32_COMPONENT_DIR=\"$COMP/installer32\" "
+        "-DRAVEN_TEXT_COMPONENT_PATH=\"$COMP/text/raven-text.dll\" "
+        "-DRAVEN_RTL_COMPONENT_PATH=\"$COMP/rtl/raven-rtl.dll\" "
+        "-DRAVEN_ROOT_CERTIFICATE_DIRECTORY=\"$COMP/roots\" $GFX_ARGS\n"
+        "cmake --build build -j2\n"
+        "test -x build/native/raven\n";
+    QString out;
+    const bool ok = runTask(m_winStatus, "Building Raven", cmd, out, 120 * 60 * 1000);
+    reportTask(m_winStatus, "Build Raven", ok, out);
+    refreshWindowsPage();
+}
+
+void EmulationPage::chooseRavenPrefix()
+{
+    bool accepted = false;
+    const QString old = cfg()->value("Emulation/RavenPrefix", ravenDefaultPrefix()).toString();
+    const QString path = QInputDialog::getText(this, "Raven prefix",
+        "Windows installation folder (use the same prefix for the installer and the installed app):",
+        QLineEdit::Normal, old, &accepted).trimmed();
+    if (!accepted || path.isEmpty()) return;
+    if (!QDir::isAbsolutePath(path) || path == "/") {
+        QMessageBox::warning(this, "Invalid prefix", "Choose an absolute path to a dedicated Raven prefix folder.");
+        return;
+    }
+    cfg()->setValue("Emulation/RavenPrefix", path);
+    cfg()->sync();
+    refreshWindowsPage();
 }
 
 // -----------------------------------------------------
@@ -1541,9 +1621,12 @@ void EmulationPage::installWaydroid()
         // Weston is what lets Waydroid draw inside the X11 session.
         QString wout;
         const QString wcmd = QString(SUDO_PREAMBLE) +
-            "$SUDOX env DEBIAN_FRONTEND=noninteractive apt-get -y install weston\n";
-        if (!runTask(m_wayStatus, "Installing Weston", wcmd, wout, 15 * 60 * 1000))
-            reportTask(m_wayStatus, "Install Weston", false, wout);
+            "$SUDOX env DEBIAN_FRONTEND=noninteractive apt-get -y install weston dbus dbus-x11 lxc uidmap\n";
+        if (!runTask(m_wayStatus, "Installing Weston and D-Bus", wcmd, wout, 15 * 60 * 1000)) {
+            reportTask(m_wayStatus, "Install Weston and D-Bus", false, wout);
+            refreshWaydroidPage();
+            return;
+        }
     }
     reportTask(m_wayStatus, "Install Waydroid", ok, out);
     refreshWaydroidPage();

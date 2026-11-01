@@ -1,6 +1,6 @@
 #!/bin/sh
 # alternix-exe — run a Windows program with the runner chosen in
-# Settings > Emulation (Emulation/Runner = wine | proton).
+# Settings > Emulation (Emulation/Runner = wine | proton | raven).
 #
 #   alternix-exe                    open Wine's file manager (browse C:)
 #   alternix-exe /path/to/app.exe   run that program
@@ -16,6 +16,8 @@ mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 
 PROTON_ROOT="$HOME/.local/share/Alternix/proton"
 PROTON_PREFIX="$HOME/.local/share/Alternix/proton-prefix"
+RAVEN_BIN="$HOME/.local/share/Alternix/raven/source/build/native/raven"
+RAVEN_DEFAULT_PREFIX="$HOME/.local/share/Alternix/raven/prefixes/default"
 
 _err() {
     if command -v notify-send >/dev/null 2>&1; then
@@ -62,6 +64,47 @@ RUNNER=$(_cfg Runner)
 TARGET="${1:-}"
 if [ -n "$TARGET" ] && [ ! -f "$TARGET" ]; then
     _err "Not found: $TARGET"
+fi
+
+if [ "$RUNNER" = "raven" ]; then
+    [ "$(uname -m)" = "x86_64" ] || _err "Raven currently supports x86-64 Linux only."
+    [ -x "$RAVEN_BIN" ] || _err "Raven has not been built. Open Settings > Emulation > Build Raven."
+
+    # Raven does not provide Wine's Explorer interface. Open its own control
+    # panel when invoked without an EXE path, or let the user choose a file.
+    if [ -z "$TARGET" ]; then
+        if [ -f "$HOME/.local/share/Alternix/raven/source/build/native/control.exe" ]; then
+            TARGET="$HOME/.local/share/Alternix/raven/source/build/native/control.exe"
+        elif command -v zenity >/dev/null 2>&1; then
+            TARGET=$(zenity --file-selection --title="Select a Windows program for Raven" --file-filter='Windows programs | *.exe' 2>/dev/null) || exit 0
+        else
+            _err "Choose a Windows .exe in your file manager. Raven does not have Wine Explorer."
+        fi
+    fi
+    [ -f "$TARGET" ] || _err "Windows executable not found: $TARGET"
+
+    # Same prefix must be used for BOTH the installer and the installed app.
+    # Users can select an application-specific prefix in Settings > Emulation.
+    RPREFIX=$(_cfg RavenPrefix)
+    [ -n "$RPREFIX" ] || RPREFIX="$RAVEN_DEFAULT_PREFIX"
+    case "$RPREFIX" in
+        /*) ;;
+        *) _err "Raven prefix must be an absolute path: $RPREFIX" ;;
+    esac
+    export RAVEN_PREFIX="$RPREFIX"
+    mkdir -p "$RAVEN_PREFIX" || _err "Cannot create Raven prefix: $RAVEN_PREFIX"
+
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        DESKTOP=wayland
+    elif [ -n "${DISPLAY:-}" ]; then
+        DESKTOP=x11
+    else
+        _err "Raven needs a Wayland or X11 display session."
+    fi
+    cd "$(dirname "$TARGET")" || exit 1
+    # Avoid the upstream five-second default timeout for GUI programs.
+    exec "$RAVEN_BIN" --run-process --execution=native --timeout-ms=86400000 \
+        "--desktop=$DESKTOP" "$TARGET" >>"$LOG" 2>&1
 fi
 
 if [ "$RUNNER" = "proton" ]; then
