@@ -61,6 +61,15 @@ for auth_source in \
     fi
 done
 
+# The audio hardware installer is an existing AlternixDE source, not a
+# downloaded repair patch. Missing sources must fail BEFORE a long ISO build.
+ALT_AUDIO_SOURCE="$ALT_ROOT/Alternix/scripts/alternix-audio-fix.sh"
+if [ ! -s "$ALT_AUDIO_SOURCE" ] || ! bash -n "$ALT_AUDIO_SOURCE"; then
+    echo "ERROR: Missing or invalid audio setup source: $ALT_AUDIO_SOURCE" >&2
+    echo "Commit alternix-audio-fix.sh under Alternix/scripts in the AlternixDE checkout." >&2
+    exit 1
+fi
+
 # Ask for username
 while true; do
     read -rp "Enter the username for Alternix: " TARGET_USER
@@ -861,8 +870,39 @@ chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-audio-fix.sh
 
-#echo "• [Configuring AlternixOS audio]..."
-#bash "$TARGET_HOME/.config/Alternix/scripts/alternix-audio-fix.sh"
+# ────────────────────────────────────────────────
+# One-time AlternixOS audio provisioning (Devuan / SysVinit)
+# - ISO prebuild: stage broad firmware, do NOT scan builder hardware.
+# - Disk installer: use --install-target with the ACTUAL target root.
+# - Existing installed machine: scan hardware once, with a completion marker.
+# - Live preview: never mark the live overlay as the installed system.
+# No recurring audio repair or desktop login autostart is installed.
+# ────────────────────────────────────────────────
+echo "[Audio] Preparing hardware-aware audio support..."
+ALT_AUDIO_SETUP_FAILED=0
+if [ -n "${ALTERNIX_AUDIO_TARGET_ROOT:-}" ]; then
+    echo "[Audio] Configuring the new OS at $ALTERNIX_AUDIO_TARGET_ROOT using this machine's hardware..."
+    if ! sudo bash "$ALT_AUDIO_SOURCE" --install-target "$ALTERNIX_AUDIO_TARGET_ROOT"; then
+        echo "WARNING: Target-system audio setup failed or is incomplete. Check the audio report in the target's /var/log/alternix/." >&2
+        ALT_AUDIO_SETUP_FAILED=1
+    fi
+elif [ "$ALT_IS_LIVE_BUILD" = 1 ]; then
+    echo "[Audio] Building ISO: provisioning broad audio/firmware support without scanning host hardware..."
+    if ! sudo bash "$ALT_AUDIO_SOURCE" --image-prep; then
+        echo "WARNING: ISO audio image preparation failed. Check /var/log/alternix/." >&2
+        ALT_AUDIO_SETUP_FAILED=1
+    fi
+elif [ -e /run/live/medium ] || [ -e /lib/live/mount/medium ] || \
+     grep -Eq '(^|[[:space:]])boot=live([[:space:]]|$)' /proc/cmdline 2>/dev/null; then
+    echo "[Audio] Live desktop detected: not configuring or stamping the temporary live root."
+    echo "[Audio] The disk installer must call --install-target with its mounted target root."
+else
+    echo "[Audio] Configuring audio on this installed OS (once per installation)..."
+    if ! sudo bash "$ALT_AUDIO_SOURCE" --install; then
+        echo "WARNING: Audio provisioning is incomplete. The updater can retry it; see /var/log/alternix/." >&2
+        ALT_AUDIO_SETUP_FAILED=1
+    fi
+fi
 
 echo "• [Configuring AlternixOS touchscroll]..."
 chmod +x alternix-touchscroll.py
@@ -1920,6 +1960,9 @@ echo ""
 echo ".xinitrc configured for Qtile."
 echo ""
 echo "Init system: SysVinit  |  logind: elogind"
+if [ "${ALT_AUDIO_SETUP_FAILED:-0}" = 1 ]; then
+    echo "WARNING: Audio provisioning is incomplete; consult /var/log/alternix/."
+fi
 echo ""
 echo "Press 1 to Restart"
 echo "Press 2 to Continue"

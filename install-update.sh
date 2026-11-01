@@ -47,6 +47,15 @@ if [ ! -f "$ALT_LOCATION_SOURCE" ] || \
     exit 1
 fi
 
+# The updater installs audio support from the same AlternixDE source as
+# new installations. Check before updating any system files.
+ALT_AUDIO_SOURCE="$ALT_ROOT/Alternix/scripts/alternix-audio-fix.sh"
+if [ ! -s "$ALT_AUDIO_SOURCE" ] || ! bash -n "$ALT_AUDIO_SOURCE"; then
+    echo "ERROR: Missing or invalid audio setup source: $ALT_AUDIO_SOURCE" >&2
+    echo "Place alternix-audio-fix.sh in Alternix/scripts/ in the repository first." >&2
+    exit 1
+fi
+
 # The normal sudo PAM mechanism handles all privilege elevation.
 # No direct -n probe and no bypassing credential requests.
 if ! /usr/bin/sudo -v; then
@@ -765,6 +774,24 @@ cd ~/.config/Alternix/scripts
 chmod +x alternix-rotate-monitor.sh
 chmod +x alternix-rotate-setup.sh
 chmod +x alternix-rotate-toggle.sh
+chmod +x alternix-audio-fix.sh
+
+# ────────────────────────────────────────────────
+# Install/activate the SAME one-time hardware-aware audio setup used by
+# fresh AlternixOS installations. --install checks its completion marker:
+# systems provisioned already are left alone, older systems are configured.
+# No login-time recurring scanner is added and no sound server is restarted.
+# Perform this before the final PAM activation/verification transaction.
+# ────────────────────────────────────────────────
+echo "[Audio] Updating the one-time audio hardware setup utility..."
+ALT_AUDIO_SETUP_FAILED=0
+if ! sudo install -m 0755 "$ALT_AUDIO_SOURCE" /usr/local/bin/alternix-audio-fix.sh; then
+    echo "WARNING: Could not install alternix-audio-fix.sh into /usr/local/bin." >&2
+    ALT_AUDIO_SETUP_FAILED=1
+elif ! sudo bash /usr/local/bin/alternix-audio-fix.sh --install; then
+    echo "WARNING: One-time audio setup is incomplete. Review /var/log/alternix/audio-*.log; it will retry on a future updater run." >&2
+    ALT_AUDIO_SETUP_FAILED=1
+fi
 
 chmod +x alternix-touchscroll.py
 cp alternix-touchscroll.py ~/.local/bin/alternix-touchscroll.py
@@ -866,6 +893,9 @@ fi
 echo "=============================================="
 echo "         Alternix Update Complete!"
 echo "=============================================="
+if [ "${ALT_AUDIO_SETUP_FAILED:-0}" = 1 ]; then
+    echo "WARNING: Audio provisioning was incomplete; check /var/log/alternix/."
+fi
 echo " "
 echo "=============================================="
 echo "       THIS UPDATE REQUIRES A RESTART"
