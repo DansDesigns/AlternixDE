@@ -16,6 +16,7 @@
 #include <QTextStream>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QStandardPaths>
 #include <QElapsedTimer>
 #include <QCoreApplication>
 #include <QEventLoop>
@@ -83,9 +84,11 @@ static QString runCmd(const QString &cmd, int timeoutMs = 5000)
 // The bracketed first letter stops pgrep matching the /bin/sh that is running
 // the pgrep itself — without it these checks always report "running".
 static const char *WAYDROID_CONTAINER_CHECK =
-    "pgrep -f '[w]aydroid container' >/dev/null 2>&1 && echo running || echo stopped";
+    "waydroid status 2>/dev/null | grep -Eiq '^[[:space:]]*Container:[[:space:]]*RUNNING' "
+    "&& echo running || echo stopped";
 static const char *WAYDROID_SESSION_CHECK =
-    "pgrep -f '[w]aydroid session' >/dev/null 2>&1 && echo running || echo stopped";
+    "waydroid status 2>/dev/null | grep -Eiq '^[[:space:]]*Session:[[:space:]]*RUNNING' "
+    "&& echo running || echo stopped";
 
 // -----------------------------------------------------
 // Root privileges for the setup actions.
@@ -120,6 +123,7 @@ static QString binderState()
     return runCmd(
         "if [ -e /dev/binderfs/binder-control ]; then echo binderfs; "
         "elif [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; then echo legacy; "
+        "elif [ -e /dev/anbox-binder ] && [ -e /dev/anbox-hwbinder ] && [ -e /dev/anbox-vndbinder ]; then echo anbox; "
         "else echo none; fi").trimmed();
 }
 
@@ -285,6 +289,14 @@ EmulationPage::EmulationPage(QStackedWidget *stack)
             m_stack->setCurrentIndex(0);
     });
     root->addWidget(back, 0, Qt::AlignCenter);
+
+    // Older configurations may name a runner that is no longer supported.
+    // Keep the Wine / Proton choice valid without touching their other settings.
+    const QString savedRunner = cfg()->value("Emulation/Runner", "wine").toString();
+    if (savedRunner != "wine" && savedRunner != "proton") {
+        cfg()->setValue("Emulation/Runner", "wine");
+        cfg()->sync();
+    }
 
     // Initial info
     refreshWaydroid();
@@ -798,10 +810,21 @@ bool EmulationPage::runTask(QLabel *status, const QString &busyText, const QStri
     timer.start();
     qint64 lastTick = -1;
     bool timedOut = false;
+    QByteArray captured;
+    const int maxCaptured = 256 * 1024;
+    auto readOutput = [&]() {
+        captured += p.readAllStandardOutput();
+        captured += p.readAllStandardError();
+        if (captured.size() > maxCaptured)
+            captured.remove(0, captured.size() - maxCaptured);
+    };
 
     while (p.state() != QProcess::NotRunning) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
         p.waitForFinished(50);
+        // Drain pipes continuously: long-running setup tasks can otherwise
+        // fill QProcess output buffers and deadlock.
+        readOutput();
 
         const qint64 tick = timer.elapsed() / 500;
         if (status && tick != lastTick) {
@@ -825,8 +848,8 @@ bool EmulationPage::runTask(QLabel *status, const QString &busyText, const QStri
         }
     }
 
-    output = QString::fromLocal8Bit(p.readAllStandardOutput())
-           + QString::fromLocal8Bit(p.readAllStandardError());
+    readOutput();
+    output = QString::fromLocal8Bit(captured);
 
     setEnabled(true);
 
@@ -917,6 +940,12 @@ QString EmulationPage::buildWaydroidInfoHtml()
         html += "<br><span style='color:#FFAA00;'>Weston is not installed. It is "
                 "needed to run Waydroid inside an X11 session.</span>";
 
+    const QString launcher = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (launcher.isEmpty())
+        html += "<br><span style='color:#FF5555;'>The Alternix Waydroid launcher is missing from PATH.</span>";
+    if (runCmd("command -v dbus-send >/dev/null 2>&1 && dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames >/dev/null 2>&1 && echo yes || echo no", 3000) != "yes")
+        html += "<br><span style='color:#FF5555;'>System D-Bus is not responding.</span>";
+
     return html;
 }
 
@@ -932,8 +961,8 @@ QString EmulationPage::buildWineInfoHtml()
 
     if (!wineOk && builds.isEmpty()) {
         return "No Windows compatibility layer installed.<br>"
-               "<span style='color:#FFAA00;'>Use Install / setup to add Wine, and "
-               "optionally Proton.</span>";
+               "<span style='color:#FFAA00;'>Use Install / setup to add Wine, "
+               "and optionally Proton.</span>";
     }
 
     QString running = runCmd("pidof wineserver >/dev/null 2>&1 && echo running || echo stopped");
@@ -1073,158 +1102,47 @@ void EmulationPage::refreshWaydroidPage()
 // detached rather than waited on.
 void EmulationPage::startWaydroid()
 {
-    if (runCmd("command -v waydroid >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
-        QMessageBox::warning(
-            this,
-            "Waydroid not installed",
-            "Waydroid is not installed.\n\n"
-            "Use Install / setup on this page to install it first."
-        );
+    // Use the SAME helper as Qtile, so the desktop and Settings cannot start
+    // different Weston sessions or race a half-started container.
+    const QString helper = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (helper.isEmpty()) {
+        QMessageBox::warning(this, "Waydroid launcher missing",
+            "alternix-waydroid-session is not installed or not executable.\n\n"
+            "Install the updated launcher in /usr/local/bin together with this page. "
+            "The older embedded startup path has been removed because it masked errors.");
         return;
     }
-
-    if (!QFile::exists("/var/lib/waydroid/waydroid.cfg")) {
-        QMessageBox::warning(
-            this,
-            "Waydroid cannot start",
-            "The Android system image has not been downloaded.\n\n"
-            "Use Install / setup, then 'Download Android system'."
-        );
-        return;
+    QString output;
+    // QProcess does not interpret shell arguments; script paths may contain spaces.
+    const QString cmd = QString("\"%1\" --start").arg(helper);
+    const bool ok = runTask(m_wayStatus, "Starting Waydroid", cmd, output, 130000);
+    if (!ok) {
+        // Include the real helper log (Waydroid/Weston/DBus/sudo failures).
+        const QString logPath = QDir::homePath() + "/.cache/Alternix/waydroid-session.log";
+        QFile log(logPath);
+        if (log.open(QIODevice::ReadOnly))
+            output += "\n\nRecent Waydroid log:\n" +
+                QString::fromLocal8Bit(log.readAll()).right(3000);
     }
-
-    if (binderState() == "none") {
-        QMessageBox::warning(
-            this,
-            "Waydroid cannot start",
-            "No binder interface is available.\n\n"
-            "The binder kernel module is not loaded, and neither binderfs nor the "
-            "binder device nodes are present.\n\n"
-            "Use Install / setup, then 'Set up binder'."
-        );
-        return;
-    }
-
-    if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
-        // NOPASSWD fast path first, osm-sudo askpass fallback — same pattern as wifi.cpp.
-        QProcess::startDetached("/bin/sh", QStringList()
-            << "-c"
-            << "sudo -n waydroid container start >/dev/null 2>&1 || "
-               "{ SUDO_ASKPASS=$(command -v osm-sudo) sudo -A waydroid container start >/dev/null 2>&1; }");
-
-        // Wait for it without freezing the page.
-        QElapsedTimer timer;
-        timer.start();
-        while (timer.elapsed() < 20000) {
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
-            if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() == "running")
-                break;
-        }
-
-        if (runCmd(WAYDROID_CONTAINER_CHECK).trimmed() != "running") {
-            QMessageBox::warning(
-                this,
-                "Waydroid start failed",
-                "The Waydroid container did not start.\n\n"
-                "Check that the Android system has been downloaded and that the "
-                "binder module is loaded."
-            );
-            return;
-        }
-    }
-
-    // Waydroid only renders to a Wayland compositor. Alternix runs Qtile on X11,
-    // so when there is no compositor of our own, Weston is started nested inside
-    // the X session on a private socket and Waydroid is pointed at that.
-    const QString rt = runtimeDir();
-    QString wl = qEnvironmentVariable("WAYLAND_DISPLAY");
-
-    if (wl.isEmpty()) {
-        if (qEnvironmentVariableIsEmpty("DISPLAY")) {
-            QMessageBox::warning(
-                this,
-                "Waydroid cannot start",
-                "There is no Wayland compositor and no X display to nest one in."
-            );
-            return;
-        }
-
-        if (runCmd("command -v weston >/dev/null 2>&1 && echo yes || echo no").trimmed() != "yes") {
-            QMessageBox::warning(
-                this,
-                "Weston not installed",
-                "Waydroid draws through Wayland, so it needs Weston to run inside "
-                "this X11 session.\n\n"
-                "Use Install / setup to install Waydroid again — that installs Weston too."
-            );
-            return;
-        }
-
-        if (!QFile::exists(rt + "/waydroid-0")) {
-            // --backend=x11 on Weston 13+, the older module name as a fallback.
-            const QString westonCmd = QString(
-                "RT=\"%1\"\n"
-                "mkdir -p \"$RT\" && chmod 700 \"$RT\"\n"
-                "export XDG_RUNTIME_DIR=\"$RT\"\n"
-                "LOG=\"$HOME/.cache/Alternix/weston.log\"\n"
-                "mkdir -p \"$(dirname \"$LOG\")\"\n"
-                "weston --socket=waydroid-0 --backend=x11 >\"$LOG\" 2>&1 || "
-                "weston --socket=waydroid-0 --backend=x11-backend.so >>\"$LOG\" 2>&1\n"
-            ).arg(rt);
-
-            QProcess::startDetached("/bin/sh", QStringList() << "-c" << westonCmd);
-
-            QElapsedTimer wt;
-            wt.start();
-            while (wt.elapsed() < 15000 && !QFile::exists(rt + "/waydroid-0"))
-                QCoreApplication::processEvents(QEventLoop::AllEvents, 250);
-
-            if (!QFile::exists(rt + "/waydroid-0")) {
-                QMessageBox::warning(
-                    this,
-                    "Weston did not start",
-                    "Weston was started but its Wayland socket never appeared.\n\n"
-                    "See ~/.cache/Alternix/weston.log for the reason."
-                );
-                return;
-            }
-        }
-
-        wl = "waydroid-0";
-    }
-
-    const QString sessionCmd = QString(
-        "export XDG_RUNTIME_DIR=\"%1\"\n"
-        "export WAYLAND_DISPLAY=\"%2\"\n"
-        "LOG=\"$HOME/.cache/Alternix/waydroid-session.log\"\n"
-        "mkdir -p \"$(dirname \"$LOG\")\"\n"
-        "waydroid session start >\"$LOG\" 2>&1 &\n"
-        "i=0\n"
-        "while [ $i -lt 30 ]; do\n"
-        "  pgrep -f '[w]aydroid session' >/dev/null 2>&1 && break\n"
-        "  sleep 1\n"
-        "  i=$((i+1))\n"
-        "done\n"
-        "waydroid show-full-ui >>\"$LOG\" 2>&1\n"
-    ).arg(rt, wl);
-
-    QProcess::startDetached("/bin/sh", QStringList() << "-c" << sessionCmd);
+    reportTask(m_wayStatus, "Start Waydroid", ok, output);
+    refreshWaydroid();
+    refreshWaydroidPage();
 }
 
-// Devuan: no systemd container service — use waydroid CLI directly
 void EmulationPage::stopWaydroid()
 {
-    QString out;
-    bool ok = runCmdOk("waydroid session stop; "
-                       "pkill -f 'weston.*--socket=waydroid-0' >/dev/null 2>&1; true",
-                       out, 30000);
-    if (!ok) {
-        QMessageBox::warning(
-            this,
-            "Waydroid stop failed",
-            "Could not stop Waydroid session.\n\n" + out
-        );
+    const QString helper = QStandardPaths::findExecutable("alternix-waydroid-session");
+    if (helper.isEmpty()) {
+        QMessageBox::warning(this, "Waydroid launcher missing",
+            "alternix-waydroid-session is not installed or not executable.");
+        return;
     }
+    QString output;
+    const bool ok = runTask(m_wayStatus, "Stopping Waydroid",
+                             QString("\"%1\" --stop").arg(helper), output, 60000);
+    reportTask(m_wayStatus, "Stop Waydroid", ok, output);
+    refreshWaydroid();
+    refreshWaydroidPage();
 }
 
 // Wine has no lifecycle to start — wineserver spawns on demand when a Windows
@@ -1251,6 +1169,8 @@ void EmulationPage::stopWine()
 // -----------------------------------------------------
 void EmulationPage::setRunner(const QString &runner)
 {
+    if (runner != "wine" && runner != "proton")
+        return;
     if (runner == "proton" && selectedProtonDir().isEmpty()) {
         QMessageBox::warning(
             this,
@@ -1541,9 +1461,12 @@ void EmulationPage::installWaydroid()
         // Weston is what lets Waydroid draw inside the X11 session.
         QString wout;
         const QString wcmd = QString(SUDO_PREAMBLE) +
-            "$SUDOX env DEBIAN_FRONTEND=noninteractive apt-get -y install weston\n";
-        if (!runTask(m_wayStatus, "Installing Weston", wcmd, wout, 15 * 60 * 1000))
-            reportTask(m_wayStatus, "Install Weston", false, wout);
+            "$SUDOX env DEBIAN_FRONTEND=noninteractive apt-get -y install weston dbus dbus-x11 lxc uidmap\n";
+        if (!runTask(m_wayStatus, "Installing Weston and D-Bus", wcmd, wout, 15 * 60 * 1000)) {
+            reportTask(m_wayStatus, "Install Weston and D-Bus", false, wout);
+            refreshWaydroidPage();
+            return;
+        }
     }
     reportTask(m_wayStatus, "Install Waydroid", ok, out);
     refreshWaydroidPage();

@@ -57,7 +57,8 @@ _proton_dir() {
 }
 
 RUNNER=$(_cfg Runner)
-[ -n "$RUNNER" ] || RUNNER="wine"
+# Unsupported settings saved by older versions automatically fall back to Wine.
+[ "$RUNNER" = "proton" ] || RUNNER="wine"
 
 TARGET="${1:-}"
 if [ -n "$TARGET" ] && [ ! -f "$TARGET" ]; then
