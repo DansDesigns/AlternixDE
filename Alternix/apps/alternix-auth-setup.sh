@@ -49,6 +49,7 @@ TMP="$(mktemp -d)"
 # recover: PAM is exactly what may be broken at this point.
 ACTIVATION_IN_PROGRESS=0
 POLKIT_ACTIVATION_IN_PROGRESS=0
+POLKIT_TEST_PASSED=0
 rollback_auth_policy() {
     if [[ -f "$TMP/pam-before" ]]; then
         install -o root -g root -m 0644 "$TMP/pam-before" /etc/pam.d/.sudo.alternix-rollback
@@ -607,9 +608,21 @@ if [[ -n "$POLKIT_AGENT" ]]; then
     echo "[Auth] Ensuring PolicyKit agent is available: $POLKIT_AGENT"
     if ! command -v pgrep >/dev/null 2>&1 || \
        ! pgrep -u "$USER_UID" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
+        # Keep diagnostics from a failed graphical registration. A missing
+        # session bus or Xauthority commonly causes an immediate agent exit.
         setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
-            env -i "${AUTH_SESSION_ENV[@]}" "$POLKIT_AGENT" </dev/null >/dev/null 2>&1 &
+            env -i "${AUTH_SESSION_ENV[@]}" "$POLKIT_AGENT" \
+            </dev/null >"$TMP/polkit-agent-stdout" 2>"$TMP/polkit-agent-stderr" &
+        agent_pid=$!
         sleep 2
+        if ! kill -0 "$agent_pid" 2>/dev/null && \
+           ! pgrep -u "$USER_UID" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
+            echo 'WARNING: Graphical PolicyKit agent exited before registering.' >&2
+            if [[ -s "$TMP/polkit-agent-stderr" ]]; then
+                echo '[Auth] Graphical agent error:' >&2
+                cat "$TMP/polkit-agent-stderr" >&2
+            fi
+        fi
     fi
 else
     echo '[Auth] No known agent executable found; checking whether an existing desktop agent is already registered.'
@@ -624,9 +637,16 @@ if POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
     env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec --disable-internal-agent /usr/bin/id -u \
     2>"$TMP/polkit-test-errors")" && [[ "$POLKIT_TEST_OUTPUT" = 0 ]]; then
     POLKIT_ACTIVATION_IN_PROGRESS=0
+    POLKIT_TEST_PASSED=1
     echo '[Auth] PolicyKit pattern/PIN live test PASSED.'
 else
     echo 'WARNING: PolicyKit graphical test failed. Restoring ONLY the previous PolicyKit configuration.' >&2
+    echo '[Auth] Synaptic and other pkexec applications will NOT use the pattern until this test passes.' >&2
+    echo '[Auth] Check graphical-agent registration, the user D-Bus session and the PolicyKit daemon.' >&2
+    if [[ -s "$TMP/polkit-agent-stderr" ]]; then
+        echo '[Auth] Graphical agent diagnostic output:' >&2
+        cat "$TMP/polkit-agent-stderr" >&2
+    fi
     if [[ -s "$TMP/polkit-test-errors" ]]; then
         echo '[Auth] PolicyKit diagnostic output:' >&2
         cat "$TMP/polkit-test-errors" >&2
@@ -640,4 +660,8 @@ else
     fi
 fi
 
-echo '[Auth] Setup complete. Sudo pattern is active; PolicyKit pattern is active only if its live test passed.'
+if [[ "$POLKIT_TEST_PASSED" = 1 ]]; then
+    echo '[Auth] Setup complete: sudo and PolicyKit pattern authentication passed live tests.'
+else
+    echo 'WARNING: Setup complete with sudo pattern only; PolicyKit still requires attention.' >&2
+fi

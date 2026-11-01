@@ -11,6 +11,7 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QProcess>
+#include <QDebug>
 #include <QFrame>
 #include <QFileInfo>
 #include <QMouseEvent>
@@ -24,7 +25,6 @@
 #include <QVector>
 #include <QDir>
 #include <QLockFile>
-#include <unistd.h>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
@@ -106,38 +106,28 @@ static QList<AppEntry> loadDesktopEntries() {
     return apps;
 }
 
-// Graphical applications such as Synaptic rely on PolicyKit/pkexec.
-// Qtile may not autostart a session agent. Reuse an existing one; otherwise
-// start whichever known agent is installed. Never require lxpolkit alone.
-// PAM is still responsible for actual pattern/PIN verification.
-static void ensurePolkitAgent() {
-    const QString userId = QString::number(static_cast<unsigned int>(getuid()));
-    const QString agentPattern =
-        "(^|/)(lxpolkit|polkit-mate-authentication-agent-1|"
-        "polkit-gnome-authentication-agent-1|lxqt-policykit-agent|"
-        "xfce-polkit|polkit-kde-authentication-agent-1)( |$)";
-    if (QFileInfo("/usr/bin/pgrep").isExecutable() &&
-        QProcess::execute("/usr/bin/pgrep", {"-u", userId, "-f", agentPattern}) == 0)
-        return;
-    const QStringList paths = {
-        "/usr/bin/lxpolkit",
-        "/usr/libexec/polkit-mate-authentication-agent-1",
-        "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1",
-        "/usr/lib/x86_64-linux-gnu/polkit-mate/polkit-mate-authentication-agent-1",
-        "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1",
-        "/usr/libexec/polkit-gnome-authentication-agent-1",
-        "/usr/bin/lxqt-policykit-agent",
-        "/usr/libexec/lxqt-policykit-agent",
-        "/usr/libexec/xfce-polkit",
-        "/usr/lib/polkit-kde-authentication-agent-1",
-        "/usr/libexec/polkit-kde-authentication-agent-1"
-    };
-    for (const QString &path : paths) {
-        if (QFileInfo(path).isExecutable()) {
-            QProcess::startDetached(path, {});
-            break;
-        }
+// Launch a .desktop command without putting it through a shell by default.
+// pkexec identifies the authorizing application by its *live parent process*.
+// QProcess::startDetached() followed by closing this launcher leaves pkexec
+// orphaned, causing "Refusing to render service to dead parents" on polkit.
+// For PolicyKit launchers, a detached unprivileged shell stays alive and waits
+// for the original command; the command and arguments are supplied as argv,
+// never interpolated into executable shell text.
+static bool launchDesktopCommand(const QString &command) {
+    QStringList parts = QProcess::splitCommand(command);
+    if (parts.isEmpty()) return false;
+
+    const QString program = parts.takeFirst();
+    const QString basename = QFileInfo(program).fileName().toLower();
+    const bool needsLiveParent = (basename == "pkexec" || basename.endsWith("-pkexec"));
+    if (needsLiveParent) {
+        QStringList shellArgs = {
+            "-c", "\"$@\"; status=$?; exit \"$status\"", "alternix-app", program
+        };
+        shellArgs.append(parts);
+        return QProcess::startDetached("/bin/sh", shellArgs);
     }
+    return QProcess::startDetached(program, parts);
 }
 
 // ──────────────────────────────  AppTile (lazy icon loading)
@@ -246,12 +236,11 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *e) override {
         if (!dragging && e->button() == Qt::LeftButton) {
-            QStringList args = entry.exec.split(' ');
-            if (!args.isEmpty()) {
-                QString prog = args.takeFirst();
-                QProcess::startDetached(prog, args);
+            if (launchDesktopCommand(entry.exec)) {
+                if (QWidget *w = window()) w->close();
+            } else {
+                qWarning() << "osm-launcher: failed to start desktop command:" << entry.exec;
             }
-            if (QWidget *w = window()) w->close();
         }
         QFrame::mouseReleaseEvent(e);
     }
@@ -305,9 +294,6 @@ int main(int argc, char **argv) {
         // Another osm-launcher is already running
         return 0;
     }
-
-    // Also supports sessions which bypass /etc/X11/Xsession.d startup.
-    ensurePolkitAgent();
 
     QList<AppEntry> apps = loadDesktopEntries();
 
