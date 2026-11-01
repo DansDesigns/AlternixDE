@@ -1639,6 +1639,14 @@ public:
         connect(refreshTimer, &QTimer::timeout,
                 this, &LocationPage::refreshDataOnce);
 
+        // osm-notify modifies the same persistent Location switch; watch it
+        // even while Location is turned off (refreshTimer is stopped then).
+        stateMonitorTimer = new QTimer(this);
+        stateMonitorTimer->setInterval(900);
+        connect(stateMonitorTimer, &QTimer::timeout,
+                this, &LocationPage::syncExternalLocationSettings);
+        stateMonitorTimer->start();
+
         if (stackedWidget) {
             connect(stackedWidget, &QStackedWidget::currentChanged,
                     this, &LocationPage::onStackIndexChanged);
@@ -1691,6 +1699,7 @@ private:
     QPushButton *refreshButton = nullptr;
 
     QTimer *refreshTimer = nullptr;
+    QTimer *stateMonitorTimer = nullptr;
     bool locationEnabled = true;
 
     // Date & time
@@ -2393,10 +2402,13 @@ private:
     void updateSourceButtons()
     {
         if (serialGpsButton) {
-            serialGpsButton->setText(g_serialGpsEnabled ? "GPS chip\nOn"
-                                                        : "GPS chip\nOff");
+            const bool active = locationEnabled && g_serialGpsEnabled;
+            serialGpsButton->setText(!locationEnabled ? "GPS chip\nPaused" :
+                                     (g_serialGpsEnabled ? "GPS chip\nOn" : "GPS chip\nOff"));
             applyBtnColour(serialGpsButton,
-                           g_serialGpsEnabled ? "#7CFC00" : "#CC6666", 22);
+                           active ? "#7CFC00" : "#CC6666", 22);
+            serialGpsButton->setToolTip(!locationEnabled ?
+                "Location is switched off; the GPS source is paused." : QString());
         }
         if (netLocButton) {
             netLocButton->setText(g_netLocEnabled ? "Network\nOn" : "Network\nOff");
@@ -2405,9 +2417,43 @@ private:
         }
     }
 
+    void syncExternalLocationSettings()
+    {
+        if (stackedWidget && stackedWidget->currentWidget() != this) return;
+        QSettings saved(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                        QSettings::IniFormat);
+        const bool enabled = saved.value("Location/enabled", true).toBool();
+        const bool gps = saved.value("Location/serial_gps_enabled", true).toBool();
+        const bool net = saved.value("Location/network_enabled", false).toBool();
+        const bool masterChanged = enabled != locationEnabled;
+        const bool sourceChanged = gps != g_serialGpsEnabled || net != g_netLocEnabled;
+        if (!masterChanged && !sourceChanged) return;
+        locationEnabled = enabled;
+        if (gps != g_serialGpsEnabled) {
+            g_nmeaPort.clear();
+            g_nmeaProbed = false;
+        }
+        g_serialGpsEnabled = gps;
+        g_netLocEnabled = net;
+        updatePowerButton();
+        updateSourceButtons();
+        if (!locationEnabled) {
+            refreshTimer->stop();
+            gpsLabel->setText("Location is turned off");
+            satLabel->setText("Visible satellites\n\nLocation is turned off");
+            setSourceReadoutMessage("Location is turned off");
+        } else {
+            if (!refreshTimer->isActive()) refreshTimer->start();
+            // Only use the expensive GPS backend on a meaningful state change.
+            QTimer::singleShot(0, this, [this]() { refreshDataOnce(); });
+        }
+    }
+
     void toggleSerialGps()
     {
-        g_serialGpsEnabled = !g_serialGpsEnabled;
+        QSettings current(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                          QSettings::IniFormat);
+        g_serialGpsEnabled = !current.value("Location/serial_gps_enabled", true).toBool();
         saveSetting("Location/serial_gps_enabled", g_serialGpsEnabled);
 
         // Force a fresh port hunt on the next refresh.
@@ -2425,7 +2471,9 @@ private:
 
     void toggleNetworkLocation()
     {
-        g_netLocEnabled = !g_netLocEnabled;
+        QSettings current(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                          QSettings::IniFormat);
+        g_netLocEnabled = !current.value("Location/network_enabled", false).toBool();
         saveSetting("Location/network_enabled", g_netLocEnabled);
         updateSourceButtons();
         if (locationEnabled)
@@ -2434,11 +2482,11 @@ private:
 
     void togglePower()
     {
-        locationEnabled = !locationEnabled;
-
-        // Save state
+        // Read the latest saved state: osm-notify may have changed it between
+        // the last 900ms poll and this click.
         QSettings settings(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
                            QSettings::IniFormat);
+        locationEnabled = !settings.value("Location/enabled", true).toBool();
         settings.setValue("Location/enabled", locationEnabled);
         settings.sync();
 

@@ -626,6 +626,43 @@ extern "C" QWidget* make_page(QStackedWidget *stack) {
         doScan();
     });
 
+    // Lightweight asynchronous radio monitor: osm-notify, rfkill/NetworkManager
+    // and this page all show the same real state without another scan or sudo.
+    // The radio probe never blocks the UI, including during connection spinners.
+    auto wifiStateProbe = std::make_shared<bool>(false);
+    QTimer *radioTimer = new QTimer(page);
+    radioTimer->setInterval(1100);
+    QObject::connect(radioTimer, &QTimer::timeout, page,
+                     [page, toggleWifi, wifiStateProbe, updateWifiState]() {
+        if (*wifiStateProbe || !page->isVisible() || !toggleWifi->isEnabled()) return;
+        *wifiStateProbe = true;
+        auto *p = new QProcess(page);
+        QObject::connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                         page, [p, toggleWifi, wifiStateProbe, updateWifiState]
+                         (int rc, QProcess::ExitStatus status) {
+            *wifiStateProbe = false;
+            if (rc == 0 && status == QProcess::NormalExit) {
+                const QString actual = QString::fromUtf8(p->readAllStandardOutput()).trimmed();
+                if ((actual == "enabled" && toggleWifi->text() != "On") ||
+                    (actual == "disabled" && toggleWifi->text() != "Off"))
+                    updateWifiState();
+            }
+            p->deleteLater();
+        });
+        QObject::connect(p, &QProcess::errorOccurred, page,
+                         [p, wifiStateProbe](QProcess::ProcessError err) {
+            if (err == QProcess::FailedToStart) {
+                *wifiStateProbe = false;
+                p->deleteLater();
+            }
+        });
+        p->start("nmcli", {"radio", "wifi"});
+        QTimer::singleShot(3000, p, [p]() {
+            if (p->state() != QProcess::NotRunning) p->kill();
+        });
+    });
+    radioTimer->start();
+
     // -----------------------------------------------------
     // BUTTON CONNECTIONS
     // -----------------------------------------------------

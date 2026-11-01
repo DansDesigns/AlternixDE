@@ -475,6 +475,14 @@ public:
         });
 
         QTimer::singleShot(50, this, [this] { refreshDevices(); });
+
+        // A separate inexpensive radio check is needed: the full device query
+        // only ran after clicking Check/Scan, so toggling from osm-notify left
+        // the Settings button stale. Never run the full scan every second.
+        powerPollTimer = new QTimer(this);
+        powerPollTimer->setInterval(1400);
+        connect(powerPollTimer, &QTimer::timeout, this, [this] { pollPowerState(); });
+        powerPollTimer->start();
     }
 
     ~BluetoothPage() override
@@ -509,6 +517,8 @@ private:
     QTimer *scanRefreshTimer = nullptr;
     QTimer *scanSpinTimer = nullptr;
     QTimer *pairSpinTimer = nullptr;
+    QTimer *powerPollTimer = nullptr;
+    bool powerPollBusy = false;
     QPointer<BluetoothQueryThread> queryThread;
     QPointer<QProcess> scanProcess;
     QPointer<QProcess> pairProcess;
@@ -529,6 +539,25 @@ private:
     QString pairTranscript;
     QString recentPairText;
     QString lastPrompt;
+
+    void pollPowerState()
+    {
+        if (!isVisible() || powerPollBusy || queryThread || connectInProgress) return;
+        powerPollBusy = true;
+        runAsync("bluetoothctl", {"show"},
+                 [this](const QString &text, bool ok) {
+            powerPollBusy = false;
+            if (!ok) return;
+            const bool found = !text.contains("No default controller", Qt::CaseInsensitive) &&
+                               text.contains("Powered:", Qt::CaseInsensitive);
+            const bool on = found && yesPropertyBT(text, "Powered");
+            if (state.powered == on && state.controllerAvailable == found) return;
+            state.powered = on;
+            state.controllerAvailable = found;
+            updateButtons();
+            refreshDevices();
+        }, 3500);
+    }
 
     void refreshDevices()
     {

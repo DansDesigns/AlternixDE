@@ -21,6 +21,9 @@
 #include <QFileInfo>
 #include <QTimer>
 #include <functional>
+#include <QRegularExpression>
+#include <QSet>
+#include <QMap>
 
 static const int CARD_PADDING = 22;
 static const int ICON_COLUMN_WIDTH = 54;
@@ -163,19 +166,24 @@ QString getSSID() {
 }
 
 QString getEthernetStatus() {
-    QDir netDir("/sys/class/net");
-    QStringList ifs = netDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-
-    for (const QString &iface : ifs) {
-        if (iface.startsWith("e")) {
-            QFile f("/sys/class/net/" + iface + "/operstate");
-            if (!f.open(QIODevice::ReadOnly)) continue;
-            QString s = QString(f.readAll()).trimmed();
-            if (s == "up") return "Connected";
-            return "N/C";
-        }
+    const QDir dir("/sys/class/net");
+    for (const QString &iface : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (!(iface.startsWith("eth") || iface.startsWith("en"))) continue;
+        const QString path = "/sys/class/net/" + iface;
+        if (QFileInfo::exists(path + "/wireless") ||
+            QFileInfo::exists(path + "/phy80211")) continue;
+        QFile f(path + "/flags");
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        bool ok = false;
+        const uint flags = QString::fromLatin1(f.readAll()).trimmed().toUInt(&ok, 0);
+        if (!ok) continue;
+        if (!(flags & 1U)) return "Off";
+        QFile carrier(path + "/carrier");
+        if (carrier.open(QIODevice::ReadOnly) && carrier.readAll().trimmed() == "1")
+            return "Connected";
+        return "On (cable unplugged)";
     }
-    return "Unknown";
+    return "No Ethernet adapter";
 }
 
 // ------------------------------------------------------
@@ -207,16 +215,15 @@ public:
 
         stack->addWidget(makeMainMenu());
 
-        // Keep the Wireless subtitle in sync if Wi-Fi connects or changes.
-        QTimer *wifiStatusTimer = new QTimer(this);
-        QObject::connect(wifiStatusTimer, &QTimer::timeout, this, [this]() {
-            if (stack->currentIndex() == 0 && wirelessStatusLabel) {
-                const QString ssid = getSSID();
-                if (wirelessStatusLabel->text() != ssid)
-                    wirelessStatusLabel->setText(ssid);
-            }
+        // Real device status, updated while the hub is displayed. Queries
+        // are asynchronous so old tablets never freeze while a daemon wakes.
+        auto *statusTimer = new QTimer(this);
+        statusTimer->setInterval(1700);
+        connect(statusTimer, &QTimer::timeout, this, [this]() {
+            if (stack->currentIndex() == 0) refreshHubDeviceStates();
         });
-        wifiStatusTimer->start(10000);
+        statusTimer->start();
+        QTimer::singleShot(200, this, [this]() { refreshHubDeviceStates(); });
     }
 
 protected:
@@ -230,6 +237,96 @@ protected:
 private:
     QStackedWidget *stack;
     QLabel *wirelessStatusLabel = nullptr;
+    QMap<QString, QLabel*> hubStatusLabels;
+    QSet<QString> hubProbesInFlight;
+
+    void setHubStatus(const QString &key, const QString &text) {
+        if (QLabel *label = hubStatusLabels.value(key, nullptr))
+            if (label->text() != text) label->setText(text);
+    }
+
+    void runHubProbe(const QString &key, const QString &program,
+                     const QStringList &args,
+                     const std::function<void(const QString &, bool)> &done) {
+        if (hubProbesInFlight.contains(key)) return;
+        hubProbesInFlight.insert(key);
+        auto *p = new QProcess(this);
+        connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, p, key, done](int code, QProcess::ExitStatus exitStatus) {
+            hubProbesInFlight.remove(key);
+            done(QString::fromUtf8(p->readAllStandardOutput()).trimmed(),
+                 code == 0 && exitStatus == QProcess::NormalExit);
+            p->deleteLater();
+        });
+        connect(p, &QProcess::errorOccurred, this,
+                [this, p, key, done](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) {
+                hubProbesInFlight.remove(key);
+                done({}, false);
+                p->deleteLater();
+            }
+        });
+        p->start(program, args);
+        QTimer::singleShot(4000, p, [p]() {
+            if (p->state() != QProcess::NotRunning) p->kill();
+        });
+    }
+
+    void refreshHubDeviceStates() {
+        setHubStatus("Ethernet", getEthernetStatus());
+        QSettings cfg(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                      QSettings::IniFormat);
+        const bool loc = cfg.value("Location/enabled", true).toBool();
+        setHubStatus("Location", loc ? "On" : "Off");
+
+        runHubProbe("wifi-radio", "nmcli", {"radio", "wifi"},
+                    [this](const QString &out, bool ok) {
+            if (!ok) { setHubStatus("Wireless", "Unavailable"); return; }
+            if (out == "disabled") { setHubStatus("Wireless", "Off"); return; }
+            if (out != "enabled") { setHubStatus("Wireless", "Unavailable"); return; }
+            runHubProbe("wifi-ssid", "nmcli",
+                        {"-t", "-f", "IN-USE,SSID", "device", "wifi", "list", "--rescan", "no"},
+                        [this](const QString &out, bool ok) {
+                if (!ok) { setHubStatus("Wireless", "On"); return; }
+                for (const QString &line : out.split('\n')) {
+                    if (line.startsWith("*:")) {
+                        setHubStatus("Wireless", line.mid(2).trimmed());
+                        return;
+                    }
+                }
+                setHubStatus("Wireless", "On (not connected)");
+            });
+        });
+        runHubProbe("bluetooth", "bluetoothctl", {"show"},
+                    [this](const QString &out, bool ok) {
+            if (!ok || !out.contains("Powered:", Qt::CaseInsensitive)) {
+                setHubStatus("Bluetooth", "No usable adapter"); return;
+            }
+            const bool on = QRegularExpression(R"(Powered:\s*yes)",
+                              QRegularExpression::CaseInsensitiveOption).match(out).hasMatch();
+            setHubStatus("Bluetooth", on ? "On" : "Off");
+        });
+        runHubProbe("mobile-list", "mmcli", {"-L"},
+                    [this](const QString &out, bool ok) {
+            auto m = QRegularExpression(R"(/Modem/(\d+))").match(out);
+            if (!ok || !m.hasMatch()) {
+                setHubStatus("Mobile Network", "No modem"); return;
+            }
+            runHubProbe("mobile-state", "mmcli", {"-m", m.captured(1)},
+                        [this](const QString &text, bool valid) {
+                auto st = QRegularExpression(R"((?:^|\n)[^\n]*state:\s*'?([^'\n]+))",
+                                  QRegularExpression::CaseInsensitiveOption).match(text);
+                if (!valid || !st.hasMatch()) {
+                    setHubStatus("Mobile Network", "Unavailable"); return;
+                }
+                const QString state = st.captured(1).trimmed().toLower();
+                const bool on = state.startsWith("connected") || state.startsWith("registered") ||
+                                state.startsWith("enabled") || state.startsWith("searching");
+                setHubStatus("Mobile Network", on ? "On" : "Off");
+            });
+        });
+    }
+
 
     // ------------------------------------------------------
     QWidget *makeMainMenu() {
@@ -328,6 +425,9 @@ private:
         QLabel *subt = new QLabel(sub);
         subt->setStyleSheet("font-size:22px; color:#bbbbbb;");
         if (title == "Wireless") wirelessStatusLabel = subt;
+        if (title == "Wireless" || title == "Bluetooth" ||
+            title == "Mobile Network" || title == "Ethernet" || title == "Location")
+            hubStatusLabels[title] = subt;
 
         textCol->addWidget(ttl);
         textCol->addWidget(subt);

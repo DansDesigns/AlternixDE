@@ -13,6 +13,11 @@
 #include <QCoreApplication>
 #include <QTimer>
 #include <functional>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QMessageBox>
+#include <QRegularExpression>
 
 // ---------------------------------------------------------
 // Helpers (Ethernet)
@@ -65,9 +70,17 @@ static QString runCommandEthAnimated(const QString &cmd, int timeoutMs,
 // the first ethernet-class interface instead.
 static QString getEthIface()
 {
-    QString res = runCommandEth(
-        "for i in /sys/class/net/e*; do [ -e \"$i\" ] && basename \"$i\" && break; done");
-    return res.trimmed();
+    // Detect a real wired adapter, not the first e* name or a connected cable.
+    const QDir dir("/sys/class/net");
+    for (const QString &name : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (!(name.startsWith("en") || name.startsWith("eth"))) continue;
+        const QString root = "/sys/class/net/" + name;
+        if (QFileInfo::exists(root + "/wireless") ||
+            QFileInfo::exists(root + "/phy80211")) continue;
+        QFile type(root + "/type");
+        if (type.open(QIODevice::ReadOnly) && type.readAll().trimmed() == "1") return name;
+    }
+    return QString();
 }
 
 // Bluetooth-style uniform button
@@ -93,18 +106,35 @@ static QPushButton* smallBtnEth(const QString &txt)
 
 static bool isEthernetPowered()
 {
-    QString iface = getEthIface();
+    const QString iface = getEthIface();
     if (iface.isEmpty()) return false;
-    QString s = runCommandEth("cat /sys/class/net/" + iface + "/operstate 2>/dev/null");
-    return s.contains("up", Qt::CaseInsensitive);
+    // IFF_UP is the administrator-controlled on/off switch. operstate and
+    // carrier can say down even while an enabled adapter has no cable.
+    QFile file("/sys/class/net/" + iface + "/flags");
+    if (!file.open(QIODevice::ReadOnly)) return false;
+    bool ok = false;
+    const uint flags = QString::fromLatin1(file.readAll()).trimmed().toUInt(&ok, 0);
+    return ok && (flags & 1U);
 }
 
-static void setEthernetPowered(bool on)
+static QString setEthernetPowered(bool on, const std::function<void()> &tick)
 {
-    QString iface = getEthIface();
-    if (iface.isEmpty()) return;
-    if (on) runCommandEth("sudo -n ip link set " + iface + " up");
-    else    runCommandEth("sudo -n ip link set " + iface + " down");
+    const QString iface = getEthIface();
+    if (iface.isEmpty()) return "No Ethernet adapter was found";
+    if (!QRegularExpression("^[A-Za-z0-9_.:-]+$").match(iface).hasMatch())
+        return "Ethernet interface name is invalid";
+    // Try the normal kernel interface first (e.g. privileged session).
+    // For protected actions, osm-sudo is the *command wrapper*, not askpass.
+    const QString cmd = QString("ip link set %1 %2").arg(iface, on ? "up" : "down");
+    const QString direct = runCommandEthAnimated(cmd, 6000, tick);
+    if (isEthernetPowered() == on) return {};
+    if (!QFileInfo("/usr/local/bin/osm-sudo").isExecutable())
+        return "Could not change Ethernet power. osm-sudo is unavailable. " + direct;
+    const QString authorised = runCommandEthAnimated(
+        QString("/usr/local/bin/osm-sudo ip link set %1 %2").arg(iface, on ? "up" : "down"),
+        120000, tick);
+    if (isEthernetPowered() == on) return {};
+    return "Ethernet power was not changed: " + (authorised.isEmpty() ? direct : authorised);
 }
 
 // ---------------------------------------------------------
@@ -241,6 +271,20 @@ public:
             updatePowerButton();
             refreshIpInfo();
         });
+
+        // Keep the settings button in sync with osm-notify (and kernel/network
+        // managers). This sysfs check is cheap and requires no permissions.
+        auto *linkStateTimer = new QTimer(this);
+        linkStateTimer->setInterval(1000);
+        connect(linkStateTimer, &QTimer::timeout, this, [this] {
+            if (!isVisible() || !powerButton->isEnabled()) return;
+            const bool actual = isEthernetPowered();
+            if (actual == ethernetPowered) return;
+            ethernetPowered = actual;
+            updatePowerButton();
+            QTimer::singleShot(0, this, [this]() { if (isVisible()) refreshIpInfo(); });
+        });
+        linkStateTimer->start();
     }
 
 private:
@@ -277,21 +321,20 @@ private:
     void togglePower()
     {
         powerButton->setEnabled(false);
-        bool target = !ethernetPowered;
+        bool target = !isEthernetPowered();
 
         int frame = 0;
         powerButton->setText(QString::fromUtf8(SPIN_FRAMES_ETH[0]));
 
-        QString iface = getEthIface();
-        if (!iface.isEmpty()) {
-            runCommandEthAnimated(
-                QString("sudo -n ip link set %1 %2").arg(iface, target ? "up" : "down"),
-                8000,
-                [&]() {
-                    frame = (frame + 1) % SPIN_COUNT_ETH;
-                    powerButton->setText(QString::fromUtf8(SPIN_FRAMES_ETH[frame]));
-                });
-        }
+        QString error = setEthernetPowered(target, [&]() {
+            frame = (frame + 1) % SPIN_COUNT_ETH;
+            powerButton->setText(QString::fromUtf8(SPIN_FRAMES_ETH[frame]));
+        });
+        if (!error.isEmpty()) {
+            powerButton->setToolTip(error);
+            // Failed commands must not silently leave a misleading green button.
+            QMessageBox::warning(this, "Ethernet", error);
+        } else powerButton->setToolTip(QString());
 
         // Re-read the real state rather than assuming the command worked.
         ethernetPowered = isEthernetPowered();

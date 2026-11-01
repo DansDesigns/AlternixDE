@@ -33,6 +33,11 @@
 #include <QKeyEvent>
 #include <QShowEvent>
 #include <QMap>
+#include <QSet>
+#include <QRegularExpression>
+#include <QPointer>
+#include <QDateTime>
+#include <memory>
 #include <algorithm>
 #include <QPropertyAnimation>
 
@@ -60,260 +65,84 @@ static QPixmap tintPixmap(const QPixmap &src, const QColor &color) {
     return result;
 }
 
-// ──────────────────────────────  Wi-Fi detection
-static QString detectWifiInterface() {
+// All quick-settings cards use the same authority as their Settings pages:
+// NetworkManager (Wi-Fi), BlueZ (Bluetooth), kernel IFF_UP (Ethernet),
+// ModemManager (cellular), and the existing Alternix settings for Location
+// and screen rotation. Never infer a power state from cable carrier / GPS fix.
+static QString alternixSettingsPath() {
+    return QDir::homePath() + "/.config/Alternix/osm-settings.conf";
+}
+
+static QString detectEthernetInterface() {
     QDir dir("/sys/class/net");
-    QStringList nets = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    QStringList wifiPrefixes = { "wl", "wlan", "wifi" };
-
-    for (const QString &iface : nets) {
-        for (const QString &p : wifiPrefixes) {
-            if (iface.startsWith(p))
-                return iface;
-        }
+    const QStringList names = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &name : names) {
+        if (!(name.startsWith("en") || name.startsWith("eth"))) continue;
+        const QString base = "/sys/class/net/" + name;
+        if (QFileInfo::exists(base + "/wireless") ||
+            QFileInfo::exists(base + "/phy80211")) continue;
+        if (readFile(base + "/type") == "1") return name;
     }
-    return "wlan0";
+    return {};
 }
 
-static bool wifiOn_nm(const QString &iface = QString()) {
-    Q_UNUSED(iface);
-    QProcess p;
-    p.start("bash", {"-c", "nmcli radio wifi"});
-    p.waitForFinished(200);
-    QString out = QString::fromUtf8(p.readAll()).trimmed();
-    return (out == "enabled");
+static QString detectWifiInterface() {
+    const QDir dir("/sys/class/net");
+    for (const QString &name : dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString root = "/sys/class/net/" + name;
+        if (QFileInfo::exists(root + "/wireless") ||
+            QFileInfo::exists(root + "/phy80211")) return name;
+    }
+    return {};
 }
 
-static int wifiQualityPercent(const QString &iface) {
+// Preserve the signal percentage shown by the original notification card.
+static int wifiSignalPercent() {
+    const QString iface = detectWifiInterface();
     QFile f("/proc/net/wireless");
-    if (!f.open(QIODevice::ReadOnly)) return -1;
-
-    QString content = QString::fromUtf8(f.readAll());
-    const QStringList lines = content.split('\n');
+    if (iface.isEmpty() || !f.open(QIODevice::ReadOnly)) return -1;
+    const QStringList lines = QString::fromUtf8(f.readAll()).split('\n');
     for (const QString &line : lines) {
-        if (!line.contains(iface + ":")) continue;
-        QString l = line.trimmed();
-        QStringList parts = l.split(' ', Qt::SkipEmptyParts);
-        if (parts.size() < 3) return -1;
+        if (!line.trimmed().startsWith(iface + ":")) continue;
+        const QStringList cols = line.trimmed().split(QRegularExpression("\\s+"),
+                                                     Qt::SkipEmptyParts);
+        if (cols.size() < 3) return -1;
+        QString level = cols.at(2);
+        level.remove('.');
         bool ok = false;
-        double link = parts[2].remove('.').toDouble(&ok);
-        if (!ok) return -1;
-        int perc = int(link * 100.0 / 70.0);
-        return qBound(0, perc, 100);
+        const double link = level.toDouble(&ok);
+        return ok ? qBound(0, int(link * 100.0 / 70.0), 100) : -1;
     }
     return -1;
 }
 
-static QString detectWifiSsid(const QString &iface) {
-    Q_UNUSED(iface);
-
-    // Try iwgetid first
-    {
-        QProcess p;
-        p.start("bash", {"-c", "iwgetid -r 2>/dev/null"});
-        p.waitForFinished(600);
-        QString ssid = QString::fromUtf8(p.readAll()).trimmed();
-        if (!ssid.isEmpty()) return ssid;
-    }
-
-    // Try iw dev
-    {
-        QString cmd =
-            "if command -v iw >/dev/null 2>&1; then "
-            "iw dev wlan0 link | awk -F'ssid ' '/SSID/ {print $2}'; "
-            "fi";
-
-        QProcess p;
-        p.start("bash", {"-c", cmd});
-        p.waitForFinished(600);
-        QString ssid = QString::fromUtf8(p.readAll()).trimmed();
-        if (!ssid.isEmpty()) return ssid;
-    }
-
-    // Try wpa_cli
-    {
-        QString cmd =
-            "if command -v wpa_cli >/dev/null 2>&1; then "
-            "wpa_cli status | awk -F= '/^ssid=/ {print $2}'; "
-            "fi";
-
-        QProcess p;
-        p.start("bash", {"-c", cmd});
-        p.waitForFinished(600);
-        QString ssid = QString::fromUtf8(p.readAll()).trimmed();
-        if (!ssid.isEmpty()) return ssid;
-    }
-
-    // Fallback: wpa_supplicant.conf
-    {
-        QProcess p;
-        p.start("bash", {"-c",
-            "grep -m1 '^ssid=' /etc/wpa_supplicant/wpa_supplicant.conf "
-            "2>/dev/null | cut -d'\"' -f2"});
-        p.waitForFinished(300);
-        QString ssid = QString::fromUtf8(p.readAll()).trimmed();
-        if (!ssid.isEmpty()) return ssid;
-    }
-
-    return QString();
+// IFF_UP (bit zero) means administratively enabled, even with no cable.
+static bool ethernetAdministrativelyUp(const QString &iface, bool *known = nullptr) {
+    const QString flags = readFile("/sys/class/net/" + iface + "/flags");
+    bool ok = false;
+    const uint mask = flags.toUInt(&ok, 0);
+    if (known) *known = ok;
+    return ok && (mask & 1U);
 }
 
-static QString wifiInfo(const QString &iface) {
-    if (!wifiOn_nm())
-        return "🔴";
-
-    int perc = wifiQualityPercent(iface);
-    QString ssid = detectWifiSsid(iface);
-
-    QString line1 = (perc >= 0)
-        ? QString("🟢 %1%").arg(perc)
-        : QString("🟢 ON");
-
-    if (!ssid.isEmpty())
-        return line1 + "\n" + ssid;
-
-    return line1;
+static QString rotateScriptPath() {
+    return QDir::homePath() + "/.config/Alternix/scripts/alternix-rotate-toggle.sh";
 }
-
-static void toggleWifi_nm() {
-    bool on = wifiOn_nm();
-    QString cmd = on
-        ? "nmcli radio wifi off"
-        : "nmcli radio wifi on";
-    QProcess::startDetached("bash", {"-c", cmd});
-}
-
-// ────────────────────────────── Ethernet
-static QString detectEthernetInterface() {
-    QDir dir("/sys/class/net");
-    QStringList nets = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    QStringList ethPrefixes = { "eth", "en", "eno", "enp" };
-
-    for (const QString &iface : nets) {
-        if (iface == "lo") continue;
-        for (const QString &p : ethPrefixes)
-            if (iface.startsWith(p))
-                return iface;
-    }
-    return "eth0";
-}
-
-static bool ethOn(const QString &iface) {
-    if (iface.isEmpty()) return false;
-    QString carrier = readFile("/sys/class/net/" + iface + "/carrier");
-    return (carrier == "1");
-}
-
-static QString ethInfo(const QString &iface) {
-    if (!ethOn(iface))
-        return "🔴";
-    QString speed = readFile("/sys/class/net/" + iface + "/speed");
-    return speed.isEmpty() ? "🟢" : "🟢" + speed + " Mb/s";
-}
-
-static void toggleEth(const QString &iface) {
-    if (iface.isEmpty()) return;
-    bool on = ethOn(iface);
-    QString cmd = QString("ip link set %1 %2").arg(iface, on ? "down" : "up");
-    QProcess::startDetached("bash", {"-c", cmd});
-}
-
-// ────────────────────────────── Bluetooth
-static bool btOn_ctl() {
-    QProcess p;
-    p.start("bash", {"-c",
-        "bluetoothctl show | grep -i 'Powered:' | sed 's/.*Powered: *//'"});
-    p.waitForFinished(300);
-    QString out = QString::fromUtf8(p.readAll()).trimmed();
-    return (out == "yes" || out == "true" || out == "on");
-}
-
-static QString btInfo() {
-    if (!btOn_ctl()) return "🔴";
-
-    QProcess p;
-    p.start("bash", {"-c",
-        "bluetoothctl info | grep -i 'Name:' | sed 's/.*Name: *//'"});
-    p.waitForFinished(300);
-    QString name = QString::fromUtf8(p.readAll()).trimmed();
-    return name.isEmpty() ? "🟢\nNo device connected"
-                          : "🟢" + name;
-}
-
-static void toggleBt_ctl() {
-    bool on = btOn_ctl();
-    QString cmd = QString("bluetoothctl --timeout 1 power %1")
-                  .arg(on ? "off" : "on");
-    QProcess::startDetached("bash", {"-c", cmd});
-}
-
-// ────────────────────────────── GPS stub
-static bool gpsOn() { return false; }
-static QString gpsInfo() { return gpsOn() ? "🟢" : "🔴"; }
-
-// ────────────────────────────── Auto-Rotate
-// Shared config file (same one used by the Display settings page) so
-// both stay in sync with a single "display_auto_rotate" key.
-static QString rotateCfgPath() {
-    return QDir::homePath() + "/.config/Alternix/osm-settings.conf";
-}
-
-static QString rotateScriptDir() {
-    return QDir::homePath() + "/.config/Alternix/scripts";
-}
-
 static QString rotatePidPath() {
     return QDir::homePath() + "/.config/Alternix/rotate-monitor.pid";
 }
-
-static QMap<QString, QString> rotateLoadCfg() {
-    QMap<QString, QString> map;
-    QFile f(rotateCfgPath());
-    if (!f.open(QIODevice::ReadOnly)) return map;
-    QTextStream s(&f);
-    while (!s.atEnd()) {
-        QString line = s.readLine().trimmed();
-        if (line.startsWith("#") || !line.contains("=")) continue;
-        QStringList parts = line.split("=");
-        if (parts.size() == 2)
-            map[parts[0].trimmed()] = parts[1].trimmed();
-    }
-    return map;
-}
-
-static void rotateSaveCfg(const QMap<QString, QString> &map) {
-    QDir().mkpath(QDir::homePath() + "/.config/Alternix");
-    QFile f(rotateCfgPath());
-    if (!f.open(QFile::WriteOnly | QFile::Truncate)) return;
-    QTextStream s(&f);
-    for (auto it = map.begin(); it != map.end(); ++it)
-        s << it.key() << "=" << it.value() << "\n";
-}
-
 static bool autoRotateEnabled() {
-    return rotateLoadCfg().value("display_auto_rotate", "false") == "true";
+    QSettings s(alternixSettingsPath(), QSettings::IniFormat);
+    return s.value("display_auto_rotate", false).toBool();
 }
 
-// The monitor script writes a pidfile while it's actively running and
-// applying orientation changes; its presence is our "is it really on"
-// signal rather than trusting the config flag alone.
+// The presence of a leftover PID file alone is NOT evidence of a live sensor.
 static bool rotateMonitorRunning() {
-    return QFile::exists(rotatePidPath());
-}
-
-static QString rotateInfo() {
-    return rotateMonitorRunning() ? "🟢 ON" : "🔒 Locked";
-}
-
-static void toggleAutoRotate() {
-    bool enabling = !autoRotateEnabled();
-
-    QMap<QString, QString> cfg = rotateLoadCfg();
-    cfg["display_auto_rotate"] = enabling ? "true" : "false";
-    rotateSaveCfg(cfg);
-
-    QString script = rotateScriptDir() + "/alternix-rotate-toggle.sh";
-    QProcess::startDetached("bash", { script, enabling ? "on" : "off" });
+    const QString pid = readFile(rotatePidPath());
+    bool ok = false;
+    const qint64 n = pid.toLongLong(&ok);
+    if (!ok || n <= 1) return false;
+    return QFileInfo::exists(QString("/proc/%1").arg(n));
 }
 
 // ──────────────────────────────  Battery helpers
@@ -551,7 +380,23 @@ public:
     bool closing;
 
     QTimer *refreshTimer;
+    QTimer *deviceTimer = nullptr;
     bool refreshEnabled;
+
+    struct DeviceState {
+        bool known = false;
+        bool enabled = false;
+        QString detail;
+    };
+    QMap<QString, DeviceState> devices;
+    QMap<QString, QLabel*> deviceLabels;
+    QMap<QString, QFrame*> deviceFrames;
+    QSet<QString> pollsInFlight;
+    QSet<QString> togglesInFlight;
+    QMap<QString, qint64> lastErrorUntil;
+    QMap<QString, QString> lastErrorMessage;
+    QString modemId;
+    QString ethernetIface;
 
     NotificationOverlay()
         : QWidget(),
@@ -584,8 +429,7 @@ public:
 
         QString imgBase = QDir::homePath() + "/.config/qtile/images/";
 
-        QString wifiIF = detectWifiInterface();
-        QString ethIF  = detectEthernetInterface();
+        ethernetIface = detectEthernetInterface();
         QString batPath = detectBatteryPath();
 
         auto scheduleRefresh = [=](QLabel *infoLabel,
@@ -666,69 +510,43 @@ public:
 
             int toggleIndex = 0;
 
-            auto addToggle =
-                [&](const QString &icon, const QString &labelText,
-                    std::function<QString()> infoFunc,
-                    std::function<void()> toggleFunc)
-            {
+            auto addToggle = [&](const QString &key, const QString &icon,
+                                 const QString &labelText) {
                 QVBoxLayout *inner = new QVBoxLayout();
                 inner->setAlignment(Qt::AlignCenter);
 
                 auto *ic = new ClickIcon(imgBase + icon, "", 42, this);
-                ic->closeFunc = nullptr;
-
+                if (key == "mobile" && QPixmap(imgBase + icon).isNull())
+                    ic->setText(QString::fromUtf8("📱"));
                 QLabel *lbl = new QLabel(labelText, this);
                 lbl->setStyleSheet("color:white; font-size:18pt;");
                 lbl->setAlignment(Qt::AlignCenter);
-
-                QLabel *info = new QLabel(infoFunc(), this);
+                QLabel *info = new QLabel("Checking…", this);
                 info->setStyleSheet("color:#dddddd; font-size:14pt;");
                 info->setAlignment(Qt::AlignCenter);
+                info->setWordWrap(true);
 
                 inner->addWidget(ic);
                 inner->addWidget(lbl);
                 inner->addWidget(info);
+                QFrame *card = createCard(this, inner, true, [this, key]() {
+                    toggleDevice(key);
+                });
+                deviceLabels.insert(key, info);
+                deviceFrames.insert(key, card);
 
-                auto onClick = [=]() {
-                    if (toggleFunc) toggleFunc();
-                    info->setText(infoFunc());
-                    scheduleRefresh(info, infoFunc);
-                };
-
-                QFrame *card = createCard(this, inner, true, onClick);
-
-                int r = toggleIndex / sysCols;
-                int c = toggleIndex % sysCols;
+                const int r = toggleIndex / sysCols;
+                const int c = toggleIndex % sysCols;
                 grid->addWidget(card, r, c);
-                toggleIndex++;
+                ++toggleIndex;
             };
 
-            // Wi-Fi
-            addToggle("wifi.png", "Wi-Fi",
-                      [wifiIF]() { return wifiInfo(wifiIF); },
-                      []() { toggleWifi_nm(); });
-
-            // Bluetooth
-            addToggle("bt.png", "Bluetooth",
-                      []() { return btInfo(); },
-                      []() { toggleBt_ctl(); });
-
-            // Ethernet
-            addToggle("enet.png", "Ethernet",
-                      [ethIF]() { return ethInfo(ethIF); },
-                      [ethIF]() { toggleEth(ethIF); });
-
-            // GPS
-            addToggle("gps.png", "GPS",
-                      []() { return gpsInfo(); },
-                      []() {});
-
-            // Auto-Rotate (uses the rotation sensor via iio-sensor-proxy;
-            // driver setup and sensor scanning happen from the Display
-            // settings page — this is just the on/off switch)
-            addToggle("rotate.png", "Auto-Rotate",
-                      []() { return rotateInfo(); },
-                      []() { toggleAutoRotate(); });
+            addToggle("wifi", "wifi.png", "Wi-Fi");
+            addToggle("bluetooth", "bt.png", "Bluetooth");
+            addToggle("ethernet", "enet.png", "Ethernet");
+            addToggle("mobile", "mobile.png", "Mobile");
+            addToggle("gps", "gps.png", "GPS chip");
+            addToggle("rotation", "rotate.png", "Auto-Rotate");
 
             // ───────── Battery (icon based on status + saver)
             {
@@ -910,6 +728,336 @@ public:
             }
             updateBatteryIconColor();
         });
+
+        // Device probes are asynchronous. They cannot stall animation or
+        // trigger authentication merely by querying status.
+        deviceTimer = new QTimer(this);
+        deviceTimer->setInterval(1500);
+        connect(deviceTimer, &QTimer::timeout, this, [this]() {
+            if (refreshEnabled && isVisible()) refreshDeviceStates();
+        });
+    }
+
+    // Asynchronous QProcess with cancellation and exit-code checking. The callback
+    // is delivered only while the overlay exists; no detached root commands.
+    void runDeviceProcess(const QString &program, const QStringList &args,
+                          int timeoutMs,
+                          const std::function<void(const QString &, bool)> &done) {
+        auto *p = new QProcess(this);
+        p->setProcessChannelMode(QProcess::MergedChannels);
+        auto *deadline = new QTimer(p);
+        deadline->setSingleShot(true);
+        auto finished = std::make_shared<bool>(false);
+        auto complete = [p, deadline, finished, done](bool success) {
+            if (*finished) return;
+            *finished = true;
+            deadline->stop();
+            const QString result = QString::fromUtf8(p->readAll()).trimmed();
+            done(result.isEmpty() && !success ? p->errorString() : result, success);
+            p->deleteLater();
+        };
+        connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [complete](int rc, QProcess::ExitStatus exitStatus) {
+            complete(rc == 0 && exitStatus == QProcess::NormalExit);
+        });
+        connect(p, &QProcess::errorOccurred, this,
+                [p, complete](QProcess::ProcessError e) {
+            if (e == QProcess::FailedToStart) complete(false);
+        });
+        connect(deadline, &QTimer::timeout, this, [p]() {
+            if (p->state() != QProcess::NotRunning) p->kill();
+        });
+        p->start(program, args);
+        deadline->start(timeoutMs);
+    }
+
+    void setDeviceState(const QString &key, bool known, bool enabled,
+                        const QString &detail = QString()) {
+        DeviceState next;
+        next.known = known;
+        next.enabled = enabled;
+        next.detail = detail;
+        devices[key] = next;
+        if (QLabel *label = deviceLabels.value(key, nullptr)) {
+            const QString text = !known ? QString::fromUtf8("⚪ Unavailable")
+                                        : (enabled ? QString::fromUtf8("🟢 On")
+                                                   : QString::fromUtf8("🔴 Off"));
+            if (lastErrorUntil.value(key) > QDateTime::currentMSecsSinceEpoch()) {
+                label->setText(QString::fromUtf8("⚠ Failed") + "\n" +
+                               lastErrorMessage.value(key).left(65));
+                label->setToolTip(lastErrorMessage.value(key));
+            } else {
+                label->setText(detail.isEmpty() ? text : text + "\n" + detail);
+                label->setToolTip(detail);
+            }
+        }
+        if (QFrame *frame = deviceFrames.value(key, nullptr)) {
+            frame->setToolTip(detail);
+        }
+    }
+
+    void pollCommand(const QString &key, const QString &program,
+                     const QStringList &args,
+                     const std::function<void(const QString &, bool)> &done) {
+        if (pollsInFlight.contains(key) || togglesInFlight.contains(key)) return;
+        pollsInFlight.insert(key);
+        runDeviceProcess(program, args, 4000,
+            [this, key, done](const QString &out, bool ok) {
+                pollsInFlight.remove(key);
+                done(out, ok);
+            });
+    }
+
+    void refreshDeviceStates() {
+        // Kernel and settings-backed statuses require no process spawning.
+        ethernetIface = detectEthernetInterface();
+        bool ethKnown = false;
+        const bool ethUp = !ethernetIface.isEmpty() &&
+                            ethernetAdministrativelyUp(ethernetIface, &ethKnown);
+        if (!togglesInFlight.contains("ethernet")) {
+            if (ethKnown) {
+                const bool link = readFile("/sys/class/net/" + ethernetIface + "/carrier") == "1";
+                const QString speed = readFile("/sys/class/net/" + ethernetIface + "/speed");
+                setDeviceState("ethernet", true, ethUp,
+                               !ethUp ? "Adapter disabled" :
+                               (link ? (speed.isEmpty() ? "Cable connected" : speed + " Mb/s") :
+                                       "Cable unplugged"));
+            } else setDeviceState("ethernet", false, false, "No Ethernet adapter");
+        }
+
+        QSettings cfg(alternixSettingsPath(), QSettings::IniFormat);
+        const bool locOn = cfg.value("Location/enabled", true).toBool();
+        const bool gpsSource = cfg.value("Location/serial_gps_enabled", true).toBool();
+        setDeviceState("gps", true, locOn && gpsSource,
+                       !locOn ? "Location is off" :
+                       (gpsSource ? "GPS source enabled" : "GPS source disabled"));
+        const bool rotateOn = autoRotateEnabled();
+        const bool monitor = rotateMonitorRunning();
+        setDeviceState("rotation", QFileInfo::exists(rotateScriptPath()), rotateOn,
+            rotateOn ? (monitor ? "Sensor active" : "Monitor not running") : "Rotation locked");
+
+        pollCommand("wifi", "nmcli", {"radio", "wifi"},
+            [this](const QString &out, bool ok) {
+                const QString value = out.trimmed().toLower();
+                if (!ok || (value != "enabled" && value != "disabled")) {
+                    setDeviceState("wifi", false, false, "NetworkManager unavailable");
+                    return;
+                }
+                const bool enabled = value == "enabled";
+                const int signal = wifiSignalPercent();
+                const QString signalText = (signal >= 0)
+                    ? QString("%1% signal").arg(signal) : "Radio enabled";
+                setDeviceState("wifi", true, enabled, enabled ? signalText : "Radio disabled");
+                if (enabled) pollCommand("wifi-ssid", "nmcli",
+                    {"-t", "-f", "IN-USE,SSID", "device", "wifi", "list", "--rescan", "no"},
+                    [this](const QString &ssids, bool valid) {
+                        if (!valid || !devices.value("wifi").enabled) return;
+                        for (const QString &line : ssids.split('\n')) {
+                            if (line.startsWith("*:")) {
+                                const int percent = wifiSignalPercent();
+                                const QString name = line.mid(2).trimmed();
+                                setDeviceState("wifi", true, true,
+                                    percent < 0 ? name :
+                                    QString("%1% · %2").arg(percent).arg(name));
+                                break;
+                            }
+                        }
+                    });
+            });
+
+        pollCommand("bluetooth", "bluetoothctl", {"show"},
+            [this](const QString &out, bool ok) {
+                if (!ok || out.contains("No default controller", Qt::CaseInsensitive)) {
+                    setDeviceState("bluetooth", false, false, "No usable Bluetooth adapter");
+                    return;
+                }
+                QRegularExpression re("(?:^|\\n)\\s*Powered:\\s*(yes|no)",
+                                      QRegularExpression::CaseInsensitiveOption);
+                auto m = re.match(out);
+                if (!m.hasMatch()) {
+                    setDeviceState("bluetooth", false, false, "Cannot read adapter power");
+                    return;
+                }
+                const bool powered = m.captured(1).compare("yes", Qt::CaseInsensitive) == 0;
+                setDeviceState("bluetooth", true, powered,
+                               powered ? "Adapter powered" : "Adapter switched off");
+                if (powered) pollCommand("bluetooth-connected", "bluetoothctl",
+                    {"devices", "Connected"},
+                    [this](const QString &devicesText, bool valid) {
+                        if (!valid || !devices.value("bluetooth").enabled) return;
+                        for (const QString &line : devicesText.split('\n')) {
+                            if (!line.startsWith("Device ")) continue;
+                            const QString name = line.mid(7).section(' ', 1).trimmed();
+                            if (!name.isEmpty()) {
+                                setDeviceState("bluetooth", true, true, name);
+                                return;
+                            }
+                        }
+                        setDeviceState("bluetooth", true, true, "No device connected");
+                    });
+            });
+
+        if (!pollsInFlight.contains("mobile") && !togglesInFlight.contains("mobile")) {
+            pollsInFlight.insert("mobile");
+            runDeviceProcess("mmcli", {"-L"}, 4000, [this](const QString &out, bool ok) {
+                QRegularExpression re("/Modem/(\\d+)");
+                auto m = re.match(out);
+                if (!ok || !m.hasMatch()) {
+                    modemId.clear();
+                    pollsInFlight.remove("mobile");
+                    setDeviceState("mobile", false, false, "No mobile modem");
+                    return;
+                }
+                modemId = m.captured(1);
+                runDeviceProcess("mmcli", {"-m", modemId}, 4000,
+                    [this](const QString &text, bool valid) {
+                        pollsInFlight.remove("mobile");
+                        QRegularExpression stateRe("(?:^|\\n)[^\\n]*?state:\\s*'?([^'\\n]+)",
+                                                   QRegularExpression::CaseInsensitiveOption);
+                        auto st = stateRe.match(text);
+                        if (!valid || !st.hasMatch()) {
+                            setDeviceState("mobile", false, false, "Modem status unavailable");
+                            return;
+                        }
+                        const QString value = st.captured(1).trimmed().toLower();
+                        const bool powered = value.startsWith("connected") ||
+                                             value.startsWith("registered") ||
+                                             value.startsWith("enabled") ||
+                                             value.startsWith("searching");
+                        setDeviceState("mobile", true, powered, value);
+                    });
+            });
+        }
+    }
+
+    static bool authNeeded(const QString &out) {
+        return out.contains("not authorized", Qt::CaseInsensitive) ||
+               out.contains("not authorised", Qt::CaseInsensitive) ||
+               out.contains("permission", Qt::CaseInsensitive) ||
+               out.contains("not permitted", Qt::CaseInsensitive) ||
+               out.contains("unauthorized", Qt::CaseInsensitive) ||
+               out.contains("notauthorized", Qt::CaseInsensitive) ||
+               out.contains("access denied", Qt::CaseInsensitive) ||
+               out.contains("authorization required", Qt::CaseInsensitive);
+    }
+
+    void reportToggleResult(const QString &key, const QString &output, bool success) {
+        togglesInFlight.remove(key);
+        if (!success) {
+            const QString message = output.isEmpty() ? "Device action failed" : output;
+            lastErrorUntil[key] = QDateTime::currentMSecsSinceEpoch() + 5000;
+            lastErrorMessage[key] = message;
+            if (QLabel *label = deviceLabels.value(key, nullptr)) {
+                label->setText(QString::fromUtf8("⚠ Failed") + "\n" + message.left(65));
+                label->setToolTip(message);
+            }
+        } else {
+            lastErrorUntil.remove(key);
+            lastErrorMessage.remove(key);
+        }
+        // Re-read the actual backend state. Never assume the click worked.
+        QTimer::singleShot(150, this, [this]() { refreshDeviceStates(); });
+        QTimer::singleShot(1000, this, [this]() { refreshDeviceStates(); });
+    }
+
+    void setWithAuth(const QString &key, const QString &program,
+                     const QStringList &args, int commandTimeout = 12000) {
+        if (togglesInFlight.contains(key)) return;
+        togglesInFlight.insert(key);
+        if (QLabel *label = deviceLabels.value(key, nullptr)) label->setText("Changing…");
+        runDeviceProcess(program, args, commandTimeout,
+            [this, key, program, args](const QString &out, bool ok) {
+                if (ok && !out.contains("Failed", Qt::CaseInsensitive) &&
+                    !out.contains("Error:", Qt::CaseInsensitive)) {
+                    reportToggleResult(key, out, true); return;
+                }
+                if (!authNeeded(out)) { reportToggleResult(key, out, false); return; }
+                if (!QFileInfo("/usr/local/bin/osm-sudo").isExecutable()) {
+                    reportToggleResult(key, "osm-sudo is not installed: " + out, false);
+                    return;
+                }
+                QStringList wrapped{program};
+                wrapped.append(args);
+                // The panel bypasses the window manager and stays on top:
+                // hide it while osm-lock asks for a pattern, or it may obscure
+                // the authentication UI completely.
+                const bool resumePanel = isVisible();
+                if (resumePanel) {
+                    if (deviceTimer) deviceTimer->stop();
+                    hide();
+                    lower();
+                }
+                // osm-sudo is an authenticating command wrapper, NOT SUDO_ASKPASS.
+                runDeviceProcess("/usr/local/bin/osm-sudo", wrapped, 120000,
+                    [this, key, resumePanel](const QString &response, bool success) {
+                        reportToggleResult(key, response, success);
+                        if (resumePanel && !closing) openPanel();
+                    });
+            });
+    }
+
+    void toggleDevice(const QString &key) {
+        if (togglesInFlight.contains(key)) return;
+        lastErrorUntil.remove(key);
+        lastErrorMessage.remove(key);
+        if (key == "gps") {
+            QSettings cfg(alternixSettingsPath(), QSettings::IniFormat);
+            const bool locationOn = cfg.value("Location/enabled", true).toBool();
+            const bool gpsOn = cfg.value("Location/serial_gps_enabled", true).toBool();
+            if (!locationOn) {
+                cfg.setValue("Location/enabled", true);
+                cfg.setValue("Location/serial_gps_enabled", true);
+            } else {
+                cfg.setValue("Location/serial_gps_enabled", !gpsOn);
+            }
+            cfg.sync();
+            if (cfg.status() != QSettings::NoError)
+                reportToggleResult(key, "Cannot save GPS settings", false);
+            refreshDeviceStates();
+            return;
+        }
+        if (key == "rotation") {
+            if (!QFileInfo::exists(rotateScriptPath())) {
+                reportToggleResult(key, "Rotation toggle script missing", false);
+                return;
+            }
+            const bool target = !autoRotateEnabled();
+            QSettings cfg(alternixSettingsPath(), QSettings::IniFormat);
+            cfg.setValue("display_auto_rotate", target);
+            cfg.sync();
+            if (cfg.status() != QSettings::NoError) {
+                reportToggleResult(key, "Unable to save auto-rotation", false);
+                return;
+            }
+            togglesInFlight.insert(key);
+            runDeviceProcess("bash", {rotateScriptPath(), target ? "on" : "off"}, 10000,
+                [this, target, key](const QString &out, bool ok) {
+                    if (!ok) {
+                        QSettings cfg(alternixSettingsPath(), QSettings::IniFormat);
+                        cfg.setValue("display_auto_rotate", !target);
+                        cfg.sync();
+                    }
+                    reportToggleResult(key, out, ok);
+                });
+            return;
+        }
+        const DeviceState current = devices.value(key);
+        if (!current.known) {
+            reportToggleResult(key, "Hardware or service unavailable", false);
+            return;
+        }
+        const QString desired = current.enabled ? "off" : "on";
+        if (key == "wifi") setWithAuth(key, "nmcli", {"radio", "wifi", desired});
+        else if (key == "bluetooth") setWithAuth(key, "bluetoothctl", {"power", desired});
+        else if (key == "ethernet") {
+            if (!ethernetIface.isEmpty())
+                setWithAuth(key, "ip", {"link", "set", ethernetIface,
+                                         current.enabled ? "down" : "up"});
+        } else if (key == "mobile") {
+            if (!modemId.isEmpty())
+                setWithAuth(key, "mmcli", {"-m", modemId,
+                                            current.enabled ? "--disable" : "--enable"}, 20000);
+        }
     }
 
     void openPanel() {
@@ -919,6 +1067,7 @@ public:
             refreshEnabled = false;
             refreshTimer->stop();
         }
+        if (deviceTimer) deviceTimer->stop();
 
         if (isVisible()) {
             hide();
@@ -937,6 +1086,7 @@ public:
         }
 
         showFullScreen();
+        refreshDeviceStates();
         updateBatteryIconColor();
         raise();
     }
@@ -1013,6 +1163,8 @@ public:
                 refreshEnabled = true;
                 refreshTimer->start();
             }
+            if (deviceTimer) deviceTimer->start();
+            refreshDeviceStates();
         });
 
         seq->start(QAbstractAnimation::DeleteWhenStopped);
@@ -1025,6 +1177,7 @@ public:
             refreshEnabled = false;
             refreshTimer->stop();
         }
+        if (deviceTimer) deviceTimer->stop();
 
         const double endScale = 0.3;
 

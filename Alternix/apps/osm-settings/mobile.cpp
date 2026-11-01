@@ -1954,6 +1954,11 @@ public:
         connect(refreshTimer, &QTimer::timeout, this, &MobilePage::refreshInfo);
         refreshTimer->start();
 
+        powerPollTimer = new QTimer(this);
+        powerPollTimer->setInterval(1200);
+        connect(powerPollTimer, &QTimer::timeout, this, [this]() { pollExternalPower(); });
+        powerPollTimer->start();
+
         refreshInfo();
     }
 
@@ -1978,6 +1983,8 @@ private:
     int connectSpinFrame = 0;
 
     QTimer *refreshTimer = nullptr;
+    QTimer *powerPollTimer = nullptr;
+    bool powerPollBusy = false;
 
     bool mobilePowered = false;
     bool busy = false;
@@ -1991,6 +1998,38 @@ private:
     {
         errorLabel->setText("ERROR: " + msg);
         errorLabel->setVisible(true);
+    }
+
+    void pollExternalPower()
+    {
+        if (busy || powerPollBusy || !isVisible() || g_modemIndex < 0) return;
+        powerPollBusy = true;
+        auto *probe = new QProcess(this);
+        connect(probe, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, probe](int code, QProcess::ExitStatus status) {
+            powerPollBusy = false;
+            if (code == 0 && status == QProcess::NormalExit) {
+                const QString out = QString::fromUtf8(probe->readAllStandardOutput());
+                const bool actual = isMobilePowered(out);
+                if (mobilePowered != actual) {
+                    mobilePowered = actual;
+                    updatePowerButton();
+                    QTimer::singleShot(0, this, [this]() { if (!busy) refreshInfo(); });
+                }
+            }
+            probe->deleteLater();
+        });
+        connect(probe, &QProcess::errorOccurred, this,
+                [this, probe](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) {
+                powerPollBusy = false;
+                probe->deleteLater();
+            }
+        });
+        probe->start("mmcli", {"-m", QString::number(g_modemIndex)});
+        QTimer::singleShot(3500, probe, [probe]() {
+            if (probe->state() != QProcess::NotRunning) probe->kill();
+        });
     }
 
     void updatePowerButton()
@@ -2019,7 +2058,9 @@ private:
         if (busy) return;
         busy = true;
 
-        bool want = !mobilePowered;
+        // Re-read before toggling; osm-notify may have changed the modem
+        // since the last background status refresh.
+        bool want = !isMobilePowered(modemStatus());
 
         powerButton->setText(want ? "Turning\non..." : "Turning\noff...");
         powerButton->setEnabled(false);
