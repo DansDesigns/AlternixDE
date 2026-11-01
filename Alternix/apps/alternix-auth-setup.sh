@@ -37,39 +37,10 @@ if ! find /lib /usr/lib -name pam_exec.so -type f -print -quit 2>/dev/null | gre
     echo 'ERROR: pam_exec.so is not installed; refusing to modify sudo PAM.' >&2; exit 1
 fi
 [[ -f /etc/pam.d/sudo ]] || { echo 'ERROR: /etc/pam.d/sudo absent.' >&2; exit 1; }
-# Synaptic, GParted and other privileged graphical programs use PolicyKit,
-# NOT sudo. Devuan Excalibur's polkitd package may install its default PAM
-# service in /usr/lib/pam.d/polkit-1 rather than /etc/pam.d/polkit-1.
-# This is normal: /etc/pam.d/polkit-1 is the local override, not a required
-# package file. Never treat its absence as a missing PolicyKit installation.
-# Use apt only for missing executables/PAM service, without changing SysVinit.
-if [[ ! -x /usr/bin/pkexec || ! -x /usr/bin/lxpolkit ]] ||
-   { [[ ! -f /etc/pam.d/polkit-1 && ! -f /usr/lib/pam.d/polkit-1 ]]; }; then
-    command -v apt-get >/dev/null || { echo 'ERROR: apt-get is required to install PolicyKit support.' >&2; exit 1; }
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends polkitd pkexec lxpolkit || {
-        echo 'ERROR: Could not install the PolicyKit components. PAM unchanged.' >&2
-        exit 1
-    }
-fi
-if [[ ! -x /usr/bin/pkexec ]]; then
-    echo 'ERROR: /usr/bin/pkexec is missing after PolicyKit installation. PAM unchanged.' >&2
-    exit 1
-fi
-if [[ ! -x /usr/bin/lxpolkit ]]; then
-    echo 'ERROR: /usr/bin/lxpolkit graphical agent is missing after installation. PAM unchanged.' >&2
-    exit 1
-fi
-# Prefer an existing administrator override, otherwise read the unmodified
-# packaged service. The new configuration is always installed into /etc/pam.d.
-if [[ -f /etc/pam.d/polkit-1 ]]; then
-    POLKIT_PAM_SOURCE=/etc/pam.d/polkit-1
-elif [[ -f /usr/lib/pam.d/polkit-1 ]]; then
-    POLKIT_PAM_SOURCE=/usr/lib/pam.d/polkit-1
-else
-    echo 'ERROR: Neither /etc/pam.d/polkit-1 nor /usr/lib/pam.d/polkit-1 exists. PAM unchanged.' >&2
-    exit 1
-fi
-echo "[Auth] Using PolicyKit PAM source: $POLKIT_PAM_SOURCE"
+# PolicyKit is independent of sudo: Synaptic may use pkexec, and desktop
+# environments may already supply a registered graphical agent. Do not
+# require lxpolkit or install packages during the sudo activation phase.
+# A missing optional PolicyKit component must never disable the sudo pattern.
 visudo -c -q
 umask 077
 TMP="$(mktemp -d)"
@@ -77,31 +48,11 @@ TMP="$(mktemp -d)"
 # graphical prompt or a later validation step fails.  Never call sudo to
 # recover: PAM is exactly what may be broken at this point.
 ACTIVATION_IN_PROGRESS=0
+POLKIT_ACTIVATION_IN_PROGRESS=0
 rollback_auth_policy() {
     if [[ -f "$TMP/pam-before" ]]; then
         install -o root -g root -m 0644 "$TMP/pam-before" /etc/pam.d/.sudo.alternix-rollback
         mv -f /etc/pam.d/.sudo.alternix-rollback /etc/pam.d/sudo
-    fi
-    if [[ -f "$TMP/polkit-pam-before" ]]; then
-        # Restore the previous /etc override, if one existed.
-        install -o root -g root -m 0644 "$TMP/polkit-pam-before" /etc/pam.d/.polkit-1.alternix-rollback
-        mv -f /etc/pam.d/.polkit-1.alternix-rollback /etc/pam.d/polkit-1
-    elif [[ -f "$TMP/polkit-pam-was-absent" ]]; then
-        # On a stock Excalibur installation there may be no /etc override.
-        # Removing ours lets PAM use the original /usr/lib/pam.d service.
-        rm -f /etc/pam.d/polkit-1
-    fi
-    # These files are created by this setup; restore pre-existing versions
-    # exactly when a new sudo or PolicyKit challenge fails.
-    if [[ -f "$TMP/polkit-rule-before" ]]; then
-        install -o root -g root -m 0644 "$TMP/polkit-rule-before" /etc/polkit-1/rules.d/00-alternix-auth.rules
-    else
-        rm -f /etc/polkit-1/rules.d/00-alternix-auth.rules
-    fi
-    if [[ -f "$TMP/polkit-agent-before" ]]; then
-        install -o root -g root -m 0644 "$TMP/polkit-agent-before" /etc/X11/Xsession.d/96alternix-polkit-agent
-    else
-        rm -f /etc/X11/Xsession.d/96alternix-polkit-agent
     fi
     if [[ -f "$TMP/power-before" ]]; then
         install -o root -g root -m 0440 "$TMP/power-before" /etc/sudoers.d/90-alternix-power
@@ -120,9 +71,34 @@ rollback_auth_policy() {
         echo 'CRITICAL: Rollback restored the saved files, but visudo reports a policy error; use the root console.' >&2
     fi
 }
+# Restore only PolicyKit edits. A failed PolicyKit test must not undo a
+# separate, successfully tested sudo PAM activation.
+rollback_polkit_auth_policy() {
+    if [[ -f "$TMP/polkit-pam-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-pam-before" /etc/pam.d/.polkit-1.alternix-rollback
+        mv -f /etc/pam.d/.polkit-1.alternix-rollback /etc/pam.d/polkit-1
+    elif [[ -f "$TMP/polkit-pam-was-absent" ]]; then
+        rm -f /etc/pam.d/polkit-1
+    fi
+    if [[ -f "$TMP/polkit-rule-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-rule-before" /etc/polkit-1/rules.d/00-alternix-auth.rules
+    else
+        rm -f /etc/polkit-1/rules.d/00-alternix-auth.rules
+    fi
+    if [[ -f "$TMP/polkit-agent-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-agent-before" /etc/X11/Xsession.d/96alternix-polkit-agent
+    else
+        rm -f /etc/X11/Xsession.d/96alternix-polkit-agent
+    fi
+}
 auth_setup_exit() {
     local exit_code=$?
     trap - EXIT INT TERM
+    if [[ "$POLKIT_ACTIVATION_IN_PROGRESS" = 1 ]]; then
+        echo 'ERROR: PolicyKit setup interrupted; restoring the previous PolicyKit configuration...' >&2
+        rollback_polkit_auth_policy || true
+        exit_code=1
+    fi
     if [[ "$ACTIVATION_IN_PROGRESS" = 1 ]]; then
         echo 'ERROR: Alternix sudo/PAM verification failed. Restoring the previous configuration...' >&2
         rollback_auth_policy || true
@@ -363,14 +339,24 @@ for dep in runuser setpriv timeout; do
 done
 AUTH_SESSION_ENV=("HOME=$USER_HOME" "USER=$LOGIN_USER" "LOGNAME=$LOGIN_USER"
                   'PATH=/usr/local/bin:/usr/bin:/bin' "DISPLAY=$DISPLAY")
-if [[ -n "${XAUTHORITY:-}" ]]; then
+if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]] &&
+   [[ "$(stat -c %u "$XAUTHORITY")" = "$USER_UID" ]]; then
     AUTH_SESSION_ENV+=("XAUTHORITY=$XAUTHORITY")
 elif [[ -f "$USER_HOME/.Xauthority" ]]; then
     AUTH_SESSION_ENV+=("XAUTHORITY=$USER_HOME/.Xauthority")
 fi
-for key in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
-    if [[ -n "${!key:-}" ]]; then AUTH_SESSION_ENV+=("$key=${!key}"); fi
-done
+# sudo's environment can contain /run/user/0, which is not a desktop
+# PolicyKit session for the target login user. Prefer their own runtime bus.
+if [[ -d "/run/user/$USER_UID" ]] && [[ "$(stat -c %u "/run/user/$USER_UID")" = "$USER_UID" ]]; then
+    AUTH_SESSION_ENV+=("XDG_RUNTIME_DIR=/run/user/$USER_UID")
+    if [[ -S "/run/user/$USER_UID/bus" ]]; then
+        AUTH_SESSION_ENV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus")
+    fi
+else
+    for key in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
+        if [[ -n "${!key:-}" ]]; then AUTH_SESSION_ENV+=("$key=${!key}"); fi
+    done
+fi
 
 # pam_exec does not forward DISPLAY/XAUTHORITY from the sudo process.
 # Test the real PAM-style UID and environment, not the more permissive
@@ -408,64 +394,8 @@ for line in old.splitlines():
         clean.append(line)
 pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
 PY
-# PolicyKit has a separate PAM service from sudo. Start from the pristine
-# package service definition on reruns, not from our already-modified one.
-# Keep account/session checks and do not edit common-auth (login stays intact).
-if [[ ! -e /etc/pam.d/polkit-1.alternix-original ]]; then
-    install -o root -g root -m 0600 "$POLKIT_PAM_SOURCE" /etc/pam.d/polkit-1.alternix-original
-fi
-python3 - /etc/pam.d/polkit-1.alternix-original "$TMP/polkit-pam" <<'PY_POLKIT_PAM'
-import pathlib, re, sys
-old = pathlib.Path(sys.argv[1]).read_text()
-if len(re.findall(r'^\s*@include\s+common-auth\s*$', old, re.M)) != 1:
-    raise SystemExit('ERROR: Unsupported PolicyKit PAM configuration; no policies modified.')
-if any(re.match(r'^\s*auth\s+', line) for line in old.splitlines()):
-    raise SystemExit('ERROR: Custom PolicyKit PAM auth rules found; refusing to override.')
-clean = []
-for line in old.splitlines():
-    if re.match(r'^\s*@include\s+common-auth\s*$', line):
-        clean.append('auth requisite pam_exec.so seteuid quiet /usr/local/libexec/alternix-auth --pam')
-    else:
-        clean.append(line)
-pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
-PY_POLKIT_PAM
-
-# Select the current sudo-group member as the PolicyKit administrator. This
-# chooses WHO enters the pattern; it does NOT grant blanket authorization or
-# change any action's approval rules. Non-sudo users use default polkit rules.
-cat > "$TMP/00-alternix-auth.rules" <<'POLKIT_RULE'
-polkit.addAdminRule(function(action, subject) {
-    if (subject.isInGroup("sudo")) {
-        return ["unix-user:" + subject.user];
-    }
-});
-POLKIT_RULE
-
-# A Qtile/X11 session is not guaranteed to implement XDG autostart. Xsession
-# runs this *unprivileged* agent for any local X11 login, independent of init.
-cat > "$TMP/96alternix-polkit-agent" <<'POLKIT_XSESSION'
-# AlternixOS PolicyKit agent: authenticated requests use osm-lock via PAM.
-if [ -n "${DISPLAY:-}" ] && [ -x /usr/bin/lxpolkit ]; then
-    /usr/bin/lxpolkit >/dev/null 2>&1 &
-fi
-POLKIT_XSESSION
-
-# Snapshot every sudo/PAM file that we might change. An EXIT trap restores
-# this snapshot on *any* failure during the provisional activation.
+# Snapshot sudo-only files before the provisional change.
 install -o root -g root -m 0600 /etc/pam.d/sudo "$TMP/pam-before"
-if [[ -f /etc/pam.d/polkit-1 ]]; then
-    install -o root -g root -m 0600 /etc/pam.d/polkit-1 "$TMP/polkit-pam-before"
-else
-    # Record that /etc/pam.d had no PolicyKit service before activation.
-    # On rollback, delete only our override, leaving the vendor file alone.
-    touch "$TMP/polkit-pam-was-absent"
-fi
-if [[ -e /etc/polkit-1/rules.d/00-alternix-auth.rules ]]; then
-    install -o root -g root -m 0600 /etc/polkit-1/rules.d/00-alternix-auth.rules "$TMP/polkit-rule-before"
-fi
-if [[ -e /etc/X11/Xsession.d/96alternix-polkit-agent ]]; then
-    install -o root -g root -m 0600 /etc/X11/Xsession.d/96alternix-polkit-agent "$TMP/polkit-agent-before"
-fi
 if [[ -f /etc/sudoers.d/alternix-pattern ]]; then
     install -o root -g root -m 0600 /etc/sudoers.d/alternix-pattern "$TMP/pattern-before"
 fi
@@ -478,9 +408,7 @@ for old_rule in alternix-nopasswd zz-alternix-time; do
     fi
 done
 
-# All following edits are provisional until a real, user-owned sudo PAM
-# challenge succeeds. The parent remains root throughout and can roll back
-# without relying on the broken sudo command.
+# This is a distinct sudo-only transaction; only its own live test can roll it back.
 ACTIVATION_IN_PROGRESS=1
 if [[ -f "$TMP/90-alternix-power.password-required" ]]; then
     install -d -o root -g root -m 0700 /var/backups/alternix-auth
@@ -491,19 +419,9 @@ if [[ -f "$TMP/90-alternix-power.password-required" ]]; then
     install -o root -g root -m 0440 "$TMP/90-alternix-power.password-required" \
         /etc/sudoers.d/90-alternix-power
 fi
-# Remove the earlier generated broad privilege rule; rely on Devuan's normal
-# sudo group instead of silently granting ALL privileges to the user.
 rm -f /etc/sudoers.d/alternix-pattern
-# Replace PAM policy atomically so concurrent sudo requests never read half
-# of a new service file.
 install -o root -g root -m 0644 "$TMP/sudo-pam" /etc/pam.d/.sudo.alternix-candidate
 mv -f /etc/pam.d/.sudo.alternix-candidate /etc/pam.d/sudo
-install -o root -g root -m 0644 "$TMP/polkit-pam" /etc/pam.d/.polkit-1.alternix-candidate
-mv -f /etc/pam.d/.polkit-1.alternix-candidate /etc/pam.d/polkit-1
-# Install an identity-selection rule, never an allow-unauthenticated rule.
-install -d -o root -g root -m 0755 /etc/polkit-1/rules.d /etc/X11/Xsession.d
-install -o root -g root -m 0644 "$TMP/00-alternix-auth.rules" /etc/polkit-1/rules.d/00-alternix-auth.rules
-install -o root -g root -m 0644 "$TMP/96alternix-polkit-agent" /etc/X11/Xsession.d/96alternix-polkit-agent
 for old_rule in alternix-nopasswd zz-alternix-time; do
     rm -f "/etc/sudoers.d/$old_rule"
 done
@@ -512,50 +430,214 @@ if ! visudo -c -q; then
     exit 1
 fi
 
-# A real PAM round trip: clear any cached sudo ticket, invoke ordinary sudo
-# as the actual login user, and let the user enter the pattern/PIN in Qt.
-# A syntax check or --status alone CANNOT prove graphical PAM works.
-echo '[Auth] Testing an actual sudo request through Alternix PAM...'
-echo '[Auth] Confirm your pattern/PIN again to finish activation.'
+echo '[Auth] Testing a real sudo request through Alternix PAM...'
+echo '[Auth] Confirm your pattern/PIN to activate sudo authentication.'
 if ! timeout --kill-after=5s 150s \
     runuser -u "$LOGIN_USER" -- env -i "${AUTH_SESSION_ENV[@]}" \
     /bin/sh -c '/usr/bin/sudo -k && exec /usr/bin/sudo -v'; then
-    echo 'ERROR: The real sudo/PAM challenge failed; reverting to the previous authentication configuration.' >&2
+    echo 'ERROR: The real sudo/PAM challenge failed; restoring previous sudo settings.' >&2
     exit 1
 fi
-# Bring up the graphical PolicyKit agent in the already-running desktop,
-# while the Xsession hook handles subsequent logins. If another agent has
-# already registered, lxpolkit simply cannot register a second agent.
-echo '[Auth] Starting the PolicyKit session agent for this desktop...'
-# setpriv preserves the caller's elogind/ConsoleKit session, unlike runuser
-# which can open a second login session not owned by the desktop agent.
-setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
-    env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/lxpolkit </dev/null >/dev/null 2>&1 &
-# Allow it to register with the system D-Bus service before the live test.
-sleep 2
+ACTIVATION_IN_PROGRESS=0
+echo '[Auth] Sudo pattern/PIN live test PASSED. Sudo authentication is now committed.'
 
-# Unlike sudo, PolicyKit asks for an administrator identity through PAM_USER.
-# Exercise the real pkexec -> polkitd -> PAM -> osm-lock -> authorization path.
-# A failed request restores BOTH the original sudo and polkit PAM stacks.
-echo '[Auth] Testing a real PolicyKit request (Synaptic uses this mechanism)...'
-echo '[Auth] Confirm your Alternix pattern/PIN in the graphical window.'
+# PolicyKit has its own PAM stack and its own rollback boundary. It must
+# never undo the working sudo configuration when an optional agent is absent.
+# Only install missing fundamental PolicyKit packages; never require lxpolkit.
+if [[ ! -x /usr/bin/pkexec || ( ! -f /etc/pam.d/polkit-1 && ! -f /usr/lib/pam.d/polkit-1 ) ]]; then
+    echo '[Auth] PolicyKit core is incomplete; trying the native Devuan packages (without requiring lxpolkit)...'
+    if command -v apt-get >/dev/null 2>&1; then
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends polkitd pkexec; then
+            echo 'WARNING: PolicyKit core installation failed; preserving working sudo pattern authentication.' >&2
+        fi
+    fi
+fi
+
+POLKIT_PAM_SOURCE=''
+if [[ -f /etc/pam.d/polkit-1.alternix-original ]]; then
+    POLKIT_PAM_SOURCE=/etc/pam.d/polkit-1.alternix-original
+elif [[ -f /etc/pam.d/polkit-1 ]]; then
+    POLKIT_PAM_SOURCE=/etc/pam.d/polkit-1
+elif [[ -f /usr/lib/pam.d/polkit-1 ]]; then
+    POLKIT_PAM_SOURCE=/usr/lib/pam.d/polkit-1
+fi
+
+# Supported X11 agents, in preference order. Existing agents are accepted;
+# lxpolkit is never mandatory. Do not replace existing desktop components.
+find_polkit_agent() {
+    local candidate
+    for candidate in \
+        /usr/bin/lxpolkit \
+        /usr/libexec/polkit-mate-authentication-agent-1 \
+        /usr/lib/mate-polkit/polkit-mate-authentication-agent-1 \
+        /usr/lib/x86_64-linux-gnu/polkit-mate/polkit-mate-authentication-agent-1 \
+        /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
+        /usr/libexec/polkit-gnome-authentication-agent-1 \
+        /usr/bin/lxqt-policykit-agent \
+        /usr/libexec/lxqt-policykit-agent \
+        /usr/libexec/xfce-polkit \
+        /usr/lib/polkit-kde-authentication-agent-1 \
+        /usr/libexec/polkit-kde-authentication-agent-1; do
+        if [[ -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+POLKIT_AGENT="$(find_polkit_agent || true)"
+# If there is no compatible executable, try an OPTIONAL supported agent
+# package only if apt has a candidate. A failure remains nonfatal for sudo.
+if [[ -z "$POLKIT_AGENT" ]] && command -v apt-cache >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    for agent_package in lxpolkit mate-polkit; do
+        if apt-cache show "$agent_package" >/dev/null 2>&1; then
+            echo "[Auth] Attempting optional graphical PolicyKit agent: $agent_package"
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$agent_package"; then
+                POLKIT_AGENT="$(find_polkit_agent || true)"
+                if [[ -n "$POLKIT_AGENT" ]]; then break; fi
+            else
+                echo "WARNING: Optional $agent_package installation failed; trying existing agents." >&2
+            fi
+        fi
+    done
+fi
+
+# Do not attempt to replace PolicyKit's PAM stack if there is no supported
+# service definition. The existing policy and password handling remain intact.
+if [[ ! -x /usr/bin/pkexec || -z "$POLKIT_PAM_SOURCE" ]]; then
+    echo 'WARNING: PolicyKit is incomplete; sudo pattern authentication remains active.' >&2
+    echo '[Auth] Skipping PolicyKit PAM activation rather than breaking the updater.'
+    exit 0
+fi
+
+echo "[Auth] Using PolicyKit PAM source: $POLKIT_PAM_SOURCE"
+if [[ ! -e /etc/pam.d/polkit-1.alternix-original ]]; then
+    install -o root -g root -m 0600 "$POLKIT_PAM_SOURCE" /etc/pam.d/polkit-1.alternix-original
+fi
+
+# Prepare the candidate without changing system PAM. Custom PAM setups are
+# deliberately not overridden by a blind replacement.
+if ! python3 - /etc/pam.d/polkit-1.alternix-original "$TMP/polkit-pam" <<'PY_POLKIT_PAM'
+import pathlib, re, sys
+old = pathlib.Path(sys.argv[1]).read_text()
+if len(re.findall(r'^\s*@include\s+common-auth\s*$', old, re.M)) != 1:
+    raise SystemExit('PolicyKit service lacks a single standard common-auth include.')
+if any(re.match(r'^\s*auth\s+', line) for line in old.splitlines()):
+    raise SystemExit('Custom PolicyKit PAM auth statements found; refusing to override.')
+clean = []
+for line in old.splitlines():
+    if re.match(r'^\s*@include\s+common-auth\s*$', line):
+        clean.append('auth requisite pam_exec.so seteuid quiet /usr/local/libexec/alternix-auth --pam')
+    else:
+        clean.append(line)
+pathlib.Path(sys.argv[2]).write_text('\n'.join(clean) + '\n')
+PY_POLKIT_PAM
+then
+    echo 'WARNING: Could not prepare PolicyKit PAM safely; sudo pattern remains active.' >&2
+    exit 0
+fi
+
+cat > "$TMP/00-alternix-auth.rules" <<'POLKIT_RULE'
+polkit.addAdminRule(function(action, subject) {
+    if (subject.isInGroup("sudo")) {
+        return ["unix-user:" + subject.user];
+    }
+});
+POLKIT_RULE
+
+# Sourced by Xsession. Do not start a second agent over one already running.
+# Prefer whichever supported agent is actually installed, not lxpolkit alone.
+cat > "$TMP/96alternix-polkit-agent" <<'POLKIT_XSESSION'
+# AlternixOS graphical PolicyKit agent; PAM handles pattern/PIN verification.
+if [ -n "${DISPLAY:-}" ]; then
+    alternix_agent_running=0
+    if command -v pgrep >/dev/null 2>&1 && \
+       pgrep -u "$(id -u)" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
+        alternix_agent_running=1
+    fi
+    if [ "$alternix_agent_running" = 0 ]; then
+        for alternix_agent in \
+            /usr/bin/lxpolkit \
+            /usr/libexec/polkit-mate-authentication-agent-1 \
+            /usr/lib/mate-polkit/polkit-mate-authentication-agent-1 \
+            /usr/lib/x86_64-linux-gnu/polkit-mate/polkit-mate-authentication-agent-1 \
+            /usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1 \
+            /usr/libexec/polkit-gnome-authentication-agent-1 \
+            /usr/bin/lxqt-policykit-agent \
+            /usr/libexec/lxqt-policykit-agent \
+            /usr/libexec/xfce-polkit \
+            /usr/lib/polkit-kde-authentication-agent-1 \
+            /usr/libexec/polkit-kde-authentication-agent-1; do
+            if [ -x "$alternix_agent" ]; then
+                "$alternix_agent" >/dev/null 2>&1 &
+                break
+            fi
+        done
+    fi
+    unset alternix_agent_running alternix_agent
+fi
+POLKIT_XSESSION
+
+# All backups are taken BEFORE touching PolicyKit; failed live verification
+# restores only PolicyKit, not already-committed sudo authentication.
+if [[ -f /etc/pam.d/polkit-1 ]]; then
+    install -o root -g root -m 0600 /etc/pam.d/polkit-1 "$TMP/polkit-pam-before"
+else
+    touch "$TMP/polkit-pam-was-absent"
+fi
+if [[ -f /etc/polkit-1/rules.d/00-alternix-auth.rules ]]; then
+    install -o root -g root -m 0600 /etc/polkit-1/rules.d/00-alternix-auth.rules "$TMP/polkit-rule-before"
+fi
+if [[ -f /etc/X11/Xsession.d/96alternix-polkit-agent ]]; then
+    install -o root -g root -m 0600 /etc/X11/Xsession.d/96alternix-polkit-agent "$TMP/polkit-agent-before"
+fi
+
+# One transaction for PolicyKit, committed only after a verified pkexec call.
+POLKIT_ACTIVATION_IN_PROGRESS=1
+install -o root -g root -m 0644 "$TMP/polkit-pam" /etc/pam.d/.polkit-1.alternix-candidate
+mv -f /etc/pam.d/.polkit-1.alternix-candidate /etc/pam.d/polkit-1
+install -d -o root -g root -m 0755 /etc/polkit-1/rules.d /etc/X11/Xsession.d
+install -o root -g root -m 0644 "$TMP/00-alternix-auth.rules" /etc/polkit-1/rules.d/00-alternix-auth.rules
+install -o root -g root -m 0644 "$TMP/96alternix-polkit-agent" /etc/X11/Xsession.d/96alternix-polkit-agent
+
+# Try to start an installed unprivileged agent in the existing desktop.
+# Preserve the session's login identity; do not launch Qt GUI as root.
+if [[ -n "$POLKIT_AGENT" ]]; then
+    echo "[Auth] Ensuring PolicyKit agent is available: $POLKIT_AGENT"
+    if ! command -v pgrep >/dev/null 2>&1 || \
+       ! pgrep -u "$USER_UID" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
+        setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
+            env -i "${AUTH_SESSION_ENV[@]}" "$POLKIT_AGENT" </dev/null >/dev/null 2>&1 &
+        sleep 2
+    fi
+else
+    echo '[Auth] No known agent executable found; checking whether an existing desktop agent is already registered.'
+fi
+
+# --disable-internal-agent prevents a misleading terminal-password fallback.
+# The actual desktop may use an agent that is not named lxpolkit.
+echo '[Auth] Testing PolicyKit through the graphical session...'
 POLKIT_TEST_OUTPUT=''
-if ! POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
+if POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
     setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
     env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec --disable-internal-agent /usr/bin/id -u \
-    2>"$TMP/polkit-test-errors")" || [[ "$POLKIT_TEST_OUTPUT" != 0 ]]; then
-    echo 'ERROR: PolicyKit graphical challenge failed; restoring the original sudo and polkit policies.' >&2
+    2>"$TMP/polkit-test-errors")" && [[ "$POLKIT_TEST_OUTPUT" = 0 ]]; then
+    POLKIT_ACTIVATION_IN_PROGRESS=0
+    echo '[Auth] PolicyKit pattern/PIN live test PASSED.'
+else
+    echo 'WARNING: PolicyKit graphical test failed. Restoring ONLY the previous PolicyKit configuration.' >&2
     if [[ -s "$TMP/polkit-test-errors" ]]; then
         echo '[Auth] PolicyKit diagnostic output:' >&2
         cat "$TMP/polkit-test-errors" >&2
     fi
-    echo '[Auth] Check that the graphical agent is registered in this login session and that the system D-Bus and elogind services are running.' >&2
-    exit 1
+    if rollback_polkit_auth_policy; then
+        POLKIT_ACTIVATION_IN_PROGRESS=0
+        echo '[Auth] Sudo pattern remains ACTIVE; previous PolicyKit behavior has been restored.'
+    else
+        echo 'CRITICAL: PolicyKit rollback failed; check /etc/pam.d/polkit-1 from a root session.' >&2
+        exit 1
+    fi
 fi
 
-# The privileged root setup process, not an unprivileged updater check,
-# commits the transaction. Any earlier nonzero exit already triggered rollback.
-ACTIVATION_IN_PROGRESS=0
-echo '[Auth] Live sudo and PolicyKit challenges passed. Alternix pattern/PIN authentication is active.'
-echo '[Auth] Original PAM backups: /etc/pam.d/sudo.alternix-original and /etc/pam.d/polkit-1.alternix-original'
-echo '[Auth] Recovery from a root shell: cp /etc/pam.d/sudo.alternix-original /etc/pam.d/sudo'
+echo '[Auth] Setup complete. Sudo pattern is active; PolicyKit pattern is active only if its live test passed.'

@@ -106,17 +106,38 @@ static QList<AppEntry> loadDesktopEntries() {
     return apps;
 }
 
-// Privileged desktop applications such as Synaptic use PolicyKit/pkexec,
-// not sudo. Qtile does not necessarily launch XDG autostart applications,
-// so make sure the installed graphical PolicyKit agent is running before
-// starting any .desktop Exec line. Authentication itself remains in PAM:
-// polkitd -> alternix-auth -> the same osm-lock pattern/PIN dialog as sudo.
+// Graphical applications such as Synaptic rely on PolicyKit/pkexec.
+// Qtile may not autostart a session agent. Reuse an existing one; otherwise
+// start whichever known agent is installed. Never require lxpolkit alone.
+// PAM is still responsible for actual pattern/PIN verification.
 static void ensurePolkitAgent() {
-    if (!QFileInfo("/usr/bin/lxpolkit").isExecutable()) return;
     const QString userId = QString::number(static_cast<unsigned int>(getuid()));
-    if (QProcess::execute("/usr/bin/pgrep", {"-u", userId, "-x", "lxpolkit"}) == 0)
+    const QString agentPattern =
+        "(^|/)(lxpolkit|polkit-mate-authentication-agent-1|"
+        "polkit-gnome-authentication-agent-1|lxqt-policykit-agent|"
+        "xfce-polkit|polkit-kde-authentication-agent-1)( |$)";
+    if (QFileInfo("/usr/bin/pgrep").isExecutable() &&
+        QProcess::execute("/usr/bin/pgrep", {"-u", userId, "-f", agentPattern}) == 0)
         return;
-    QProcess::startDetached("/usr/bin/lxpolkit", {});
+    const QStringList paths = {
+        "/usr/bin/lxpolkit",
+        "/usr/libexec/polkit-mate-authentication-agent-1",
+        "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1",
+        "/usr/lib/x86_64-linux-gnu/polkit-mate/polkit-mate-authentication-agent-1",
+        "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1",
+        "/usr/libexec/polkit-gnome-authentication-agent-1",
+        "/usr/bin/lxqt-policykit-agent",
+        "/usr/libexec/lxqt-policykit-agent",
+        "/usr/libexec/xfce-polkit",
+        "/usr/lib/polkit-kde-authentication-agent-1",
+        "/usr/libexec/polkit-kde-authentication-agent-1"
+    };
+    for (const QString &path : paths) {
+        if (QFileInfo(path).isExecutable()) {
+            QProcess::startDetached(path, {});
+            break;
+        }
+    }
 }
 
 // ──────────────────────────────  AppTile (lazy icon loading)
