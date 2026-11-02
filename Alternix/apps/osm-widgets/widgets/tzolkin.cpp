@@ -24,12 +24,14 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QSettings>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <cmath>
 
 static const OsmWidgetInfo kInfo = {
     OSM_WIDGET_ABI,
@@ -766,6 +768,225 @@ static const QImage &sealAtlas() {
     return atlas;
 }
 
+static QPointF unitPolar(qreal cx, qreal cy, qreal radius, qreal angleDeg) {
+    const qreal rad = angleDeg * 3.14159265358979323846 / 180.0;
+    return QPointF(cx + std::cos(rad) * radius, cy + std::sin(rad) * radius);
+}
+
+// Crisp vector-style solar-seal glyphs. These replace the previous embedded
+// bitmap atlas so the symbols stay sharp at any widget size.
+static void drawSealSymbol(QPainter &p, const QRectF &rect, int sealIndex,
+                           const QColor &colour, qreal strokeScale = 1.0) {
+    if (sealIndex < 0 || sealIndex > 19 || !rect.isValid() || rect.width() <= 0 || rect.height() <= 0)
+        return;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.translate(rect.left(), rect.top());
+    p.scale(rect.width(), rect.height());
+
+    QColor ink = colour;
+    ink.setAlpha(240);
+    QPen pen(ink);
+    pen.setWidthF(0.060 * strokeScale);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+
+    auto dot = [&](qreal x, qreal y, qreal r=0.04) {
+        QBrush old = p.brush();
+        p.setBrush(ink);
+        p.drawEllipse(QPointF(x, y), r, r);
+        p.setBrush(old);
+    };
+    auto line = [&](qreal x1, qreal y1, qreal x2, qreal y2) {
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2));
+    };
+    auto poly = [&](std::initializer_list<QPointF> pts) {
+        QPolygonF pg;
+        for (const QPointF &pt : pts) pg << pt;
+        p.drawPolyline(pg);
+    };
+
+    switch (sealIndex) {
+        case 0: { // Dragon
+            QPainterPath path;
+            path.moveTo(0.18, 0.65);
+            path.cubicTo(0.24, 0.28, 0.56, 0.18, 0.70, 0.38);
+            path.cubicTo(0.80, 0.52, 0.73, 0.72, 0.57, 0.76);
+            path.cubicTo(0.42, 0.80, 0.35, 0.68, 0.40, 0.58);
+            path.cubicTo(0.46, 0.47, 0.59, 0.46, 0.65, 0.55);
+            p.drawPath(path);
+            poly({QPointF(0.61,0.31), QPointF(0.66,0.20), QPointF(0.71,0.30)});
+            poly({QPointF(0.67,0.33), QPointF(0.75,0.23), QPointF(0.77,0.36)});
+            line(0.20,0.70, 0.32,0.82);
+            line(0.28,0.67, 0.44,0.84);
+            dot(0.58,0.52,0.028);
+            break;
+        }
+        case 1: { // Wind
+            for (int i=0;i<3;++i) {
+                qreal y = 0.34 + i*0.16;
+                QPainterPath sw;
+                sw.moveTo(0.16, y);
+                sw.cubicTo(0.33, y-0.12, 0.52, y+0.10, 0.70, y-0.01);
+                sw.cubicTo(0.81, y-0.07, 0.84, y+0.05, 0.77, y+0.08);
+                p.drawPath(sw);
+            }
+            break;
+        }
+        case 2: { // Night
+            p.drawArc(QRectF(0.20,0.22,0.42,0.56), 75*16, 210*16);
+            p.drawArc(QRectF(0.31,0.22,0.34,0.56), 100*16, 180*16);
+            dot(0.70,0.32,0.03); dot(0.79,0.44,0.022); dot(0.70,0.56,0.026);
+            break;
+        }
+        case 3: { // Seed
+            p.drawEllipse(QRectF(0.33,0.19,0.34,0.54));
+            line(0.50,0.23,0.50,0.69);
+            dot(0.24,0.42,0.03); dot(0.76,0.42,0.03); dot(0.38,0.79,0.028); dot(0.62,0.79,0.028);
+            break;
+        }
+        case 4: { // Serpent
+            QPainterPath s;
+            s.moveTo(0.15,0.70);
+            s.cubicTo(0.24,0.44,0.40,0.44,0.48,0.61);
+            s.cubicTo(0.57,0.79,0.72,0.77,0.82,0.45);
+            s.cubicTo(0.85,0.36,0.81,0.27,0.71,0.25);
+            s.cubicTo(0.62,0.23,0.56,0.31,0.61,0.37);
+            p.drawPath(s);
+            dot(0.72,0.30,0.025);
+            break;
+        }
+        case 5: { // Worldbridger
+            p.drawArc(QRectF(0.18,0.30,0.64,0.40), 0, 180*16);
+            line(0.18,0.70,0.82,0.70);
+            line(0.50,0.30,0.50,0.84);
+            line(0.34,0.48,0.66,0.48);
+            break;
+        }
+        case 6: { // Hand
+            QPainterPath h;
+            h.moveTo(0.26,0.78);
+            h.lineTo(0.26,0.47);
+            h.cubicTo(0.26,0.41,0.30,0.37,0.34,0.37);
+            h.cubicTo(0.39,0.37,0.42,0.41,0.42,0.47);
+            h.lineTo(0.42,0.28);
+            h.cubicTo(0.42,0.21,0.46,0.17,0.50,0.17);
+            h.cubicTo(0.55,0.17,0.58,0.21,0.58,0.28);
+            h.lineTo(0.58,0.33);
+            h.cubicTo(0.58,0.26,0.62,0.22,0.66,0.22);
+            h.cubicTo(0.71,0.22,0.74,0.26,0.74,0.33);
+            h.lineTo(0.74,0.40);
+            h.cubicTo(0.74,0.34,0.78,0.31,0.82,0.31);
+            h.cubicTo(0.87,0.31,0.89,0.35,0.89,0.42);
+            h.lineTo(0.89,0.63);
+            h.cubicTo(0.89,0.79,0.77,0.86,0.59,0.86);
+            h.lineTo(0.41,0.86);
+            h.cubicTo(0.31,0.86,0.26,0.82,0.26,0.78);
+            p.drawPath(h);
+            line(0.50,0.43,0.50,0.75);
+            line(0.64,0.46,0.64,0.75);
+            break;
+        }
+        case 7: { // Star
+            QPolygonF star;
+            for (int i=0;i<10;++i) {
+                qreal a = -90 + i*36;
+                qreal rad = (i%2==0) ? 0.34 : 0.15;
+                star << unitPolar(0.5,0.5,rad,a);
+            }
+            p.drawPolygon(star);
+            dot(0.50,0.50,0.03);
+            break;
+        }
+        case 8: { // Moon
+            p.drawArc(QRectF(0.24,0.18,0.44,0.56), 75*16, 210*16);
+            p.drawArc(QRectF(0.36,0.19,0.33,0.54), 105*16, 185*16);
+            for (int i=0;i<3;++i) {
+                qreal y=0.68+i*0.08;
+                QPainterPath w; w.moveTo(0.22,y); w.cubicTo(0.34,y-0.05,0.47,y+0.05,0.60,y); w.cubicTo(0.72,y-0.05,0.80,y,0.86,y); p.drawPath(w);
+            }
+            break;
+        }
+        case 9: { // Dog
+            dot(0.33,0.36,0.085); dot(0.50,0.26,0.08); dot(0.67,0.36,0.085); dot(0.78,0.48,0.075);
+            p.drawEllipse(QRectF(0.28,0.46,0.34,0.28));
+            break;
+        }
+        case 10: { // Monkey
+            p.drawEllipse(QRectF(0.33,0.28,0.34,0.28));
+            dot(0.44,0.40,0.022); dot(0.56,0.40,0.022);
+            QPainterPath tail; tail.moveTo(0.66,0.60); tail.cubicTo(0.84,0.67,0.84,0.88,0.63,0.86); tail.cubicTo(0.48,0.84,0.48,0.64,0.63,0.64); p.drawPath(tail);
+            line(0.40,0.58,0.34,0.74); line(0.60,0.58,0.66,0.74); line(0.50,0.56,0.50,0.77);
+            break;
+        }
+        case 11: { // Human
+            dot(0.50,0.20,0.05);
+            line(0.50,0.27,0.50,0.67);
+            line(0.50,0.36,0.28,0.53); line(0.50,0.36,0.72,0.53);
+            line(0.50,0.67,0.34,0.86); line(0.50,0.67,0.66,0.86);
+            break;
+        }
+        case 12: { // Skywalker
+            dot(0.34,0.26,0.05); dot(0.66,0.18,0.05);
+            line(0.34,0.33,0.34,0.72); line(0.66,0.25,0.66,0.65);
+            line(0.24,0.78,0.44,0.78); line(0.56,0.71,0.76,0.71);
+            line(0.32,0.47,0.68,0.47);
+            break;
+        }
+        case 13: { // Wizard
+            p.drawEllipse(QRectF(0.22,0.32,0.56,0.28));
+            p.drawEllipse(QRectF(0.46,0.40,0.08,0.08));
+            QPainterPath sw; sw.moveTo(0.50,0.44); sw.cubicTo(0.60,0.46,0.61,0.60,0.49,0.61); sw.cubicTo(0.41,0.62,0.40,0.52,0.46,0.49); p.drawPath(sw);
+            poly({QPointF(0.34,0.28), QPointF(0.50,0.12), QPointF(0.66,0.28)});
+            break;
+        }
+        case 14: { // Eagle
+            QPainterPath e; e.moveTo(0.18,0.58); e.cubicTo(0.30,0.30,0.42,0.36,0.50,0.48); e.cubicTo(0.58,0.36,0.70,0.30,0.82,0.58); p.drawPath(e);
+            line(0.18,0.58,0.38,0.72); line(0.82,0.58,0.62,0.72); line(0.48,0.50,0.58,0.50);
+            poly({QPointF(0.50,0.53), QPointF(0.46,0.60), QPointF(0.54,0.60)});
+            break;
+        }
+        case 15: { // Warrior
+            p.drawEllipse(QRectF(0.23,0.25,0.38,0.38));
+            dot(0.42,0.44,0.022);
+            line(0.58,0.68,0.80,0.28); line(0.75,0.37,0.86,0.23);
+            line(0.52,0.62,0.72,0.82);
+            break;
+        }
+        case 16: { // Earth
+            p.drawEllipse(QRectF(0.18,0.18,0.64,0.64));
+            line(0.50,0.20,0.50,0.80); line(0.20,0.50,0.80,0.50);
+            p.drawArc(QRectF(0.30,0.18,0.40,0.64), 90*16, 180*16);
+            p.drawArc(QRectF(0.18,0.30,0.64,0.40), 0, 180*16);
+            break;
+        }
+        case 17: { // Mirror
+            p.drawRect(QRectF(0.24,0.18,0.52,0.64));
+            line(0.38,0.18,0.38,0.82); line(0.62,0.18,0.62,0.82);
+            break;
+        }
+        case 18: { // Storm
+            QPainterPath cloud; cloud.moveTo(0.24,0.56); cloud.cubicTo(0.18,0.40,0.30,0.28,0.42,0.34); cloud.cubicTo(0.45,0.20,0.62,0.18,0.68,0.32); cloud.cubicTo(0.80,0.28,0.88,0.40,0.82,0.53); cloud.lineTo(0.24,0.56); p.drawPath(cloud);
+            poly({QPointF(0.54,0.42), QPointF(0.44,0.64), QPointF(0.56,0.64), QPointF(0.46,0.84)});
+            break;
+        }
+        case 19: { // Sun
+            p.drawEllipse(QRectF(0.29,0.29,0.42,0.42));
+            for (int i=0;i<8;++i) {
+                qreal a = i * 45.0;
+                QPointF a1 = unitPolar(0.5,0.5,0.28,a);
+                QPointF a2 = unitPolar(0.5,0.5,0.42,a);
+                p.drawLine(a1,a2);
+            }
+            break;
+        }
+    }
+    p.restore();
+}
+
 // Places the Maya dot-and-bar tone ABOVE the corresponding solar-seal symbol.
 // Both are determined by the Kin; neither is guessed from the date's month.
 static void drawKinEmblem(QPainter &p, const QRectF &r, int kin,
@@ -781,15 +1002,9 @@ static void drawKinEmblem(QPainter &p, const QRectF &r, int kin,
     const QRectF toneRect(r.center().x() - r.width() * 0.28,
                           r.top() + pad, r.width() * 0.56, toneH - pad);
     drawToneGlyph(p, toneRect, tone, toneColour);
-    const QRectF imageRect(r.center().x() - sealSize / 2,
+    const QRectF symbolRect(r.center().x() - sealSize / 2,
                             r.top() + toneH + pad, sealSize, sealSize);
-    const QImage &atlas = sealAtlas();
-    if (!atlas.isNull()) {
-        p.save();
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p.drawImage(imageRect, atlas, QRectF(0, sealIndex * 28, 28, 28));
-        p.restore();
-    }
+    drawSealSymbol(p, symbolRect, sealIndex, toneColour);
     if (showKinNumber) {
         p.setPen(toneColour);
         setPainterFont(p, int(qBound<qreal>(10, labelH * 0.75, 22)), true);
@@ -1174,12 +1389,9 @@ private:
             p.drawText(QRectF(r.x() + 28 * u, r.y() + r.height() * 0.38, r.width() - 30 * u,
                               r.height() * 0.42),
                        Qt::AlignLeft | Qt::AlignVCenter, QString::fromLatin1(kSealNames[row]));
-            const QImage &atlas = sealAtlas();
-            if (!atlas.isNull()) {
-                const qreal sz = qMin<qreal>(r.height() - 4, 24 * u);
-                p.drawImage(QRectF(r.x() + 2 * u, r.center().y() - sz * 0.5, sz, sz),
-                            atlas, QRectF(0, row * 28, 28, 28));
-            }
+            const qreal sz = qMin<qreal>(r.height() - 4, 24 * u);
+            drawSealSymbol(p, QRectF(r.x() + 2 * u, r.center().y() - sz * 0.5, sz, sz),
+                           row, readableTextFor(bg), 0.95);
         }
 
         for (int col = 0; col < 13; ++col) {
@@ -1231,13 +1443,10 @@ private:
                 drawToneGlyph(p, QRectF(inner.x() + inner.width() * 0.16,
                                        inner.y() + 1, inner.width() * 0.68, toneH),
                               ((kin - 1) % 13) + 1, text);
-                const QImage &atlas = sealAtlas();
-                if (!atlas.isNull()) {
-                    const qreal glyphW = qMin(inner.width() - 3, glyphH);
-                    const QRectF dst(inner.center().x() - glyphW * 0.5,
-                                     inner.y() + toneH + 1, glyphW, glyphW);
-                    p.drawImage(dst, atlas, QRectF(0, ((kin - 1) % 20) * 28, 28, 28));
-                }
+                const qreal glyphW = qMin(inner.width() - 3, glyphH);
+                const QRectF dst(inner.center().x() - glyphW * 0.5,
+                                 inner.y() + toneH + 1, glyphW, glyphW);
+                drawSealSymbol(p, dst, (kin - 1) % 20, text, 0.92);
                 p.setPen(text);
                 setPainterFont(p, int(qBound<qreal>(7, kinH * 0.78, 13)), true);
                 p.drawText(QRectF(inner.x(), inner.bottom() - kinH,
