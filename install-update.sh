@@ -759,6 +759,10 @@ echo "• Building 13-moon-calendar widget..."
 g++ -I. -std=c++11 -fPIC -shared widgets/moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 moon-calendar.so /usr/local/lib/alternix/widgets/moon-calendar.so
 
+echo "• Building tzolkin widget..."
+g++ -I. -std=c++11 -fPIC -shared widgets/tzolkin.cpp -o tzolkin.so $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -Dm755 tzolkin.so /usr/local/lib/alternix/widgets/tzolkin.so
+
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 echo "• Updating Icons..."
