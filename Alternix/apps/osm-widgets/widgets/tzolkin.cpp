@@ -12,6 +12,10 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDateEdit>
+#include <QCalendarWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QAbstractItemView>
 #include <QImage>
 #include <QByteArray>
 #include <QDate>
@@ -22,6 +26,7 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QSettings>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -32,7 +37,7 @@ static const OsmWidgetInfo kInfo = {
     "Tzolkin",
     "🌀",
     "Tzolkin / Harmonic Module widget with Galactic Signature support",
-    620, 760,
+    720, 860,
     320, 240
 };
 
@@ -226,7 +231,6 @@ static void drawToneGlyph(QPainter &p, const QRectF &r, int tone, const QColor &
     const qreal barW = r.width() * 0.54;
     const qreal cx = r.center().x();
 
-    int rows = (dots > 0 ? 1 : 0) + bars;
     qreal totalH = 0;
     if (dots > 0) totalH += dotRadius * 2;
     if (bars > 0) totalH += bars * barH + (bars - 1) * rowSpacing;
@@ -234,12 +238,12 @@ static void drawToneGlyph(QPainter &p, const QRectF &r, int tone, const QColor &
     qreal y = r.center().y() - totalH / 2.0;
 
     if (dots > 0) {
-        qreal span = qMin(r.width() * 0.70, dots * dotRadius * 2.8);
-        qreal startX = cx - span / 2.0;
-        qreal step = dots > 1 ? span / (dots - 1) : 0;
-        for (int i = 0; i < dots; ++i) {
-            p.drawEllipse(QPointF(startX + i * step, y + dotRadius), dotRadius, dotRadius);
-        }
+        // Center the Mayan number. A single dot must not drift left.
+        const qreal dotStep = qMin(dotRadius * 2.75,
+                                   r.width() * 0.75 / qMax(1, dots - 1));
+        const qreal startX = cx - (dots - 1) * dotStep * 0.5;
+        for (int i = 0; i < dots; ++i)
+            p.drawEllipse(QPointF(startX + i * dotStep, y + dotRadius), dotRadius, dotRadius);
         y += dotRadius * 2 + (bars > 0 ? rowSpacing : 0);
     }
 
@@ -821,11 +825,12 @@ static void styleColourButton(QPushButton *button, const QColor &c) {
 
 } // namespace
 
-// Drawn directly in settings: automatically follows the selected birth date.
+// High-contrast self-contained emblem used by the picker and settings.
 class KinPreview : public QWidget {
 public:
     explicit KinPreview(QWidget *parent = nullptr) : QWidget(parent) {
-        setMinimumHeight(162);
+        setMinimumSize(152, 190);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     }
     void setKin(int kin) { m_kin = kin; update(); }
 protected:
@@ -833,21 +838,151 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor("#323232"));
-        p.drawRoundedRect(rect().adjusted(2, 2, -2, -2), 13, 13);
-        if (m_kin > 0)
-            drawKinEmblem(p, QRectF(rect()).adjusted(12, 5, -12, -5), m_kin,
-                          QColor("#e7e7e7"), true);
-        else {
+        p.setBrush(QColor("#373737"));
+        p.drawRoundedRect(QRectF(rect()).adjusted(2, 2, -2, -2), 13, 13);
+        if (m_kin > 0) {
+            // Large glyph at a guaranteed width, never a tiny full-width icon.
+            const qreal emblemWidth = qMin<qreal>(142, width() - 16);
+            const QRectF emblem(rect().center().x() - emblemWidth * 0.5,
+                                6, emblemWidth, qMin<qreal>(height() - 12, 174));
+            drawKinEmblem(p, emblem, m_kin, QColor("#ffffff"), true);
+        } else {
             p.setPen(QColor("#bababa"));
-            setPainterFont(p, 15);
-            p.drawText(rect(), Qt::AlignCenter | Qt::TextWordWrap,
-                       "Choose your birth date");
+            setPainterFont(p, 16);
+            p.drawText(rect(), Qt::AlignCenter | Qt::TextWordWrap, "Choose your birth date");
         }
     }
 private:
     int m_kin = 0;
 };
+
+// One obvious birth-date picker, accessible from the widget itself AND settings.
+// Changes are only committed after Save to avoid the host rebuilding while the
+// user is still typing a year or browsing the calendar.
+class GalacticSignaturePicker : public QDialog {
+public:
+    GalacticSignaturePicker(const QDate &savedDate, bool afterNoon, QWidget *parent = nullptr)
+        : QDialog(parent) {
+        setWindowTitle("My Galactic Signature · Tzolkin");
+        setModal(true);
+        setWindowFlags(Qt::Dialog | Qt::WindowTitleHint | Qt::WindowCloseButtonHint);
+        setAttribute(Qt::WA_ShowWithoutActivating, false);
+        resize(560, 690);
+        setMinimumWidth(340);
+        setStyleSheet("QDialog { background:#282828; }"
+                      "QLabel { color:#f4f4f4; background:transparent; }"
+                      "QPushButton { background:#414141; color:white; border:1px solid #777;"
+                      " border-radius:10px; padding:9px 15px; font-size:18px; }"
+                      "QPushButton:hover { background:#555; }");
+        QVBoxLayout *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(20, 16, 20, 16);
+        layout->setSpacing(12);
+
+        QLabel *heading = makeLabel("Choose your Gregorian date of birth", this);
+        heading->setWordWrap(true);
+        heading->setStyleSheet("color:white; font-size:23px; font-weight:bold;");
+        layout->addWidget(heading);
+
+        m_dateEdit = new QDateEdit(this);
+        m_dateEdit->setDisplayFormat("dd/MM/yyyy");
+        m_dateEdit->setCalendarPopup(true);
+        m_dateEdit->setMinimumDate(QDate(1700, 1, 1));
+        m_dateEdit->setMaximumDate(QDate::currentDate());
+        m_dateEdit->setDate(savedDate.isValid() ? savedDate : QDate(2000, 1, 1));
+        m_dateEdit->setStyleSheet(
+            "QDateEdit { background:#404040; color:white; border:2px solid #888;"
+            " border-radius:10px; padding:9px; min-height:40px; font-size:22px; }"
+            "QDateEdit::drop-down { width:48px; border:none; }"
+            "QDateEdit::down-arrow { image:none; }");
+        layout->addWidget(m_dateEdit);
+
+        m_calendar = new QCalendarWidget(this);
+        m_calendar->setFirstDayOfWeek(Qt::Monday);
+        m_calendar->setGridVisible(false);
+        m_calendar->setVerticalHeaderFormat(QCalendarWidget::NoVerticalHeader);
+        m_calendar->setMinimumDate(QDate(1700, 1, 1));
+        m_calendar->setMaximumDate(QDate::currentDate());
+        m_calendar->setSelectedDate(m_dateEdit->date());
+        m_calendar->setMinimumHeight(225);
+        m_calendar->setStyleSheet(
+            "QCalendarWidget { background:#343434; color:#fff; }"
+            "QCalendarWidget QWidget { alternate-background-color:#383838; }"
+            "QCalendarWidget QAbstractItemView { background:#353535; color:#fff;"
+            " selection-background-color:#278052; selection-color:#fff; font-size:17px; }"
+            "QCalendarWidget QToolButton { background:#414141; color:#fff;"
+            " font-size:18px; border:none; padding:6px; }"
+            "QCalendarWidget QSpinBox { background:#414141; color:#fff; font-size:18px; }");
+        layout->addWidget(m_calendar, 1);
+
+        m_leapChoice = new QComboBox(this);
+        m_leapChoice->setStyleSheet(boxStyle());
+        m_leapChoice->addItem("29 February: born before noon (use 28 Feb)", false);
+        m_leapChoice->addItem("29 February: born after noon (use 1 Mar)", true);
+        int choice = m_leapChoice->findData(afterNoon);
+        m_leapChoice->setCurrentIndex(choice < 0 ? 0 : choice);
+        m_leapChoice->setVisible(isHunabKu(m_dateEdit->date()));
+        layout->addWidget(m_leapChoice);
+
+        QHBoxLayout *previewRow = new QHBoxLayout;
+        m_art = new KinPreview(this);
+        m_art->setFixedSize(152, 190);
+        previewRow->addWidget(m_art);
+        m_name = makeLabel(QString(), this);
+        m_name->setWordWrap(true);
+        m_name->setStyleSheet("QLabel { color:#ffffff; font-size:19px; font-weight:bold; }");
+        previewRow->addWidget(m_name, 1);
+        layout->addLayout(previewRow);
+
+        QDialogButtonBox *buttons = new QDialogButtonBox(
+            QDialogButtonBox::Save | QDialogButtonBox::Cancel, Qt::Horizontal, this);
+        if (QPushButton *save = buttons->button(QDialogButtonBox::Save)) {
+            save->setText("Save my Galactic Signature");
+            save->setStyleSheet("QPushButton { background:#256b4f; color:white; border:none;"
+                                " border-radius:10px; font-size:18px; padding:12px; }");
+        }
+        layout->addWidget(buttons);
+
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        connect(m_calendar, &QCalendarWidget::selectionChanged, this, [this]() {
+            if (m_dateEdit->date() != m_calendar->selectedDate())
+                m_dateEdit->setDate(m_calendar->selectedDate());
+        });
+        connect(m_dateEdit, &QDateTimeEdit::dateChanged, this, [this](const QDate &d) {
+            if (m_calendar->selectedDate() != d) m_calendar->setSelectedDate(d);
+            m_leapChoice->setVisible(isHunabKu(d));
+            refresh();
+        });
+        connect(m_leapChoice, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) { refresh(); });
+        refresh();
+    }
+
+    QDate birthDate() const { return m_dateEdit->date(); }
+    bool leapAfterNoon() const { return m_leapChoice->currentData().toBool(); }
+    int selectedKin() const { return kinForBirthDate(birthDate(), leapAfterNoon()); }
+private:
+    void refresh() {
+        const int kin = selectedKin();
+        m_art->setKin(kin);
+        m_name->setText(kinTitle(kin) + "\n" + kinDetailLine(kin) +
+                        "\n\nThe tone is shown ABOVE the solar-seal glyph.");
+    }
+    QDateEdit *m_dateEdit = nullptr;
+    QCalendarWidget *m_calendar = nullptr;
+    QComboBox *m_leapChoice = nullptr;
+    KinPreview *m_art = nullptr;
+    QLabel *m_name = nullptr;
+};
+
+static void saveBirthSignature(const QString &id, const QDate &date, bool afterNoon) {
+    QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+    const QString prefix = "Widget-" + id + "/";
+    cfg.setValue(prefix + "BirthDate", date.toString(Qt::ISODate));
+    cfg.setValue(prefix + "BirthLeapAfterNoon", afterNoon);
+    cfg.setValue(prefix + "MyKin", kinForBirthDate(date, afterNoon));
+    cfg.sync();
+}
 
 class TzolkinWidget : public QWidget {
 public:
@@ -917,7 +1052,9 @@ protected:
         m_pressed = false;
         if ((e->pos() - m_pressPos).manhattanLength() > 12) { e->accept(); return; }
         const QPointF pt = e->pos();
-        if (prevRect().contains(pt)) {
+        if (signatureButtonRect().contains(pt)) {
+            openSignaturePicker();
+        } else if (prevRect().contains(pt)) {
             browse(-1);
         } else if (nextRect().contains(pt)) {
             browse(1);
@@ -958,6 +1095,27 @@ private:
         return QRectF(width() - 112 * u, 66 * u, 94 * u, 32 * u);
     }
 
+    QRectF signatureButtonRect() const {
+        const double u = scaleUnit();
+        return QRectF(18 * u, 66 * u, qMax<qreal>(120, width() - 148 * u), 32 * u);
+    }
+
+    void openSignaturePicker() {
+        QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+        const QDate saved = QDate::fromString(
+            cfg.value("Widget-" + m_id + "/BirthDate", "").toString(), Qt::ISODate);
+        const bool afterNoon = cfg.value("Widget-" + m_id + "/BirthLeapAfterNoon", false).toBool();
+        // A normal WM-managed dialog must NOT inherit the desktop overlay's
+        // override-redirect / no-focus window behaviour.
+        GalacticSignaturePicker picker(saved, afterNoon, nullptr);
+        picker.setWindowModality(Qt::ApplicationModal);
+        if (picker.exec() != QDialog::Accepted) return;
+        m_myKin = picker.selectedKin();
+        update();
+        // One atomic config write; the host will reload this widget automatically.
+        saveBirthSignature(m_id, picker.birthDate(), picker.leapAfterNoon());
+    }
+
     QRectF contentRect() const {
         const double u = scaleUnit();
         return QRectF(16 * u, 108 * u, width() - 32 * u, height() - 218 * u);
@@ -985,6 +1143,11 @@ private:
                            QColor(m_textColour.red(), m_textColour.green(), m_textColour.blue(), 32), int(28 * u));
         paintRoundedButton(p, todayRect(), "Today", m_accentColour,
                            QColor(m_accentColour.red(), m_accentColour.green(), m_accentColour.blue(), 36), int(14 * u));
+        const QString sigButton = m_myKin > 0
+            ? QString("✦ My Kin %1 · Change birthday").arg(m_myKin)
+            : "✦ Set my Galactic Signature";
+        paintRoundedButton(p, signatureButtonRect(), sigButton, m_accentColour,
+                           QColor(m_accentColour.red(), m_accentColour.green(), m_accentColour.blue(), 34), int(12 * u));
     }
 
     void drawFullView(QPainter &p) {
@@ -1008,8 +1171,15 @@ private:
             p.drawText(QRectF(r.x() + 6 * u, r.y(), r.width() - 12 * u, r.height() * 0.55),
                        Qt::AlignLeft | Qt::AlignVCenter, QString::number(row + 1));
             setPainterFont(p, int(11 * u));
-            p.drawText(QRectF(r.x() + 6 * u, r.y() + r.height() * 0.38, r.width() - 12 * u, r.height() * 0.42),
+            p.drawText(QRectF(r.x() + 28 * u, r.y() + r.height() * 0.38, r.width() - 30 * u,
+                              r.height() * 0.42),
                        Qt::AlignLeft | Qt::AlignVCenter, QString::fromLatin1(kSealNames[row]));
+            const QImage &atlas = sealAtlas();
+            if (!atlas.isNull()) {
+                const qreal sz = qMin<qreal>(r.height() - 4, 24 * u);
+                p.drawImage(QRectF(r.x() + 2 * u, r.center().y() - sz * 0.5, sz, sz),
+                            atlas, QRectF(0, row * 28, 28, 28));
+            }
         }
 
         for (int col = 0; col < 13; ++col) {
@@ -1051,16 +1221,28 @@ private:
                     p.drawEllipse(QRectF(inner.right() - 9 * u, inner.top() + 3 * u, 6 * u, 6 * u));
                 }
 
-                QColor text = readableTextFor(bg);
-                if (kin == todayKin) text = m_accentColour;
-                p.setPen(text);
-                setPainterFont(p, int(12 * u), true);
-                p.drawText(QRectF(inner.x(), inner.y() + 2 * u, inner.width(), inner.height() * 0.36),
-                           Qt::AlignCenter, QString::number(kin));
-                drawToneGlyph(p,
-                              QRectF(inner.x() + inner.width() * 0.18, inner.y() + inner.height() * 0.40,
-                                     inner.width() * 0.64, inner.height() * 0.45),
+                // All 260 cells show the Mayan tone ABOVE the actual seal
+                // glyph, and the Kin number BELOW. Previously, this view
+                // omitted seal artwork entirely.
+                const QColor text = kin == todayKin ? m_accentColour : m_textColour;
+                const qreal toneH = inner.height() * 0.26;
+                const qreal kinH = inner.height() * 0.23;
+                const qreal glyphH = qMax<qreal>(5.0, inner.height() - toneH - kinH - 2);
+                drawToneGlyph(p, QRectF(inner.x() + inner.width() * 0.16,
+                                       inner.y() + 1, inner.width() * 0.68, toneH),
                               ((kin - 1) % 13) + 1, text);
+                const QImage &atlas = sealAtlas();
+                if (!atlas.isNull()) {
+                    const qreal glyphW = qMin(inner.width() - 3, glyphH);
+                    const QRectF dst(inner.center().x() - glyphW * 0.5,
+                                     inner.y() + toneH + 1, glyphW, glyphW);
+                    p.drawImage(dst, atlas, QRectF(0, ((kin - 1) % 20) * 28, 28, 28));
+                }
+                p.setPen(text);
+                setPainterFont(p, int(qBound<qreal>(7, kinH * 0.78, 13)), true);
+                p.drawText(QRectF(inner.x(), inner.bottom() - kinH,
+                                  inner.width(), kinH),
+                           Qt::AlignCenter, QString::number(kin));
             }
         }
     }
@@ -1309,92 +1491,78 @@ public:
         : QWidget(parent), m_id(instanceId) {
         setStyleSheet("background:#282828;");
         QVBoxLayout *v = new QVBoxLayout(this);
-        v->setContentsMargins(24, 24, 24, 24);
-        v->setSpacing(17);
+        v->setContentsMargins(22, 18, 22, 22);
+        v->setSpacing(15);
         v->setAlignment(Qt::AlignTop);
 
-        QLabel *intro = makeLabel("Tzolkin / Harmonic Module", this);
-        intro->setWordWrap(true);
-        v->addWidget(intro);
+        QLabel *title = makeLabel("My Galactic Signature", this);
+        title->setStyleSheet("color:white; background:transparent; font-size:25px; font-weight:bold;");
+        v->addWidget(title);
 
-        v->addWidget(makeLabel("View mode", this));
+        m_savedDate = QDate::fromString(
+            osmWidgetGet(m_id, "BirthDate", "").toString(), Qt::ISODate);
+        m_afterNoon = osmWidgetGet(m_id, "BirthLeapAfterNoon", false).toBool();
+        m_currentKin = m_savedDate.isValid()
+            ? kinForBirthDate(m_savedDate, m_afterNoon)
+            : qBound(0, osmWidgetGet(m_id, "MyKin", 0).toInt(), 260);
+
+        // The main action is immediately visible at the top of settings.
+        m_birthButton = new QPushButton("Choose my birthday  ·  Open Gregorian calendar", this);
+        m_birthButton->setMinimumHeight(64);
+        m_birthButton->setStyleSheet(
+            "QPushButton { color:white; background:#256b4f; border:2px solid #67ac8c;"
+            " border-radius:13px; font-size:19px; font-weight:bold; padding:11px; }"
+            "QPushButton:hover { background:#317e5e; }");
+        v->addWidget(m_birthButton);
+
+        m_birthStatus = makeLabel(QString(), this);
+        m_birthStatus->setStyleSheet("color:#d0d0d0; background:transparent; font-size:18px;");
+        m_birthStatus->setWordWrap(true);
+        v->addWidget(m_birthStatus);
+
+        QHBoxLayout *resultRow = new QHBoxLayout;
+        resultRow->setSpacing(15);
+        m_kinArt = new KinPreview(this);
+        m_kinArt->setFixedSize(160, 190);
+        resultRow->addWidget(m_kinArt);
+        m_preview = makeLabel(QString(), this);
+        m_preview->setStyleSheet("color:white; font-size:18px; font-weight:bold; background:transparent;");
+        m_preview->setWordWrap(true);
+        resultRow->addWidget(m_preview, 1);
+        v->addLayout(resultRow);
+
+        // Manual selection is optional; existing users can keep using it.
+        v->addWidget(makeLabel("Manual Kin selection (optional)", this));
+        m_myKin = new QComboBox(this);
+        m_myKin->setStyleSheet(boxStyle());
+        m_myKin->setMaxVisibleItems(14);
+        m_myKin->addItem("Not set", 0);
+        for (int kin = 1; kin <= 260; ++kin)
+            m_myKin->addItem(kinTitle(kin), kin);
+        selectByData(m_myKin, m_currentKin);
+        m_myKin->setEnabled(!m_savedDate.isValid());
+        v->addWidget(m_myKin);
+
+        m_clearBirth = new QPushButton("Clear saved birth date / enable manual selection", this);
+        m_clearBirth->setStyleSheet(
+            "QPushButton { color:white; background:#404040; border:1px dashed #888;"
+            " border-radius:10px; font-size:17px; padding:10px; min-height:42px; }"
+            "QPushButton:hover { background:#505050; }");
+        v->addWidget(m_clearBirth);
+
+        v->addWidget(makeLabel("Widget display", this));
         m_mode = new QComboBox(this);
         m_mode->setStyleSheet(boxStyle());
-        m_mode->addItem("Full Tzolkin", ViewFull);
-        m_mode->addItem("Week view", ViewWeek);
+        m_mode->addItem("Full Tzolkin · 260 Kin", ViewFull);
+        m_mode->addItem("Week view · 7 days", ViewWeek);
         m_mode->addItem("Today only", ViewToday);
         selectByData(m_mode, osmWidgetGet(m_id, "ViewMode", 0).toInt());
         v->addWidget(m_mode);
 
-        v->addWidget(makeLabel("My Galactic Signature – Gregorian birth date", this));
-        const QDate savedBirthDate = QDate::fromString(
-            osmWidgetGet(m_id, "BirthDate", "").toString(), Qt::ISODate);
-        m_savedBirthDate = savedBirthDate;
-        m_birthDate = new QDateEdit(this);
-        m_birthDate->setDisplayFormat("dd/MM/yyyy");
-        m_birthDate->setCalendarPopup(true);
-        m_birthDate->setMinimumDate(QDate(1700, 1, 1));
-        m_birthDate->setMaximumDate(QDate::currentDate());
-        m_birthDate->setDate(savedBirthDate.isValid() ? savedBirthDate : QDate(2000, 1, 1));
-        m_birthDate->setStyleSheet(
-            "QDateEdit { background:#303030; color:white; font-size:22px;"
-            " border:2px dashed #787878; border-radius:10px; padding:10px; min-height:42px; }"
-            "QCalendarWidget { background:#282828; color:white; }"
-            "QCalendarWidget QWidget { background:#303030; color:white; }");
-        v->addWidget(m_birthDate);
-
-        m_leapChoice = new QComboBox(this);
-        m_leapChoice->setStyleSheet(boxStyle());
-        m_leapChoice->addItem("Born before noon → use 28 February", false);
-        m_leapChoice->addItem("Born after noon → use 1 March", true);
-        selectByData(m_leapChoice, osmWidgetGet(m_id, "BirthLeapAfterNoon", false).toBool());
-        m_leapChoice->setVisible(isHunabKu(m_birthDate->date()));
-        v->addWidget(m_leapChoice);
-
-        QHBoxLayout *birthButtons = new QHBoxLayout;
-        m_saveBirth = new QPushButton("Use this birth date", this);
-        m_clearBirth = new QPushButton("Clear birth date", this);
-        const char *buttonStyle =
-            "QPushButton { background:#3a3a3a; color:white; font-size:19px;"
-            " border:2px dashed #777; border-radius:12px; padding:10px; min-height:46px; }"
-            "QPushButton:hover { background:#505050; }";
-        m_saveBirth->setStyleSheet(buttonStyle);
-        m_clearBirth->setStyleSheet(buttonStyle);
-        birthButtons->addWidget(m_saveBirth, 2);
-        birthButtons->addWidget(m_clearBirth, 1);
-        v->addLayout(birthButtons);
-
-        m_birthStatus = makeLabel(QString(), this);
-        m_birthStatus->setWordWrap(true);
-        v->addWidget(m_birthStatus);
-
-        m_kinArt = new KinPreview(this);
-        v->addWidget(m_kinArt);
-        m_preview = makeLabel(QString(), this);
-        m_preview->setWordWrap(true);
-        m_preview->setStyleSheet(
-            "QLabel { color:#d8ffd8; font-size:19px; background:transparent; }");
-        v->addWidget(m_preview);
-
-        v->addWidget(makeLabel("Manual Kin selection (when birth date is cleared)", this));
-        m_myKin = new QComboBox(this);
-        m_myKin->setStyleSheet(boxStyle());
-        m_myKin->setMaxVisibleItems(18);
-        m_myKin->addItem("Not set", 0);
-        for (int kin = 1; kin <= 260; ++kin)
-            m_myKin->addItem(kinTitle(kin), kin);
-        int initialKin = savedBirthDate.isValid()
-            ? kinForBirthDate(savedBirthDate,
-                 osmWidgetGet(m_id, "BirthLeapAfterNoon", false).toBool())
-            : qBound(0, osmWidgetGet(m_id, "MyKin", 0).toInt(), 260);
-        selectByData(m_myKin, initialKin);
-        m_myKin->setEnabled(!savedBirthDate.isValid());
-        v->addWidget(m_myKin);
-
         v->addWidget(makeLabel("Background opacity", this));
         m_opacity = new QSlider(Qt::Horizontal, this);
-        m_opacity->setStyleSheet(sliderStyle());
         m_opacity->setRange(0, 255);
+        m_opacity->setStyleSheet(sliderStyle());
         m_opacity->setValue(osmWidgetGet(m_id, "BackgroundAlpha", 185).toInt());
         v->addWidget(m_opacity);
 
@@ -1402,55 +1570,44 @@ public:
         m_accentColour = colourFrom(osmWidgetGet(m_id, "AccentColour", "#8fe18f").toString(), "#8fe18f");
         addColourRow(v, "Text colour", m_textColour, m_textButton);
         addColourRow(v, "Highlight colour", m_accentColour, m_accentButton);
-
-        QLabel *note = makeLabel(
-            "Conversion uses the Dreamspell/Law of Time count. 29 February "
-            "is 0.0 Hunab Ku: a leap-day birth requires the before/after-noon choice.", this);
-        note->setWordWrap(true);
-        v->addWidget(note);
         v->addStretch();
 
-        connect(m_mode, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, [this](int) { applyAppearance(); });
-        connect(m_myKin, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, [this](int) {
-                    if (!m_savedBirthDate.isValid()) {
-                        m_birthDateEdited = false;
-                        writeKinConfig(QDate(), false, m_myKin->currentData().toInt());
-                        refreshPreview();
-                    }
-                });
-        connect(m_birthDate, &QDateTimeEdit::dateChanged,
-                this, [this](const QDate &d) {
-                    m_birthDateEdited = true;
-                    m_leapChoice->setVisible(isHunabKu(d));
-                    refreshPreview();
-                });
-        connect(m_leapChoice, QOverload<int>::of(&QComboBox::currentIndexChanged),
-                this, [this](int) { m_birthDateEdited = true; refreshPreview(); });
-        connect(m_saveBirth, &QPushButton::clicked, this, [this]() {
-            const QDate selectedDate = m_birthDate->date();
-            if (!selectedDate.isValid()) return;
-            const bool afterNoon = m_leapChoice->currentData().toBool();
-            const int derivedKin = kinForBirthDate(selectedDate, afterNoon);
-            m_savedBirthDate = selectedDate;
-            m_birthDateEdited = false;
+        connect(m_birthButton, &QPushButton::clicked, this, [this]() {
+            GalacticSignaturePicker picker(m_savedDate, m_afterNoon, this);
+            if (picker.exec() != QDialog::Accepted) return;
+            m_savedDate = picker.birthDate();
+            m_afterNoon = picker.leapAfterNoon();
+            m_currentKin = picker.selectedKin();
             m_myKin->blockSignals(true);
-            selectByData(m_myKin, derivedKin);
+            selectByData(m_myKin, m_currentKin);
             m_myKin->setEnabled(false);
             m_myKin->blockSignals(false);
-            writeKinConfig(selectedDate, afterNoon, derivedKin);
             refreshPreview();
+            saveBirthSignature(m_id, m_savedDate, m_afterNoon);
         });
         connect(m_clearBirth, &QPushButton::clicked, this, [this]() {
-            m_savedBirthDate = QDate();
-            m_birthDateEdited = false;
+            m_savedDate = QDate();
+            m_afterNoon = false;
             m_myKin->setEnabled(true);
-            writeKinConfig(QDate(), false, m_myKin->currentData().toInt());
+            m_currentKin = m_myKin->currentData().toInt();
             refreshPreview();
+            QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+            const QString prefix = "Widget-" + m_id + "/";
+            cfg.remove(prefix + "BirthDate");
+            cfg.remove(prefix + "BirthLeapAfterNoon");
+            cfg.setValue(prefix + "MyKin", m_currentKin);
+            cfg.sync();
         });
-        connect(m_opacity, &QSlider::sliderReleased, this,
-                [this]() { applyAppearance(); });
+        connect(m_myKin, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) {
+                    if (m_savedDate.isValid()) return;
+                    m_currentKin = m_myKin->currentData().toInt();
+                    refreshPreview();
+                    osmWidgetSet(m_id, "MyKin", m_currentKin);
+                });
+        connect(m_mode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this](int) { applyAppearance(); });
+        connect(m_opacity, &QSlider::sliderReleased, this, [this]() { applyAppearance(); });
         connect(m_textButton, &QPushButton::clicked, this, [this]() {
             QColor c = QColorDialog::getColor(m_textColour, this, "Tzolkin text colour");
             if (c.isValid()) { m_textColour = c; styleColourButton(m_textButton, c); applyAppearance(); }
@@ -1463,6 +1620,10 @@ public:
     }
 
 private:
+    static void selectByData(QComboBox *box, int data) {
+        const int i = box->findData(data);
+        if (i >= 0) box->setCurrentIndex(i);
+    }
     void addColourRow(QVBoxLayout *v, const QString &title, QColor &c, QPushButton *&button) {
         QHBoxLayout *row = new QHBoxLayout;
         row->addWidget(makeLabel(title, this));
@@ -1471,76 +1632,45 @@ private:
         row->addWidget(button, 1);
         v->addLayout(row);
     }
-
-    static void selectByData(QComboBox *box, int data) {
-        int idx = box->findData(data);
-        if (idx >= 0) box->setCurrentIndex(idx);
-    }
-
-    void writeKinConfig(const QDate &birthDate, bool afterNoon, int kin) {
-        QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
-        const QString group = "Widget-" + m_id + "/";
-        if (birthDate.isValid()) cfg.setValue(group + "BirthDate", birthDate.toString(Qt::ISODate));
-        else cfg.remove(group + "BirthDate");
-        cfg.setValue(group + "BirthLeapAfterNoon", afterNoon);
-        cfg.setValue(group + "MyKin", kin);
-        cfg.sync();
-    }
-
     void refreshPreview() {
-        // Preview the chosen date before saving. A saved date or an edited
-        // field takes priority over any manual Kin selection.
-        const QDate chosenDate = m_birthDate->date();
-        const bool afterNoon = m_leapChoice->currentData().toBool();
-        const bool showBirth = m_savedBirthDate.isValid() || m_birthDateEdited ||
-                               m_myKin->currentData().toInt() == 0;
-        const int previewKin = showBirth
-            ? kinForBirthDate(chosenDate, afterNoon)
-            : m_myKin->currentData().toInt();
-        m_kinArt->setKin(previewKin);
-        m_preview->setText(previewKin > 0
-            ? kinTitle(previewKin) + "\n" + kinDetailLine(previewKin)
-            : "Choose your Gregorian birth date or select a Kin manually.");
-        QString status;
-        if (m_savedBirthDate.isValid()) {
-            status = QString("Saved birth date: %1").arg(m_savedBirthDate.toString("dd/MM/yyyy"));
-            if (m_birthDateEdited)
-                status += " · Preview only — select 'Use this birth date' to update.";
-        } else if (m_birthDateEdited) {
-            status = "Preview only — select 'Use this birth date' to save the conversion.";
+        m_kinArt->setKin(m_currentKin);
+        if (m_savedDate.isValid()) {
+            m_birthStatus->setText("Born " + m_savedDate.toString("dd MMMM yyyy") +
+                                   "  ·  Automatically converted to Kin " +
+                                   QString::number(m_currentKin));
         } else {
-            status = "No birth date saved. Choose a date and select 'Use this birth date'.";
+            m_birthStatus->setText("No birthday saved. Tap the green button above and choose your birth date.");
         }
-        m_birthStatus->setText(status);
+        m_preview->setText(m_currentKin > 0
+            ? kinTitle(m_currentKin) + "\n" + kinDetailLine(m_currentKin) +
+              "\n\nMayan tone above the coloured solar-seal symbol"
+            : "Enter a Gregorian birthday to discover your Galactic Signature.");
     }
-
     void applyAppearance() {
         QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
-        const QString group = "Widget-" + m_id + "/";
-        cfg.setValue(group + "ViewMode", m_mode->currentData().toInt());
-        cfg.setValue(group + "BackgroundAlpha", m_opacity->value());
-        cfg.setValue(group + "Colour", m_textColour.name());
-        cfg.setValue(group + "AccentColour", m_accentColour.name());
+        const QString prefix = "Widget-" + m_id + "/";
+        cfg.setValue(prefix + "ViewMode", m_mode->currentData().toInt());
+        cfg.setValue(prefix + "BackgroundAlpha", m_opacity->value());
+        cfg.setValue(prefix + "Colour", m_textColour.name());
+        cfg.setValue(prefix + "AccentColour", m_accentColour.name());
         cfg.sync();
     }
 
     QString m_id;
-    QDate m_savedBirthDate;
-    bool m_birthDateEdited = false;
-    QDateEdit *m_birthDate = nullptr;
-    QComboBox *m_leapChoice = nullptr;
-    QPushButton *m_saveBirth = nullptr;
+    QDate m_savedDate;
+    bool m_afterNoon = false;
+    int m_currentKin = 0;
+    QPushButton *m_birthButton = nullptr;
     QPushButton *m_clearBirth = nullptr;
     QLabel *m_birthStatus = nullptr;
-    QComboBox *m_mode = nullptr;
-    QComboBox *m_myKin = nullptr;
-    QLabel *m_preview = nullptr;
     KinPreview *m_kinArt = nullptr;
+    QLabel *m_preview = nullptr;
+    QComboBox *m_myKin = nullptr;
+    QComboBox *m_mode = nullptr;
     QSlider *m_opacity = nullptr;
     QPushButton *m_textButton = nullptr;
     QPushButton *m_accentButton = nullptr;
-    QColor m_textColour;
-    QColor m_accentColour;
+    QColor m_textColour, m_accentColour;
 };
 
 extern "C" {

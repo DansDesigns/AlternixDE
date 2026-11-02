@@ -33,17 +33,23 @@ echo "[Config] Updating Grub Entry.."
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
-# Do not accidentally reinstall an outdated Location module. The updater
-# compiles the repository's location.cpp, not a copy bundled in this script.
-# Older versions contained the misleading clock-permission error and would
-# overwrite the corrected module even if the time helper is authorised.
-ALT_LOCATION_SOURCE="$ALT_ROOT/Alternix/apps/osm-settings/location.cpp"
+# Check both independent Settings modules before making any system changes.
+# The clock/PAM implementation now belongs to date-time.cpp, NOT location.cpp.
+ALT_SETTINGS_SOURCE="$ALT_ROOT/Alternix/apps/osm-settings"
+ALT_LOCATION_SOURCE="$ALT_SETTINGS_SOURCE/location.cpp"
+ALT_DATE_TIME_SOURCE="$ALT_SETTINGS_SOURCE/date-time.cpp"
 if [ ! -f "$ALT_LOCATION_SOURCE" ] || \
-   ! grep -Fq 'Clock already synchronised by Chrony' "$ALT_LOCATION_SOURCE" || \
-   ! grep -Fq 'System sudo handles authentication through its PAM service' "$ALT_LOCATION_SOURCE"; then
+   ! grep -Fq 'class LocationPage' "$ALT_LOCATION_SOURCE" || \
+   ! grep -Fq 'Location/network_enabled' "$ALT_LOCATION_SOURCE"; then
     echo "ERROR: The repository does not contain the corrected location.cpp." >&2
-    echo "Install the corrected source at Alternix/apps/osm-settings/location.cpp" >&2
-    echo "before updating, or the old clock-permission failure will return." >&2
+    exit 1
+fi
+if [ ! -f "$ALT_DATE_TIME_SOURCE" ] || \
+   ! grep -Fq 'class DateTimePage' "$ALT_DATE_TIME_SOURCE" || \
+   ! grep -Fq 'Clock already synchronised by Chrony' "$ALT_DATE_TIME_SOURCE" || \
+   ! grep -Fq 'System sudo handles authentication through its PAM service' "$ALT_DATE_TIME_SOURCE"; then
+    echo "ERROR: The repository does not contain the independent Date & Time module." >&2
+    echo "Add Alternix/apps/osm-settings/date-time.cpp before updating." >&2
     exit 1
 fi
 
@@ -592,16 +598,21 @@ echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 system.so /usr/local/bin/
 
-# Update Location alongside the clock helper so existing installations use
-# the same helper-based clock actions as fresh installations. Never deploy an
-# old/stale location.so if this compilation fails.
+# Build BOTH modules before installing either, so a compilation failure
+# cannot leave an updated Location module with a missing Date & Time module.
 echo "• Building location.so..."
 if ! g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
-    echo "ERROR: Could not compile location.cpp. Existing installed location.so was left unchanged." >&2
+    echo "ERROR: Could not compile location.cpp. Existing location.so was left unchanged." >&2
     exit 1
 fi
-if ! sudo install -m755 location.so /usr/local/bin/location.so; then
-    echo "ERROR: Could not install the newly built location.so." >&2
+echo "• Building date-time.so..."
+if ! g++ date-time.cpp -o date-time.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
+    echo "ERROR: Could not compile date-time.cpp. Existing Settings modules were left unchanged." >&2
+    exit 1
+fi
+if ! sudo install -m755 location.so /usr/local/bin/location.so || \
+   ! sudo install -m755 date-time.so /usr/local/bin/date-time.so; then
+    echo "ERROR: Could not install both Settings modules." >&2
     exit 1
 fi
 

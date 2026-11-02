@@ -342,6 +342,7 @@ private:
             {"🔗", "Ethernet", eth, "ethernet"},
             {"🕸️", "Reticulum", "Encrypted Mesh Network", "reticulum"},
             {"📍", "Location", "GPS, Geolocation Services", "location"},
+            {"🕒", "Date & Time", "Clock, Time Zones, Synchronisation", "date-time"},
             {"🖥️", "Display", "Brightness, Sleep, Screen Info", "display"},
             {"🎨", "UI", "Font Size, Wallpaper", "ui"},
             {"🔊", "Sounds", "Output, Volume Levels", "sound"},

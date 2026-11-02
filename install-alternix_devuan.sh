@@ -61,6 +61,19 @@ for auth_source in \
     fi
 done
 
+# Date & Time is a separate Settings module. Both sources must be present
+# before package installation or an ISO build starts.
+for settings_source in \
+    "$ALT_ROOT/Alternix/apps/osm-settings/location.cpp" \
+    "$ALT_ROOT/Alternix/apps/osm-settings/date-time.cpp" \
+    "$ALT_ROOT/Alternix/apps/osm-settings/osm-settings.cpp"; do
+    if [ ! -s "$settings_source" ]; then
+        echo "ERROR: Required Settings source is missing: $settings_source" >&2
+        echo "Add the new Date & Time module to AlternixDE before building the ISO." >&2
+        exit 1
+    fi
+done
+
 # The audio hardware installer is an existing AlternixDE source, not a
 # downloaded repair patch. Missing sources must fail BEFORE a long ISO build.
 ALT_AUDIO_SOURCE="$ALT_ROOT/Alternix/scripts/alternix-audio-fix.sh"
@@ -1181,6 +1194,10 @@ sudo install -m755 mobile.so /usr/local/bin/
 echo "• Building location.so..."
 g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 location.so /usr/local/bin/
+
+echo "• Building date-time.so..."
+g++ date-time.cpp -o date-time.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 date-time.so /usr/local/bin/
 
 echo "• Building battery.so..."
 g++ -fPIC -shared battery.cpp -o battery.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
