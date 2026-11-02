@@ -13,6 +13,9 @@
 # --linx-auto          Remove this script's Linx SST override.
 # --apple-driver       Apple + CS8409 ONLY: explicitly opt in to external DKMS.
 # --scan               Read-only cross-platform hardware inventory and package plan.
+# --elitepad-tune      HP ElitePad 1000 G2 ONLY: optional conservative speaker
+#                      gain staging (with automatic mixer backup and rollback).
+# --elitepad-restore   HP ElitePad 1000 G2 ONLY: restore pre-tuning mixer values.
 # Hardware-aware (PCI, USB, ACPI, Device Tree, ALSA) with no speculative modprobe overrides.
 #
 # Note: 2017/2019 Apple CS8409 speakers sometimes require an out-of-tree driver;
@@ -40,6 +43,8 @@ case "${1:-}" in
   --linx-force-sst) MODE=linx-sst ;;
   --linx-auto) MODE=linx-auto ;;
   --apple-driver) MODE=apple-driver ;;
+  --elitepad-tune) MODE=elitepad-tune ;;
+  --elitepad-restore) MODE=elitepad-restore ;;
   -h|--help)
     cat <<'HELP'
 Usage: bash alternix-audio-fix.sh [MODE]
@@ -56,6 +61,12 @@ Usage: bash alternix-audio-fix.sh [MODE]
   --scan            Read-only audio hardware inventory and firmware package plan.
   --linx-force-sst  On detected Linx 810B + RT5640, select SST on next boot.
   --linx-auto       Undo the script's Linx 810B override on next boot.
+  --elitepad-tune   On confirmed HP ElitePad 1000 G2 + bytcr-rt5640 only:
+                    back up ALSA mixer, set DAC1 digital 0 dB and speaker
+                    analogue 0 dB, cap software gain at 100% if needed.
+                    Run as the logged-in desktop user with internal speakers
+                    selected. This is a reversible tuning test, not a guarantee.
+  --elitepad-restore  Restore the saved ALSA controls to their original values.
   --apple-driver    On detected Apple + CS8409, opt in to third-party DKMS.
                     This downloads/builds a kernel module; see its upstream code.
 HELP
@@ -122,6 +133,9 @@ if [ "$ROOT" -eq 1 ] && [ "$MODE" != image ] && [ "$MODE" != install ]; then
       say 'Root repair: hardware-aware package provisioning only.'
       say 'Audio session setup belongs to the logged-in desktop user.' ;;
     scan|diagnose) : ;; # Read-only hardware inspection is allowed as root.
+    elitepad-tune|elitepad-restore)
+      warn "Mode $MODE must run as the logged-in desktop user, not root."
+      exit 1 ;;
     *)
       warn "Mode $MODE needs a logged-in user; use --image-prep for ISO provisioning."
       exit 1 ;;
@@ -324,10 +338,14 @@ CODECS=$( (cat /proc/asound/card*/codec\#* 2>/dev/null || true) | grep -i -m4 '^
 LSPCI=$(lspci -nnk 2>/dev/null || true)
 IS_APPLE=0
 IS_LINX810B=0
+IS_ELITEPAD1000G2=0
 IS_CS8409=0
 IS_RT5640=0
 IS_INTEL_AUDIO=0
 case "$MODEL $VENDOR" in *Apple*|*iMac*|*MacBook*) IS_APPLE=1;; esac
+case "$MODEL" in 'HP ElitePad 1000 G2'|'ElitePad 1000 G2')
+  case "$VENDOR" in 'Hewlett-Packard'|'HP') IS_ELITEPAD1000G2=1 ;; esac ;;
+esac
 case "$MODEL" in *LINX810B*|*Linx810B*|*Linx\ 810B*|*linx810b*) IS_LINX810B=1;; esac
 if printf '%s\n' "$CODECS" | grep -qi 'CS8409'; then IS_CS8409=1; fi
 if compgen -G '/sys/bus/acpi/devices/10EC5640:*' >/dev/null || \
@@ -489,6 +507,7 @@ show_hardware_inventory() {
     "$IS_APPLE" "$IS_LINX810B" "$IS_INTEL_AUDIO" "$HAS_AMD_AUDIO" \
     "$HAS_AMD_GPU_AUDIO" "$HAS_NVIDIA_AUDIO" "$HAS_REALTEK_AUDIO" \
     "$HAS_CIRRUS_AUDIO" "$HAS_QCOM_AUDIO" "$HAS_MEDIATEK_AUDIO"
+  printf 'HP-ElitePad-1000-G2=%s\n' "$IS_ELITEPAD1000G2"
   printf 'PCI=%s USB-audio=%s ACPI-audio=%s SoC-platform=%s ALSA-cards=%s Bluetooth-adapter=%s\n' \
     "${#AUDIO_PCI_ROWS[@]}" "${#AUDIO_USB_ROWS[@]}" "${#AUDIO_ACPI_ROWS[@]}" \
     "${#AUDIO_PLATFORM_ROWS[@]}" "${#AUDIO_KERNEL_ROWS[@]}" "$HAS_BLUETOOTH"
@@ -543,6 +562,24 @@ show_diagnostics() {
   if [ -n "$LSPCI" ]; then
     printf '%s\n' '-- PCI drivers --'
     printf '%s\n' "$LSPCI" | grep -iE -A4 '(Audio device|Multimedia audio controller|Multimedia controller)' || true
+  fi
+  if [ "$IS_ELITEPAD1000G2" -eq 1 ]; then
+    printf '%s\n' '-- ElitePad 1000 G2 codec, mixer and routing evidence --'
+    printf '%s\n' 'RT5642 / ALC5642 may report as bytcr-rt5640 in ALSA.'
+    if has amixer; then
+      local idx ctl
+      for idx in $(awk '/^[[:space:]]*[0-9]+[[:space:]]+\[/{print $1}' /proc/asound/cards 2>/dev/null); do
+        if ! grep -qiE "^[[:space:]]*$idx[[:space:]]+\[bytcr" /proc/asound/cards 2>/dev/null; then continue; fi
+        for ctl in 'Speaker Playback Volume' 'DAC1 Playback Volume' \
+                   'Speaker Channel Switch' 'Speaker Switch' \
+                   'Class D SPK Ratio Control'; do
+          amixer -c "$idx" cget "name='$ctl'" 2>/dev/null || true
+        done
+      done
+    fi
+    if has pactl && server_ok; then
+      pactl list short sinks 2>/dev/null | grep -iE 'bytcr|rt5640|rt5642' || true
+    fi
   fi
   printf '%s\n' '-- Intel audio driver modules / configuration --'
   if has lsmod; then lsmod | grep -iE 'snd_(intel|soc|sof|hda)|soundwire' | head -n 45 || true; fi
@@ -652,6 +689,143 @@ if [ "$MODE" = linx-sst ] || [ "$MODE" = linx-auto ]; then
   exit 0
 fi
 
+# HP ElitePad 1000 G2: the analogue speaker control has 1.5 dB steps,
+# raw 31 = 0 dB, while UCM commonly starts at 35 (+6 dB). With the tiny
+# built-in speakers, that boost can be a source of clipping/distortion.
+# DAC1 raw 175 = 0 dB (no digital boost, no digital cut). Test these *only*
+# on the correct live card and after backing up the original ALSA state.
+# We cannot measure audible distortion from a script; these values are a
+# conservative reversible experiment, not an automatic model-wide quirk.
+elitepad_card() {
+  local node id n
+  [ "$IS_ELITEPAD1000G2" -eq 1 ] || return 1
+  for node in /proc/asound/card[0-9]*; do
+    [ -d "$node" ] || continue
+    n=${node##*card}
+    id=$(cat "$node/id" 2>/dev/null || true)
+    case "${id,,}" in bytcrrt5640|bytcr-rt5640) printf '%s\n' "$n"; return 0 ;; esac
+  done
+  return 1
+}
+
+elitepad_ctl_values() {
+  local card="$1" ctl="$2"
+  amixer -c "$card" cget "name='$ctl'" 2>/dev/null | \
+    sed -n 's/^[[:space:]]*:[[:space:]]*values=//p' | head -n1
+}
+
+elitepad_tuning() {
+  local card backup ctl current original_speaker original_dac sink volume
+  local saved=0
+  if [ "$IS_ELITEPAD1000G2" -ne 1 ]; then
+    warn 'ElitePad speaker tuning refused: this is not an HP ElitePad 1000 G2.'
+    return 1
+  fi
+  if ! has amixer || ! has alsactl; then
+    warn 'Both amixer and alsactl (alsa-utils) are required for reversible tuning.'
+    return 1
+  fi
+  card=$(elitepad_card) || {
+    warn 'No confirmed bytcr-rt5640 ALSA card on this ElitePad. No changes made.'
+    warn 'Run --diagnose and check the detected codec/driver first.'
+    return 1
+  }
+  ctl='Speaker Playback Volume'
+  original_speaker=$(elitepad_ctl_values "$card" "$ctl")
+  original_dac=$(elitepad_ctl_values "$card" 'DAC1 Playback Volume')
+  if [[ ! "$original_speaker" =~ ^[0-9]+,[0-9]+$ ]] ||
+     [[ ! "$original_dac" =~ ^[0-9]+,[0-9]+$ ]]; then
+    warn 'Speaker/DAC1 stereo controls do not match the expected RT5640 layout; no changes made.'
+    return 1
+  fi
+  backup="$STATE_DIR/elitepad-1000g2-alsa-before-tune.state"
+  if [ "$MODE" = elitepad-restore ]; then
+    if [ ! -s "$backup" ]; then
+      warn "No previous mixer backup found: $backup"
+      return 1
+    fi
+    say "Restoring saved HP ElitePad mixer state: $backup"
+    if alsactl -f "$backup" restore "$card"; then
+      if has sudo; then priv alsactl store "$card" || warn 'Could not persist restored mixer state to /var/lib/alsa.'; fi
+      say 'Original ALSA mixer controls restored; desktop output volume was left unchanged.'
+      return 0
+    fi
+    warn 'Mixer restore failed. The backup was retained.'
+    return 1
+  fi
+
+  if [ -e "$backup" ] && [ ! -s "$backup" ]; then
+    warn "Existing mixer backup is empty: $backup. Refusing to overwrite it."
+    return 1
+  fi
+  # Never make a large DAC-level change while an application is streaming.
+  # Volume changes must be tested deliberately with low-volume playback.
+  if server_ok && [ -n "$(pactl list short sink-inputs 2>/dev/null)" ]; then
+    warn 'Audio streams are active. Stop playback before tuning the ElitePad speakers.'
+    warn 'No mixer values have been changed. Re-run after closing players/browsers.'
+    return 1
+  fi
+  if [ ! -e "$backup" ]; then
+    umask 077
+    if ! alsactl -f "$backup" store "$card"; then
+      rm -f -- "$backup"
+      warn 'Could not back up the current ALSA mixer. No settings were modified.'
+      return 1
+    fi
+    chmod 0600 "$backup" || true
+  fi
+  say "ElitePad RT5640 speaker gain experiment on ALSA card $card"
+  say "Backup: $backup"
+  say "Previous Speaker (analogue): $original_speaker; DAC1 (digital): $original_dac"
+  say 'Setting analogue speaker 0 dB (31/31) and DAC1 digital 0 dB (175/175).'
+  if ! amixer -c "$card" cset "name='Speaker Playback Volume'" 31,31 >/dev/null 2>&1 ||
+     ! amixer -c "$card" cset "name='DAC1 Playback Volume'" 175,175 >/dev/null 2>&1; then
+    warn 'Mixer change failed: restoring backed-up original state.'
+    alsactl -f "$backup" restore "$card" || warn 'Automatic rollback failed. Use --elitepad-restore.'
+    return 1
+  fi
+  if [ "$(elitepad_ctl_values "$card" 'Speaker Playback Volume')" != '31,31' ] ||
+     [ "$(elitepad_ctl_values "$card" 'DAC1 Playback Volume')" != '175,175' ]; then
+    warn 'Mixer did not read back expected values: restoring previous state.'
+    alsactl -f "$backup" restore "$card" || warn 'Automatic rollback failed. Use --elitepad-restore.'
+    return 1
+  fi
+  # The selected PC/Bluetooth/USB sink is untouched. Prevent >100% software
+  # gain only when the *internal* tablet sink can be identified explicitly.
+  if server_ok; then
+    sink=$(pactl list short sinks 2>/dev/null | awk '$2 ~ /bytcr|rt5640|rt5642/ {print $2; exit}')
+    if [ -n "$sink" ]; then
+      volume=$(pactl get-sink-volume "$sink" 2>/dev/null | grep -oE '[0-9]+%' | head -n1 | tr -d '%')
+      if [[ "$volume" =~ ^[0-9]+$ ]] && [ "$volume" -gt 100 ]; then
+        pactl set-sink-volume "$sink" 100% || warn 'Could not cap software over-amplification.'
+        say 'Removed >100% PulseAudio/PipeWire software amplification on the internal sink.'
+      fi
+    else
+      warn 'No clearly named internal sink; software volume/routing was not altered.'
+    fi
+  fi
+  if has sudo; then
+    if priv alsactl store "$card"; then
+      saved=1
+      say 'Saved mixer settings for SysVinit ALSA restoration at the next boot.'
+    fi
+  fi
+  if [ "$saved" -eq 0 ]; then
+    warn 'Settings are active now, but ALSA persistence could not be verified.'
+    warn 'Mixer values may revert on reboot or after the UCM speaker profile is reactivated.'
+  fi
+  say 'Test at low speaker volume. Stop immediately if there is buzzing or crackling.'
+  say 'Undo at any time: bash alternix-audio-fix.sh --elitepad-restore'
+  say 'No Class-D amplifier ratio, microphone path, or kernel parameters were changed.'
+  return 0
+}
+
+if [ "$MODE" = elitepad-tune ] || [ "$MODE" = elitepad-restore ]; then
+  elitepad_tuning || exit 1
+  show_diagnostics
+  exit 0
+fi
+
 # Explicit-only external module installer; does NOT run in an ISO chroot.
 # Keep source under the user's home so it is inspectable and removable.
 if [ "$MODE" = apple-driver ]; then
@@ -753,6 +927,9 @@ if [ "$MODE" = install ]; then
     printf 'audio_server=%s\n' "$SERVER_SELECTED"
     printf 'firmware_selection=%s\n' "${FIRMWARE_WANTED[*]}"
     printf 'hardware_detected=%s\n' "$HAS_ANY_AUDIO"
+    if [ "$IS_ELITEPAD1000G2" -eq 1 ]; then
+      printf '%s\n' 'elitepad_speaker_tuning=deferred_requires_live_session_and_codec_validation'
+    fi
   } > "$marker_temp"; then
     rm -f "$marker_temp"
     exit 1
