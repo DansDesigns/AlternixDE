@@ -3,6 +3,11 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QGridLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QStandardPaths>
 #include <QScrollArea>
 #include <QScroller>
 #include <QFrame>
@@ -226,6 +231,9 @@ private:
     int         m_loginCount = -1;
     QList<LoginEntry> m_loginHistory;
     QStringList       m_groups;
+    QGridLayout      *m_groupsGrid = nullptr;
+    QPushButton      *m_addGroupButton = nullptr;
+    bool              m_groupChangePending = false;
 
     // -------------------------------------------------
     // Data gathering
@@ -647,34 +655,35 @@ private:
         return card;
     }
 
-    QWidget *makeGroupsCard()
+    // -------------------------------------------------
+    // Group management: a pill-shaped + at the end of the list
+    // -------------------------------------------------
+    void refreshGroupPills()
     {
-        QFrame *card = new QFrame;
-        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+        if (!m_groupsGrid) return;
 
-        QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30,20,30,20);
-        v->setSpacing(10);
+        // Rebuild only the group grid, without disturbing the rest of Accounts.
+        QLayoutItem *item = nullptr;
+        while ((item = m_groupsGrid->takeAt(0)) != nullptr)
+        {
+            if (item->widget()) item->widget()->deleteLater();
+            delete item;
+        }
+        m_addGroupButton = nullptr;
 
-        QLabel *header = new QLabel("User Groups");
-        header->setStyleSheet("font-size:30px; font-weight:bold;");
-        v->addWidget(header);
+        const int colCount = 3;
+        int row = 0, col = 0;
+        auto advance = [&]() {
+            if (++col >= colCount) { col = 0; ++row; }
+        };
 
         if (m_groups.isEmpty())
         {
             QLabel *none = new QLabel("No groups detected");
             none->setStyleSheet("color:#e0e0e0;");
-            v->addWidget(none);
-            return card;
+            m_groupsGrid->addWidget(none, row, col);
+            advance();
         }
-
-        QGridLayout *grid = new QGridLayout();
-        grid->setContentsMargins(0,0,0,0);
-        grid->setHorizontalSpacing(10);
-        grid->setVerticalSpacing(10);
-
-        int colCount = 3;
-        int row = 0, col = 0;
 
         for (const QString &g : m_groups)
         {
@@ -688,17 +697,176 @@ private:
                 "}"
             );
             pill->setAlignment(Qt::AlignCenter);
-
-            grid->addWidget(pill, row, col);
-            ++col;
-            if (col >= colCount)
-            {
-                col = 0;
-                ++row;
-            }
+            pill->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            m_groupsGrid->addWidget(pill, row, col);
+            advance();
         }
 
-        v->addLayout(grid);
+        QPushButton *plus = new QPushButton("+");
+        plus->setToolTip("Add this user to a group");
+        plus->setAccessibleName("Add user to group");
+        plus->setStyleSheet(
+            "QPushButton {"
+            " background:#555555;"
+            " color:white;"
+            " border:0px;"
+            " border-radius:18px;"
+            " padding:6px 18px;"
+            " font-size:22px;"
+            "}"
+            "QPushButton:hover { background:#666666; }"
+            "QPushButton:pressed { background:#444444; }"
+            "QPushButton:disabled { color:#aaaaaa; }"
+        );
+        plus->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        plus->setMinimumHeight(43);
+        plus->setEnabled(!m_groupChangePending);
+        m_groupsGrid->addWidget(plus, row, col);
+        m_addGroupButton = plus;
+        connect(plus, &QPushButton::clicked, this, [this]() { promptForGroup(); });
+    }
+
+    void promptForGroup()
+    {
+        if (m_groupChangePending) return;
+
+        QInputDialog dialog(this);
+        dialog.setWindowTitle("Add User to Group");
+        dialog.setLabelText("Enter the group name:");
+        dialog.setInputMode(QInputDialog::TextInput);
+        dialog.setTextEchoMode(QLineEdit::Normal);
+        dialog.setOkButtonText("Add");
+        dialog.setCancelButtonText("Cancel");
+        dialog.setMinimumWidth(420);
+        dialog.setStyleSheet(
+            "QInputDialog { background:#282828; color:white; }"
+            "QLabel { background:transparent; color:white; font-size:20px; }"
+            "QLineEdit { background:#3a3a3a; color:white; border:1px solid #777777;"
+            " border-radius:10px; padding:9px; font-size:20px; }"
+            "QPushButton { background:#555555; color:white; border:0px;"
+            " border-radius:12px; padding:8px 18px; font-size:18px; }"
+            "QPushButton:hover { background:#666666; }"
+        );
+        if (dialog.exec() != QDialog::Accepted) return;
+
+        const QString group = dialog.textValue().trimmed();
+        if (!QRegExp("^[a-z_][a-z0-9_-]{0,31}$").exactMatch(group))
+        {
+            QMessageBox::warning(this, "Invalid Group Name",
+                "Use 1–32 characters: lower-case letters, numbers, underscores "
+                "or hyphens. The first character must be a letter or underscore.");
+            return;
+        }
+        if (m_groups.contains(group))
+        {
+            QMessageBox::information(this, "User Groups",
+                QString("%1 is already a member of '%2'.").arg(m_username, group));
+            return;
+        }
+
+        // Keep the command fixed and pass the two values as positional arguments.
+        // This avoids interpolating untrusted group names into shell syntax.
+        const QString script =
+            "group=\"$1\"; user=\"$2\"; "
+            "if ! /usr/bin/getent group \"$group\" >/dev/null 2>&1; then "
+            " /usr/sbin/groupadd -- \"$group\" || exit $?; "
+            "fi; "
+            "exec /usr/sbin/usermod -a -G \"$group\" -- \"$user\"";
+        const QStringList args = QStringList() << "-c" << script << "alternix-group-add"
+                                               << group << m_username;
+
+        QString program = "/bin/sh";
+        QStringList processArgs = args;
+        if (geteuid() != 0)
+        {
+            program = QStandardPaths::findExecutable("osm-sudo");
+            if (program.isEmpty())
+            {
+                QMessageBox::critical(this, "Authentication Unavailable",
+                    "osm-sudo could not be found. Group membership requires "
+                    "administrator authentication.");
+                return;
+            }
+            processArgs.prepend("/bin/sh");
+        }
+
+        m_groupChangePending = true;
+        if (m_addGroupButton) m_addGroupButton->setEnabled(false);
+
+        QProcess *process = new QProcess(this);
+        process->setProgram(program);
+        process->setArguments(processArgs);
+
+        connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart || !m_groupChangePending) return;
+                m_groupChangePending = false;
+                if (m_addGroupButton) m_addGroupButton->setEnabled(true);
+                QMessageBox::critical(this, "Group Management Failed",
+                    "Could not start the group-management command: " + process->errorString());
+                process->deleteLater();
+            });
+
+        connect(process,
+            static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this, [this, process, group](int exitCode, QProcess::ExitStatus status) {
+                if (!m_groupChangePending) return;
+                m_groupChangePending = false;
+                if (m_addGroupButton) m_addGroupButton->setEnabled(true);
+
+                if (status != QProcess::NormalExit || exitCode != 0)
+                {
+                    QString details = QString::fromUtf8(process->readAllStandardError()).trimmed();
+                    if (details.isEmpty())
+                        details = QString::fromUtf8(process->readAllStandardOutput()).trimmed();
+                    if (details.isEmpty())
+                        details = QString("The command exited with code %1.").arg(exitCode);
+                    QMessageBox::critical(this, "Group Management Failed",
+                        "Unable to add the user to the group.\n\n" + details.left(900));
+                }
+                else
+                {
+                    computeGroups();
+                    refreshGroupPills();
+                    if (m_groups.contains(group))
+                    {
+                        QMessageBox::information(this, "Group Added",
+                            QString("%1 is now a member of '%2'.\n\n"
+                                    "Log out and back in for the new group "
+                                    "permissions to take effect in your session.")
+                                .arg(m_username, group));
+                    }
+                    else
+                    {
+                        QMessageBox::warning(this, "Refresh Needed",
+                            "The command completed, but the new group membership "
+                            "was not yet reported by the system. Try reopening Accounts.");
+                    }
+                }
+                process->deleteLater();
+            });
+        process->start();
+    }
+
+    QWidget *makeGroupsCard()
+    {
+        QFrame *card = new QFrame;
+        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+
+        QVBoxLayout *v = new QVBoxLayout(card);
+        v->setContentsMargins(30,20,30,20);
+        v->setSpacing(10);
+
+        QLabel *header = new QLabel("User Groups");
+        header->setStyleSheet("font-size:30px; font-weight:bold;");
+        v->addWidget(header);
+
+        m_groupsGrid = new QGridLayout();
+        m_groupsGrid->setContentsMargins(0,0,0,0);
+        m_groupsGrid->setHorizontalSpacing(10);
+        m_groupsGrid->setVerticalSpacing(10);
+        v->addLayout(m_groupsGrid);
+        refreshGroupPills();
         return card;
     }
 
