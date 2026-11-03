@@ -1,6 +1,7 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -21,6 +22,18 @@
 #include <QScrollBar>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QComboBox>
+#include <QFileDialog>
+#include <QCheckBox>
+#include <QProgressBar>
+#include <QStorageInfo>
+#include <QTemporaryDir>
+#include <QElapsedTimer>
+#include <QDateTime>
+#include <QRegularExpression>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QSet>
 
 #include <functional>
 #include <memory>
@@ -275,6 +288,7 @@ class SecurityPage : public QWidget
 {
 public:
     explicit SecurityPage(QStackedWidget *stack);
+    ~SecurityPage() override;
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -292,6 +306,42 @@ private:
     bool m_busy = false;
     bool m_networkRefreshing = false;
     bool m_firewallLogRefreshing = false;
+
+    // ClamAV is invoked only when a scan is requested; it does not need clamd.
+    QComboBox *m_scanMode = nullptr;
+    QComboBox *m_scanDrives = nullptr;
+    QCheckBox *m_scanProtected = nullptr;
+    QPushButton *m_scanPick = nullptr;
+    QPushButton *m_scanStart = nullptr;
+    QPushButton *m_scanCancel = nullptr;
+    QPushButton *m_scanSave = nullptr;
+    QPushButton *m_scanRefresh = nullptr;
+    QLabel *m_clamStatus = nullptr;
+    QLabel *m_scanTargetLabel = nullptr;
+    QLabel *m_scanStatus = nullptr;
+    QLabel *m_scanHelp = nullptr;
+    QTextEdit *m_scanOutput = nullptr;
+    QProgressBar *m_scanProgress = nullptr;
+    QTimer *m_scanTimer = nullptr;
+    QProcess *m_scanProcess = nullptr;
+    QElapsedTimer m_scanElapsed;
+    std::unique_ptr<QTemporaryDir> m_scanControlDir;
+    QString m_selectedFolder;
+    QString m_scannedTarget;
+    QString m_scanTranscript;
+    bool m_scanActive = false;
+    bool m_scanCancelRequested = false;
+
+    QWidget *makeClamCard();
+    void refreshClamState();
+    void refreshScanDrives();
+    void updateScanUi();
+    void startClamScan();
+    void cancelClamScan();
+    void consumeClamOutput();
+    void finishClamScan(bool started, int exitCode, QProcess::ExitStatus exitStatus);
+    void saveClamReport();
+    QString clamscanExecutable() const;
 
     QWidget *makeLogsCard(const QString &title, QTextEdit *&edit);
     void refreshSystemState();
@@ -369,6 +419,8 @@ SecurityPage::SecurityPage(QStackedWidget *stack)
     m_resetButton->setToolTip("Verify the existing osm-lock pattern before resetting it.");
     outerLay->addWidget(settingRow("Password", m_resetButton));
 
+    outerLay->addWidget(makeClamCard());
+
     outerLay->addWidget(makeLogsCard("Network Connections", m_liveConnEdit));
     outerLay->addWidget(makeLogsCard("Firewall Log (ufw)", m_ufwLogEdit));
 
@@ -395,9 +447,529 @@ SecurityPage::SecurityPage(QStackedWidget *stack)
         resetPassword();
     });
 
+    m_scanTimer = new QTimer(this);
+    m_scanTimer->setInterval(500);
+    connect(m_scanTimer, &QTimer::timeout, this, [this]() {
+        if (m_scanActive) {
+            const qint64 secs = m_scanElapsed.elapsed() / 1000;
+            m_scanStatus->setText(m_scanCancelRequested
+                ? QString("Stopping scan...  %1:%2 elapsed").arg(secs / 60).arg(secs % 60, 2, 10, QLatin1Char('0'))
+                : QString("Scanning...  %1:%2 elapsed").arg(secs / 60).arg(secs % 60, 2, 10, QLatin1Char('0')));
+        }
+    });
+
     m_logTimer = new QTimer(this);
     m_logTimer->setInterval(3000);
     connect(m_logTimer, &QTimer::timeout, this, [this]() { refreshLogs(); });
+}
+
+// Return an absolute, system-installed executable, not an arbitrary entry
+// found in the user's PATH. In particular this command may run via osm-sudo.
+QString SecurityPage::clamscanExecutable() const
+{
+    const QStringList paths = {"/usr/bin/clamscan", "/usr/local/bin/clamscan"};
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (info.isFile() && info.isExecutable())
+            return path;
+    }
+    return QString();
+}
+
+QWidget *SecurityPage::makeClamCard()
+{
+    QFrame *card = new QFrame;
+    card->setObjectName("alternixClamavCard");
+    card->setStyleSheet(
+        "QFrame#alternixClamavCard { background:#444444; border-radius:30px; }"
+        "QComboBox { color:white; background:#363636; padding:10px; border:1px solid #666;"
+        " border-radius:12px; font-size:19px; min-height:38px; }"
+        "QComboBox QAbstractItemView { color:white; background:#333; selection-background-color:#555; }"
+        "QCheckBox { color:white; font-size:18px; spacing:12px; }"
+        "QLabel { color:white; }"
+    );
+    QVBoxLayout *layout = new QVBoxLayout(card);
+    layout->setContentsMargins(30, 23, 30, 24);
+    layout->setSpacing(14);
+
+    QLabel *heading = new QLabel("ClamAV Malware Scanner", card);
+    heading->setStyleSheet("font-size:28px; font-weight:bold;");
+    layout->addWidget(heading);
+
+    m_clamStatus = new QLabel(card);
+    m_clamStatus->setWordWrap(true);
+    m_clamStatus->setStyleSheet("font-size:17px; color:#dddddd;");
+    layout->addWidget(m_clamStatus);
+
+    QLabel *typeLabel = new QLabel("Choose what to scan", card);
+    typeLabel->setStyleSheet("font-size:20px; font-weight:bold;");
+    layout->addWidget(typeLabel);
+
+    m_scanMode = new QComboBox(card);
+    m_scanMode->addItem("Specific folder");
+    m_scanMode->addItem("Internal / external drive");
+    m_scanMode->addItem("Entire system");
+    layout->addWidget(m_scanMode);
+
+    QHBoxLayout *targetLayout = new QHBoxLayout;
+    targetLayout->setSpacing(12);
+    m_scanTargetLabel = new QLabel(card);
+    m_scanTargetLabel->setWordWrap(true);
+    m_scanTargetLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_scanTargetLabel->setStyleSheet("font-size:18px;");
+    targetLayout->addWidget(m_scanTargetLabel, 1);
+
+    m_scanPick = makeBtn("Choose folder");
+    m_scanPick->setMinimumWidth(155);
+    targetLayout->addWidget(m_scanPick);
+    layout->addLayout(targetLayout);
+
+    m_scanDrives = new QComboBox(card);
+    m_scanDrives->setToolTip("All currently mounted storage volumes. Mount a drive in Files first if needed.");
+    layout->addWidget(m_scanDrives);
+
+    m_scanProtected = new QCheckBox("Include protected files (osm-sudo authentication)", card);
+    m_scanProtected->setToolTip("Run this scan with elevated file-read permissions via osm-sudo."
+        " The entire-system scan always requires this.");
+    layout->addWidget(m_scanProtected);
+
+    m_scanHelp = new QLabel(card);
+    m_scanHelp->setWordWrap(true);
+    m_scanHelp->setStyleSheet("font-size:16px; color:#cccccc;");
+    layout->addWidget(m_scanHelp);
+
+    QGridLayout *actions = new QGridLayout;
+    actions->setSpacing(10);
+    m_scanStart = makeBtn("Scan now");
+    m_scanCancel = makeBtn("Cancel scan");
+    m_scanSave = makeBtn("Save report");
+    m_scanRefresh = makeBtn("Refresh drives");
+    for (QPushButton *button : {m_scanStart, m_scanCancel, m_scanSave, m_scanRefresh}) {
+        button->setMinimumSize(110, 50);
+        button->setStyleSheet(
+            "QPushButton { background:#555; color:white; border:1px solid #666;"
+            " border-radius:14px; font-size:18px; padding:8px; }"
+            "QPushButton:hover { background:#666; }"
+            "QPushButton:pressed { background:#333; }"
+            "QPushButton:disabled { color:#999; background:#3b3b3b; }");
+    }
+    m_scanStart->setStyleSheet(
+        "QPushButton { background:#23683c; color:white; border-radius:14px;"
+        " font-size:19px; font-weight:bold; padding:8px; }"
+        "QPushButton:hover { background:#29874b; }"
+        "QPushButton:disabled { background:#395444; color:#aaa; }");
+    actions->addWidget(m_scanStart, 0, 0);
+    actions->addWidget(m_scanCancel, 0, 1);
+    actions->addWidget(m_scanSave, 1, 0);
+    actions->addWidget(m_scanRefresh, 1, 1);
+    layout->addLayout(actions);
+
+    m_scanProgress = new QProgressBar(card);
+    m_scanProgress->setRange(0, 0); // Indeterminate; ClamAV does not supply a total-file count.
+    m_scanProgress->setTextVisible(false);
+    m_scanProgress->setFixedHeight(12);
+    m_scanProgress->setVisible(false);
+    layout->addWidget(m_scanProgress);
+
+    m_scanStatus = new QLabel("Ready to scan.", card);
+    m_scanStatus->setWordWrap(true);
+    m_scanStatus->setStyleSheet("font-size:18px; font-weight:bold;");
+    layout->addWidget(m_scanStatus);
+
+    m_scanOutput = new QTextEdit(card);
+    m_scanOutput->setReadOnly(true);
+    m_scanOutput->setPlaceholderText("Detected threats, scanning errors and the final ClamAV summary will appear here.");
+    m_scanOutput->document()->setMaximumBlockCount(450);
+    m_scanOutput->setStyleSheet(
+        "QTextEdit { background:#303030; color:white; border:1px solid #555;"
+        " border-radius:14px; padding:10px; font-family:monospace; font-size:15px; }");
+    m_scanOutput->setFixedHeight(230);
+    layout->addWidget(m_scanOutput);
+
+    m_selectedFolder = QDir::homePath();
+    connect(m_scanMode, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateScanUi(); });
+    connect(m_scanPick, &QPushButton::clicked, this, [this]() {
+        const QString picked = QFileDialog::getExistingDirectory(this, "Select folder to scan", m_selectedFolder,
+                                                                  QFileDialog::ShowDirsOnly);
+        if (!picked.isEmpty()) {
+            m_selectedFolder = picked;
+            updateScanUi();
+        }
+    });
+    connect(m_scanStart, &QPushButton::clicked, this, [this]() { startClamScan(); });
+    connect(m_scanCancel, &QPushButton::clicked, this, [this]() { cancelClamScan(); });
+    connect(m_scanSave, &QPushButton::clicked, this, [this]() { saveClamReport(); });
+    connect(m_scanRefresh, &QPushButton::clicked, this, [this]() {
+        refreshScanDrives();
+        refreshClamState();
+    });
+    refreshScanDrives();
+    refreshClamState();
+    updateScanUi();
+    return card;
+}
+
+void SecurityPage::refreshClamState()
+{
+    if (!m_clamStatus)
+        return;
+    if (clamscanExecutable().isEmpty()) {
+        m_clamStatus->setText("ClamAV is not installed. Install the matching x86-64 or ARM64 "
+                              "packages through the AlternixOS installer before scanning.");
+        m_clamStatus->setStyleSheet("font-size:17px; color:#ffb4a9;");
+    } else {
+        QDateTime newest;
+        const QStringList databases = {"daily.cld", "daily.cvd", "main.cvd", "main.cld", "bytecode.cvd", "bytecode.cld"};
+        for (const QString &name : databases) {
+            const QFileInfo info("/var/lib/clamav/" + name);
+            if (info.exists() && (!newest.isValid() || info.lastModified() > newest))
+                newest = info.lastModified();
+        }
+        QString description = "ClamAV installed.";
+        if (newest.isValid())
+            description += " Signature files last modified: " + newest.toLocalTime().toString("dd MMM yyyy, HH:mm") + ".";
+        else
+            description += " No signature database found at /var/lib/clamav; check freshclam or any custom database location.";
+        m_clamStatus->setText(description);
+        m_clamStatus->setStyleSheet("font-size:17px; color:#d6eadb;");
+    }
+    updateScanUi();
+}
+
+void SecurityPage::refreshScanDrives()
+{
+    if (!m_scanDrives)
+        return;
+    const QString previouslySelected = m_scanDrives->currentData().toString();
+    const QSet<QByteArray> virtualTypes = {
+        "proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "cgroup", "cgroup2", "securityfs",
+        "debugfs", "tracefs", "pstore", "configfs", "hugetlbfs", "mqueue", "fusectl",
+        "binfmt_misc", "efivarfs", "ramfs", "autofs", "rpc_pipefs", "nsfs"
+    };
+    m_scanDrives->clear();
+    QSet<QString> seen;
+    const QList<QStorageInfo> volumes = QStorageInfo::mountedVolumes();
+    for (const QStorageInfo &storage : volumes) {
+        if (!storage.isValid() || !storage.isReady())
+            continue;
+        const QString path = QDir::cleanPath(storage.rootPath());
+        if (!path.startsWith('/') || seen.contains(path) || virtualTypes.contains(storage.fileSystemType()))
+            continue;
+        if (path.startsWith("/proc/") || path == "/proc" || path.startsWith("/sys/") || path == "/sys" ||
+            path.startsWith("/dev/") || path == "/dev" ||
+            (path.startsWith("/run/") && !path.startsWith("/run/media/")))
+            continue;
+        seen.insert(path);
+        QString name = storage.name().trimmed();
+        if (name.isEmpty())
+            name = path == "/" ? "System drive" : "Mounted volume";
+        QString display = QString("%1  —  %2").arg(name, path);
+        const QString device = QString::fromLocal8Bit(storage.device());
+        if (!device.isEmpty())
+            display += "  [" + device + "]";
+        m_scanDrives->addItem(display, path);
+    }
+    if (!seen.contains("/") && QStorageInfo("/").isValid())
+        m_scanDrives->insertItem(0, "System drive  —  /", "/");
+    const int index = m_scanDrives->findData(previouslySelected);
+    if (index >= 0)
+        m_scanDrives->setCurrentIndex(index);
+    updateScanUi();
+}
+
+void SecurityPage::updateScanUi()
+{
+    if (!m_scanMode || !m_scanStart)
+        return;
+    const int mode = m_scanMode->currentIndex();
+    m_scanPick->setVisible(mode == 0);
+    m_scanDrives->setVisible(mode == 1);
+    if (mode == 2) {
+        m_scanProtected->setChecked(true);
+        m_scanProtected->setEnabled(false);
+        m_scanTargetLabel->setText("Target: Entire installed system (/)");
+        m_scanHelp->setText("Scans system files and separate /home or /boot filesystems. "
+            "Excludes virtual /proc, /sys, /dev, /run, mounted drives under /media and /mnt, "
+            "and ClamAV's signature directory. Select a drive separately to scan removable storage. "
+            "Large files and archives remain subject to ClamAV engine limits.");
+    } else {
+        m_scanProtected->setEnabled(!m_scanActive);
+        if (mode == 0) {
+            m_scanTargetLabel->setText("Folder: " + m_selectedFolder);
+            m_scanHelp->setText("Recursively scans this folder on its own filesystem. "
+                "Symlinks are not followed. Tick protected files if some contents require elevated access.");
+        } else {
+            m_scanTargetLabel->setText("Choose a currently mounted volume:");
+            m_scanHelp->setText("Scans the selected internal, USB or other mounted filesystem, "
+                "without crossing into nested mounts. Connect and mount a drive before refreshing this list.");
+        }
+    }
+    m_scanStart->setEnabled(!m_scanActive && !clamscanExecutable().isEmpty() &&
+                            (mode != 1 || m_scanDrives->count() != 0));
+    m_scanMode->setEnabled(!m_scanActive);
+    m_scanDrives->setEnabled(!m_scanActive);
+    m_scanPick->setEnabled(!m_scanActive);
+    m_scanRefresh->setEnabled(!m_scanActive);
+    m_scanCancel->setEnabled(m_scanActive && !m_scanCancelRequested);
+    m_scanSave->setEnabled(!m_scanTranscript.isEmpty());
+}
+
+void SecurityPage::startClamScan()
+{
+    if (m_scanActive)
+        return;
+    const QString binary = clamscanExecutable();
+    if (binary.isEmpty()) {
+        QMessageBox::warning(this, "ClamAV", "ClamAV is not installed. Install ClamAV and its signatures first.");
+        refreshClamState();
+        return;
+    }
+    const int mode = m_scanMode->currentIndex();
+    QString target = mode == 2 ? "/" : (mode == 1 ? m_scanDrives->currentData().toString() : m_selectedFolder);
+    if (target.isEmpty()) {
+        QMessageBox::warning(this, "ClamAV", "Choose a folder or mounted drive first.");
+        return;
+    }
+    // Check again because a user can remove a USB drive after the list was built.
+    const QFileInfo targetInfo(target);
+    if (!targetInfo.exists() || !targetInfo.isDir()) {
+        QMessageBox::warning(this, "ClamAV", "The chosen folder or drive is no longer available. Refresh the list.");
+        return;
+    }
+    if (mode == 1) {
+        bool mounted = false;
+        for (const QStorageInfo &s : QStorageInfo::mountedVolumes()) {
+            if (s.isValid() && s.isReady() && QDir::cleanPath(s.rootPath()) == QDir::cleanPath(target)) {
+                mounted = true;
+                break;
+            }
+        }
+        if (!mounted) {
+            QMessageBox::warning(this, "ClamAV", "That drive is no longer mounted. Refresh the list.");
+            return;
+        }
+    }
+    const bool privileged = mode == 2 || m_scanProtected->isChecked();
+    if (privileged && !QFileInfo::exists("/usr/local/bin/osm-sudo")) {
+        QMessageBox::warning(this, "ClamAV", "The AlternixOS osm-sudo authentication helper was not found.");
+        return;
+    }
+    if (mode == 2 && QMessageBox::question(this, "Scan entire system",
+            "Scan the system with osm-sudo authentication? This can take a long time and "
+            "use significant memory and CPU. Virtual filesystems and removable drive "
+            "mountpoints are excluded. No files will be deleted or quarantined automatically.",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    m_scanControlDir.reset(new QTemporaryDir(QDir::tempPath() + "/alternix-clamav-XXXXXX"));
+    if (!m_scanControlDir->isValid()) {
+        m_scanControlDir.reset();
+        QMessageBox::warning(this, "ClamAV", "Unable to create a private scan cancellation channel.");
+        return;
+    }
+    m_scannedTarget = target;
+    m_scanTranscript = QString("AlternixOS ClamAV scan\nStarted: %1\nTarget: %2\nAccess: %3\n\n")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODate), target,
+             privileged ? "Protected files included (osm-sudo)" : "Current user");
+    m_scanOutput->clear();
+    m_scanOutput->setPlainText(m_scanTranscript);
+    m_scanActive = true;
+    m_scanCancelRequested = false;
+    m_scanElapsed.start();
+    m_scanProgress->setVisible(true);
+    m_scanProgress->setRange(0, 0);
+    m_scanStatus->setText(privileged ? "Authenticating via osm-sudo..." : "Starting scan...");
+    updateScanUi();
+
+    QStringList scanArgs = {"--recursive", "--infected", "--stdout", "--follow-dir-symlinks=0",
+                            "--follow-file-symlinks=0"};
+    if (mode == 2) {
+        scanArgs << "--cross-fs=yes";
+        scanArgs << "--exclude-dir=^/(proc|sys|dev|run|media|mnt)(/|$)";
+        scanArgs << "--exclude-dir=^/var/lib/clamav(/|$)";
+        // Network mounts outside conventional removable-mount folders are not
+        // local system storage. Scan them explicitly as a selected drive.
+        const QSet<QByteArray> networkTypes = {"nfs", "nfs4", "cifs", "smb3", "sshfs", "fuse.sshfs"};
+        for (const QStorageInfo &vol : QStorageInfo::mountedVolumes()) {
+            if (vol.isValid() && vol.isReady() && networkTypes.contains(vol.fileSystemType())) {
+                const QString mountPath = QDir::cleanPath(vol.rootPath());
+                if (mountPath != "/")
+                    scanArgs << ("--exclude-dir=^" + QRegularExpression::escape(mountPath) + "(/|$)");
+            }
+        }
+    } else {
+        scanArgs << "--cross-fs=no";
+    }
+    // -- stops paths beginning with '-' being parsed as ClamAV flags.
+    scanArgs << "--" << target;
+
+    // Cancellation works even for privileged scans. A root-owned /bin/sh
+    // supervises only its *own* clamscan child and polls the marker in a
+    // private directory. No pidfiles, broad pkill, shell-injected paths, or
+    // second osm-sudo authentication are needed to request cancellation.
+    static const QString supervisor = QString::fromLatin1(R"SH(
+cancel_file=$1
+shift
+"$@" &
+scan_pid=$!
+(
+    while kill -0 "$scan_pid" 2>/dev/null; do
+        if [ -e "$cancel_file" ]; then
+            kill -TERM "$scan_pid" 2>/dev/null || :
+            exit 0
+        fi
+        sleep 0.25
+    done
+) &
+watch_pid=$!
+wait "$scan_pid"
+result=$?
+kill "$watch_pid" 2>/dev/null || :
+wait "$watch_pid" 2>/dev/null || :
+if [ -e "$cancel_file" ]; then exit 130; fi
+exit "$result"
+)SH");
+
+    QStringList supervisorArgs = {"-c", supervisor, "alternix-clamav",
+                                  m_scanControlDir->filePath("cancel"), binary};
+    supervisorArgs.append(scanArgs);
+    const QString launchProgram = privileged ? "/usr/local/bin/osm-sudo" : "/bin/sh";
+    if (privileged)
+        supervisorArgs.prepend("/bin/sh");
+
+    QProcess *process = new QProcess(this);
+    m_scanProcess = process;
+    process->setProcessChannelMode(QProcess::MergedChannels);
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process]() {
+        if (m_scanProcess == process)
+            consumeClamOutput();
+    });
+    connect(process, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
+            this, [this, process](int code, QProcess::ExitStatus status) {
+        if (m_scanProcess == process) {
+            consumeClamOutput();
+            finishClamScan(true, code, status);
+        }
+        process->deleteLater();
+    });
+    connect(process, &QProcess::errorOccurred, this,
+            [this, process](QProcess::ProcessError error) {
+        if (m_scanProcess == process && error == QProcess::FailedToStart) {
+            m_scanTranscript += "\nUnable to start scanner: " + process->errorString() + "\n";
+            m_scanOutput->append("Unable to start scanner: " + process->errorString());
+            finishClamScan(false, -1, QProcess::CrashExit);
+            process->deleteLater();
+        }
+    });
+    process->start(launchProgram, supervisorArgs);
+    m_scanTimer->start();
+}
+
+void SecurityPage::cancelClamScan()
+{
+    if (!m_scanActive || m_scanCancelRequested || !m_scanControlDir)
+        return;
+    QFile marker(m_scanControlDir->filePath("cancel"));
+    if (!marker.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, "ClamAV", "Unable to send cancellation request: " + marker.errorString());
+        return;
+    }
+    marker.close();
+    m_scanCancelRequested = true;
+    m_scanStatus->setText("Stopping scan and cleaning up...");
+    updateScanUi();
+}
+
+void SecurityPage::consumeClamOutput()
+{
+    if (!m_scanProcess)
+        return;
+    const QString chunk = QString::fromLocal8Bit(m_scanProcess->readAllStandardOutput());
+    if (chunk.isEmpty())
+        return;
+    // Keep a bounded, savable report; the view keeps only recent blocks too.
+    if (m_scanTranscript.size() + chunk.size() > 8 * 1024 * 1024) {
+        const int discard = m_scanTranscript.size() + chunk.size() - 7 * 1024 * 1024;
+        m_scanTranscript.remove(0, qMin(discard, m_scanTranscript.size()));
+        m_scanTranscript.prepend("[Earlier output truncated to limit memory usage]\n");
+    }
+    m_scanTranscript += chunk;
+    QTextCursor cursor = m_scanOutput->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(chunk);
+    m_scanOutput->setTextCursor(cursor);
+    m_scanOutput->ensureCursorVisible();
+    m_scanSave->setEnabled(true);
+}
+
+void SecurityPage::finishClamScan(bool started, int exitCode, QProcess::ExitStatus exitStatus)
+{
+    if (!m_scanActive)
+        return;
+    m_scanTimer->stop();
+    const bool cancelled = m_scanCancelRequested;
+    const bool hasSummary = m_scanTranscript.contains("SCAN SUMMARY", Qt::CaseInsensitive);
+    const QRegularExpression infectedRegex("Infected files:\s*(\d+)", QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch match = infectedRegex.match(m_scanTranscript);
+    const int detections = match.hasMatch() ? match.captured(1).toInt() : -1;
+    QString status;
+    if (cancelled || exitCode == 130) {
+        status = "Scan cancelled. Results are incomplete.";
+    } else if (!started || exitStatus != QProcess::NormalExit || !hasSummary || exitCode > 1 || exitCode < 0) {
+        status = "Scan failed or was interrupted. Results may be incomplete. Check the report.";
+    } else if (exitCode == 1 && detections > 0) {
+        status = QString("Threats detected: %1. Review the findings below; no files were modified.").arg(detections);
+    } else if (exitCode == 0 && detections == 0) {
+        status = "Scan complete. No threats detected in the files ClamAV was able to scan.";
+    } else {
+        status = "Scan returned an unexpected result. Review the report before treating it as clean.";
+    }
+    m_scanStatus->setText(status);
+    m_scanTranscript += "\nAlternixOS scan status: " + status + "\n";
+    m_scanOutput->append("\n" + status);
+    m_scanProgress->setVisible(false);
+    m_scanActive = false;
+    m_scanCancelRequested = false;
+    m_scanProcess = nullptr;
+    m_scanControlDir.reset();
+    updateScanUi();
+}
+
+void SecurityPage::saveClamReport()
+{
+    if (m_scanTranscript.isEmpty())
+        return;
+    const QString suggested = QDir::homePath() + "/ClamAV-" +
+        QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".txt";
+    const QString path = QFileDialog::getSaveFileName(this, "Save ClamAV scan report", suggested,
+                                                     "Text reports (*.txt);;All files (*)");
+    if (path.isEmpty())
+        return;
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "ClamAV report", "Could not save report: " + file.errorString());
+        return;
+    }
+    file.write(m_scanTranscript.toUtf8());
+    if (!file.commit())
+        QMessageBox::warning(this, "ClamAV report", "Could not complete report save: " + file.errorString());
+}
+
+SecurityPage::~SecurityPage()
+{
+    // On a Settings/application close, request a clean stop for an active
+    // root-owned scanner before the private cancellation marker disappears.
+    if (m_scanActive)
+        cancelClamScan();
+    if (m_scanProcess && m_scanProcess->state() != QProcess::NotRunning) {
+        if (!m_scanProcess->waitForFinished(1500)) {
+            if (m_scanControlDir)
+                m_scanControlDir->setAutoRemove(false);
+            m_scanProcess->terminate();
+            m_scanProcess->waitForFinished(300);
+        }
+    }
 }
 
 QWidget *SecurityPage::makeLogsCard(const QString &title, QTextEdit *&edit)
@@ -428,6 +1000,10 @@ void SecurityPage::showEvent(QShowEvent *event)
     QWidget::showEvent(event);
     if (!m_busy)
         refreshSystemState();
+    if (!m_scanActive) {
+        refreshScanDrives();
+        refreshClamState();
+    }
     if (!m_logTimer->isActive()) {
         refreshLogs();
         m_logTimer->start();

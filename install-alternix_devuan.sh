@@ -229,6 +229,85 @@ sudo apt install -y \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
 
 
+# Reuse the installer's existing ISO/chroot detection. Freshclam is allowed to
+# download definitions into the image, but never manipulates the build host.
+ALT_CLAMAV_BUILD_CHROOT="$ALT_IS_LIVE_BUILD"
+# ────────────────────────────────────────────────
+# AlternixOS Security: ClamAV on-demand malware scanner
+# - APT selects its signed native package for the detected architecture.
+# - No external .deb downloads, GitHub binaries or added Debian repositories.
+# - clamscan is used by Settings -> Security; clamd is not required.
+# - freshclam provides automatic malware-definition updates on SysVinit.
+# ────────────────────────────────────────────────
+echo "[Security] Installing/updating ClamAV for $(dpkg --print-architecture)..."
+if ! sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        clamav clamav-freshclam; then
+    echo "ERROR: ClamAV packages could not be installed from the configured Devuan repositories." >&2
+    apt-cache policy clamav clamav-freshclam || true
+    exit 1
+fi
+
+if ! dpkg-query -W -f='${Status}' clamav 2>/dev/null | grep -qx 'install ok installed' || \
+   ! dpkg-query -W -f='${Status}' clamav-freshclam 2>/dev/null | grep -qx 'install ok installed' || \
+   ! command -v clamscan >/dev/null 2>&1 || ! command -v freshclam >/dev/null 2>&1; then
+    echo "ERROR: ClamAV installation did not provide both clamscan and freshclam." >&2
+    exit 1
+fi
+
+# Only the definition updater is a service. On-demand file scans don't run
+# permanently, reducing resource use on older tablets and laptops.
+if [ -x /etc/init.d/clamav-freshclam ]; then
+    sudo update-rc.d clamav-freshclam defaults >/dev/null
+    sudo update-rc.d clamav-freshclam enable >/dev/null
+else
+    echo "WARNING: ClamAV freshclam SysVinit script is missing; automatic signature updates may not run." >&2
+fi
+
+# Full signature databases can be large. Seed a new image/installation so the
+# scanner can work offline after installation; don't redownload existing
+# databases every time the updater is run. freshclam checks for newer releases
+# automatically via its SysVinit service once the installed OS is running.
+alt_clamav_database_ready() {
+    local main_ok=0 daily_ok=0
+    for db in /var/lib/clamav/main.cvd /var/lib/clamav/main.cld; do
+        [ ! -s "$db" ] || main_ok=1
+    done
+    for db in /var/lib/clamav/daily.cvd /var/lib/clamav/daily.cld; do
+        [ ! -s "$db" ] || daily_ok=1
+    done
+    [ "$main_ok" = 1 ] && [ "$daily_ok" = 1 ]
+}
+
+# Freshclam's manual and daemon modes must not share a live database lock.
+# Never start/stop the *host's* services from an ISO-build chroot.
+if ! alt_clamav_database_ready; then
+    echo "[Security] Downloading initial ClamAV virus definitions..."
+    if [ "${ALT_CLAMAV_BUILD_CHROOT:-0}" != 1 ] && [ -x /etc/init.d/clamav-freshclam ]; then
+        sudo service clamav-freshclam stop >/dev/null 2>&1 || true
+    fi
+    if ! sudo timeout 900 freshclam --stdout; then
+        echo "WARNING: Initial virus-definition download failed (network/CDN issue)." >&2
+        echo "WARNING: freshclam will retry automatically when the installed OS is online." >&2
+    fi
+fi
+
+if [ "${ALT_CLAMAV_BUILD_CHROOT:-0}" != 1 ] && [ -x /etc/init.d/clamav-freshclam ]; then
+    if ! sudo service clamav-freshclam restart; then
+        echo "WARNING: Unable to start the ClamAV definition-update service now; it is enabled at boot." >&2
+    fi
+else
+    echo "[Security] ISO build: freshclam enabled for installed-system boot; no live services started."
+fi
+
+if alt_clamav_database_ready; then
+    echo "[Security] ClamAV signature databases are ready."
+else
+    echo "WARNING: ClamAV is installed but its main/daily signatures are not yet ready." >&2
+    echo "WARNING: Scans require freshclam to finish downloading signatures." >&2
+fi
+
+echo "[Security] Installed $(clamscan --version | head -n 1)"
+
 # ------------------------------------------------
 # AlternixOS clock stability (Devuan / SysVinit)
 # Chrony corrects running-clock drift; util-linux-extra supplies hwclock.
