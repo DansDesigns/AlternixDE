@@ -655,6 +655,9 @@ echo " "
 #    echo "--------------------------------"
 #fi
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~
+#    Settings Pages
+# ~~~~~~~~~~~~~~~~~~~~~~~~
 
 cd "$ALT_ROOT/Alternix/apps/osm-settings"
 
@@ -662,48 +665,83 @@ echo "• Updating osm-settings..."
 g++ osm-settings.cpp -o osm-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-settings && sudo mv osm-settings /usr/local/bin/
 
+
 echo "• Building wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 wifi.so /usr/local/bin/
-
-echo "• Building display.so..."
-g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
-sudo install -m755 display.so /usr/local/bin/
 
 echo "• Building bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 bluetooth.so /usr/local/bin/
 
-echo "• Updating reticulum.so..."
-g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
-sudo install -m755 reticulum.so /usr/local/bin/
+echo "• Building apps.so..."
+g++ -fPIC -shared apps.cpp -o apps.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 apps.so /usr/local/bin/
+
+echo "• Building mobile.so..."
+g++ -fPIC -shared mobile.cpp -o mobile.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 mobile.so /usr/local/bin/
+
+echo "• Building location.so..."
+g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 location.so /usr/local/bin/
+
+echo "• Building date-time.so..."
+g++ date-time.cpp -o date-time.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 date-time.so /usr/local/bin/
+
+echo "• Building battery.so..."
+g++ -fPIC -shared battery.cpp -o battery.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 battery.so /usr/local/bin/
+
+echo "• Building emulation.so..."
+g++ emulation.cpp -o emulation.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 emulation.so /usr/local/bin/
+
+echo "• Building security.so..."
+g++ -shared -fPIC security.cpp -o security.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
+sudo install -m755 security.so /usr/local/bin/
+
+echo "• Building ethernet.so..."
+g++ -fPIC -shared ethernet.cpp -o ethernet.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 ethernet.so /usr/local/bin/
+
+echo "• Building display.so..."
+g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 display.so /usr/local/bin/
+
+echo "• Building sound.so..."
+g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
+sudo install -m755 sound.so /usr/local/bin/
+
+echo "• Building kernel.so..."
+g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
+sudo install -m755 kernel.so /usr/local/bin/
 
 echo "• Building storage.so..."
 g++ -fPIC -shared storage.cpp -o storage.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 storage.so /usr/local/bin/
 
+echo "• Building accounts.so..."
+g++ -std=c++11 accounts.cpp -o accounts.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 accounts.so /usr/local/bin/
+
 echo "• Building system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 system.so /usr/local/bin/
 
-# Build BOTH modules before installing either, so a compilation failure
-# cannot leave an updated Location module with a missing Date & Time module.
-echo "• Building location.so..."
-if ! g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
-    echo "ERROR: Could not compile location.cpp. Existing location.so was left unchanged." >&2
-    exit 1
-fi
-echo "• Building date-time.so..."
-if ! g++ date-time.cpp -o date-time.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
-    echo "ERROR: Could not compile date-time.cpp. Existing Settings modules were left unchanged." >&2
-    exit 1
-fi
-if ! sudo install -m755 location.so /usr/local/bin/location.so || \
-   ! sudo install -m755 date-time.so /usr/local/bin/date-time.so; then
-    echo "ERROR: Could not install both Settings modules." >&2
-    exit 1
-fi
+echo "• Building ui.so..."
+g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m755 ui.so /usr/local/bin/
 
+echo "• Building reticulum.so..."
+g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~
+#          APPS
+# ~~~~~~~~~~~~~~~~~~~~~~~~
 
 cd "$ALT_ROOT/Alternix"
 
