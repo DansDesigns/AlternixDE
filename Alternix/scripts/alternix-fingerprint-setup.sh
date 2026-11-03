@@ -4,12 +4,13 @@
 # Uses repository packages only; it does not download untrusted vendor drivers.
 set -Eeuo pipefail
 
-SCRIPT_VERSION='1.0.1'
+SCRIPT_VERSION='1.1.0'
 MODE='install'
 ENROLL='ask'
 ENABLE_PAM=0
 TARGET_USER=''
 APT_UPDATE=1
+HARDWARE_ONLY=0
 TTY=0
 [[ -t 0 && -t 1 ]] && TTY=1
 
@@ -17,6 +18,170 @@ say()  { printf '%s\n' "$*"; }
 info() { printf '\n\033[1;36m[Alternix fingerprint]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARNING]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Run each hardware-bus probe in its own short-lived process. Kernel sysfs
+# reads and USB tools can block on malfunctioning hardware; do not trust any
+# individual device query to complete. USB enumeration uses sysfs only:
+# invoking lsusb or lspci is neither required nor safe for initial discovery.
+# `timeout` is provided by coreutils on supported Devuan/Debian systems.
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+
+is_sensor_text() {
+  local value="${1,,}"
+  [[ "$value" =~ fingerprint|finger.print|biometric|authentec|u\.are\.u|touchchip|touchstrip|fprint|vfs[0-9]|fpc102|egistec|elan70[0-9a-f]|goodix.*finger|validity.*sensor|synaptics.*finger|focaltech.*finger ]]
+}
+
+# The manufacturer ID is a useful *hint*, not proof of a fingerprint reader.
+# ELAN and Synaptics manufacture many non-fingerprint input devices as well.
+known_biometric_usb_vendor() {
+  case "${1,,}" in
+    27c6|138a|06cb|04f3|1c7a|10a5|2808|147e|08ff|1b55|2541|347d) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+sysfs_text() {
+  local value=''
+  if [[ -r "$1" ]]; then
+    IFS= read -r value < "$1" || true
+  fi
+  printf '%s' "$value"
+}
+
+# Used only in a time-limited child: no command execution or D-Bus here.
+# Its output is a small machine-readable stream for the parent.
+scan_one_bus() {
+  local bus="$1" d name vendor product desc manufacturer modalias hid text seen=0
+  shopt -s nullglob
+  case "$bus" in
+    usb)
+      for d in /sys/bus/usb/devices/*; do
+        [[ -r "$d/idVendor" && -r "$d/idProduct" ]] || continue
+        seen=$((seen + 1))
+        vendor="$(sysfs_text "$d/idVendor")"
+        product="$(sysfs_text "$d/idProduct")"
+        desc="$(sysfs_text "$d/product")"
+        manufacturer="$(sysfs_text "$d/manufacturer")"
+        text="${manufacturer} ${desc}"
+        # Show every USB ID so unidentified readers can still be researched.
+        printf 'INVENTORY\t%s:%s %s\n' "$vendor" "$product" "${text:-unknown device}"
+        if is_sensor_text "$text"; then
+          printf 'CANDIDATE\tUSB %s:%s (%s)\n' "$vendor" "$product" "$text"
+        elif known_biometric_usb_vendor "$vendor"; then
+          printf 'HINT\tUSB %s:%s (possible biometric vendor; verify device type) - %s\n' "$vendor" "$product" "$text"
+        fi
+      done ;;
+    hid)
+      for d in /sys/bus/hid/devices/*; do
+        [[ -r "$d/uevent" ]] || continue
+        seen=$((seen + 1))
+        name="${d##*/}"
+        text="$(cat "$d/uevent" 2>/dev/null || true)"
+        if is_sensor_text "$name $text"; then
+          printf 'CANDIDATE\tHID %s - %s\n' "$name" "$(printf '%s' "$text" | tr '\n' ' ')"
+        fi
+      done ;;
+    spi|i2c)
+      for d in /sys/bus/"$bus"/devices/*; do
+        [[ -d "$d" ]] || continue
+        seen=$((seen + 1))
+        name="${d##*/}"
+        modalias="$(sysfs_text "$d/modalias")"
+        text="$name $modalias $(sysfs_text "$d/name")"
+        if is_sensor_text "$text"; then
+          printf 'CANDIDATE\t%s %s\n' "${bus^^}" "$text"
+        fi
+      done ;;
+    acpi)
+      for d in /sys/bus/acpi/devices/*; do
+        [[ -d "$d" ]] || continue
+        seen=$((seen + 1))
+        name="${d##*/}"
+        hid="$(sysfs_text "$d/hid")"
+        modalias="$(sysfs_text "$d/modalias")"
+        text="$name $hid $modalias"
+        if is_sensor_text "$text"; then
+          printf 'CANDIDATE\tACPI %s\n' "$text"
+        fi
+      done ;;
+    pci)
+      for d in /sys/bus/pci/devices/*; do
+        [[ -r "$d/vendor" && -r "$d/device" ]] || continue
+        seen=$((seen + 1))
+        text="${d##*/} $(sysfs_text "$d/vendor"):$(sysfs_text "$d/device") $(sysfs_text "$d/modalias")"
+        if is_sensor_text "$text"; then
+          printf 'CANDIDATE\tPCI %s\n' "$text"
+        fi
+      done ;;
+    *) return 2 ;;
+  esac
+  printf 'COUNT\t%s\n' "$seen"
+}
+
+# Direct internal entry point must run *before* the normal CLI initializes.
+# No privilege changes, package manager or authentication modifications here.
+if [[ "${1:-}" == '--_probe-bus' ]]; then
+  [[ $# == 2 ]] || exit 2
+  scan_one_bus "$2"
+  exit $?
+fi
+
+CANDIDATES=0
+HINTS=0
+USB_INVENTORY=0
+show_candidate() {
+  say "  $1"
+  CANDIDATES=$((CANDIDATES + 1))
+}
+scan_hardware() {
+  info 'Scanning USB, HID, SPI, I2C, ACPI and PCI (each with a hard timeout)'
+  command -v timeout >/dev/null 2>&1 || fail 'GNU timeout (coreutils) is required to prevent stalled hardware scans.'
+  local bus deadline output status=0 line data count
+  for bus in usb hid spi i2c acpi pci; do
+    case "$bus" in
+      usb) deadline=6 ;;
+      acpi) deadline=5 ;;
+      *) deadline=4 ;;
+    esac
+    say "  Probing ${bus^^} (maximum ${deadline}s)..."
+    status=0
+    # An unresponsive USB device cannot freeze the entire installer now.
+    output="$(timeout --kill-after=1s "${deadline}s" bash "$SCRIPT_PATH" --_probe-bus "$bus" 2>&1)" || status=$?
+    count=''
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        $'CANDIDATE\t'*) data="${line#*$'\t'}"; show_candidate "$data" ;;
+        $'HINT\t'*) data="${line#*$'\t'}"; say "    Possible device: $data"; HINTS=$((HINTS + 1)) ;;
+        $'INVENTORY\t'*)
+          data="${line#*$'\t'}"
+          if [[ "$bus" == usb ]]; then
+            say "    USB $data"
+            USB_INVENTORY=$((USB_INVENTORY + 1))
+          fi ;;
+        $'COUNT\t'*) count="${line#*$'\t'}" ;;
+        *) [[ -z "$line" ]] || say "    $line" ;;
+      esac
+    done <<< "$output"
+    if (( status == 124 || status == 137 )); then
+      warn "${bus^^} probe timed out after ${deadline}s; moving on to the next bus."
+    elif (( status != 0 )); then
+      warn "${bus^^} probe failed (exit code ${status}); continuing."
+    else
+      say "    Finished ${bus^^}: ${count:-0} device entries inspected."
+    fi
+  done
+  if (( CANDIDATES == 0 )); then
+    warn 'No fingerprint reader positively suggested by descriptors. A generic/unsupported reader may still exist.'
+  else
+    say "Found $CANDIDATES potential fingerprint descriptor(s) (repeats across buses possible)."
+  fi
+  if (( HINTS > 0 )); then
+    say "$HINTS device(s) use manufacturers associated with fingerprint readers; those IDs require checking."
+  fi
+  if (( USB_INVENTORY == 0 )); then
+    warn 'No USB entries returned. If USB itself timed out, the kernel/device may be stalled.'
+  fi
+}
 
 usage() {
   cat <<'HELP'
@@ -29,6 +194,7 @@ fprintd recognises the reader; optionally enroll a fingerprint.
 
 Options:
   --scan          Probe hardware and existing fprintd; install nothing.
+  --hardware-only In --scan mode, skip fprintd/D-Bus probes.
   --no-enroll     Install and test only; do not offer fingerprint enrollment.
   --enroll        Attempt interactive enrollment when a reader is found.
   --user NAME     User to enroll (default: original sudo user).
@@ -46,6 +212,7 @@ HELP
 while (($#)); do
   case "$1" in
     --scan) MODE='scan'; shift ;;
+    --hardware-only) HARDWARE_ONLY=1; MODE='scan'; shift ;;
     --no-enroll) ENROLL='no'; shift ;;
     --enroll) ENROLL='yes'; shift ;;
     --enable-pam) ENABLE_PAM=1; shift ;;
@@ -88,94 +255,6 @@ else
 fi
 say "Target user: ${TARGET_USER:-not selected}"
 
-# Scan across exposed buses. Descriptor matching finds *candidates*, not proof
-# of a working fingerprint sensor. fprintd's live D-Bus enumeration is decisive.
-CANDIDATES=0
-HINTS=0
-is_sensor_text() {
-  local value="${1,,}"
-  [[ "$value" =~ fingerprint|finger.print|biometric|authentec|u\.are\.u|touchchip|touchstrip|fprint|vfs[0-9]|fpc102|egistec|elan70[0-9a-f]|goodix.*finger|validity.*sensor ]]
-}
-show_candidate() {
-  say "  $1"
-  CANDIDATES=$((CANDIDATES + 1))
-}
-scan_hardware() {
-  info 'Scanning USB, HID, SPI, ACPI and PCI for fingerprint hardware'
-  local d vendor product label manufacturer description modalias item text entry
-
-  shopt -s nullglob
-  for d in /sys/bus/usb/devices/*; do
-    [[ -r "$d/idVendor" && -r "$d/idProduct" ]] || continue
-    vendor="$(cat "$d/idVendor")"; product="$(cat "$d/idProduct")"
-    label=''; manufacturer=''
-    [[ ! -r "$d/product" ]] || label="$(cat "$d/product")"
-    [[ ! -r "$d/manufacturer" ]] || manufacturer="$(cat "$d/manufacturer")"
-    text="$manufacturer $label"
-    if is_sensor_text "$text"; then
-      show_candidate "USB ${vendor}:${product} - ${text:-unknown}"
-    fi
-  done
-
-  for d in /sys/bus/hid/devices/*; do
-    [[ -r "$d/uevent" ]] || continue
-    text="$(grep -E '^(HID_NAME|HID_ID|HID_UNIQ)=' "$d/uevent" | sed '/HID_UNIQ=/d' || true)"
-    if is_sensor_text "$text"; then
-      show_candidate "HID $(basename "$d") - $text"
-    fi
-  done
-
-  for d in /sys/bus/spi/devices/*; do
-    modalias=''
-    [[ ! -r "$d/modalias" ]] || modalias="$(cat "$d/modalias")"
-    if is_sensor_text "$(basename "$d") $modalias"; then
-      show_candidate "SPI $(basename "$d") - $modalias"
-    fi
-  done
-
-  for d in /sys/bus/acpi/devices/*; do
-    description=''; modalias=''
-    [[ ! -r "$d/hid" ]] || description="$(cat "$d/hid")"
-    [[ ! -r "$d/modalias" ]] || modalias="$(cat "$d/modalias")"
-    text="$(basename "$d") $description $modalias"
-    if is_sensor_text "$text"; then
-      show_candidate "ACPI ${description:-$(basename "$d")} - $modalias"
-    fi
-  done
-  shopt -u nullglob
-
-  if command -v lspci >/dev/null 2>&1; then
-    while IFS= read -r entry; do
-      [[ -n "$entry" ]] || continue
-      if is_sensor_text "$entry"; then
-        show_candidate "PCI $entry"
-      fi
-    done < <(lspci -nn 2>/dev/null || true)
-  fi
-
-  if command -v lsusb >/dev/null 2>&1; then
-    while IFS= read -r entry; do
-      [[ -n "$entry" ]] || continue
-      if is_sensor_text "$entry"; then
-        # Some devices have empty sysfs names but a descriptive USB ID database.
-        show_candidate "USB database: $entry"
-      fi
-    done < <(lsusb 2>/dev/null || true)
-  fi
-
-  if (( CANDIDATES == 0 )); then
-    warn 'No recognisable fingerprint descriptor found. Some readers identify generically, so this is not conclusive.'
-  else
-    say "Found $CANDIDATES possible device descriptor(s) (duplicates across buses are expected)."
-  fi
-
-  if command -v lsusb >/dev/null 2>&1; then
-    say ''
-    say 'USB inventory (use device IDs to research unsupported readers):'
-    lsusb || true
-  fi
-}
-
 # D-Bus speaks directly to the fprintd Manager; it works with SysVinit and does
 # not require systemctl. Fall back to fprintd-list output for older versions.
 FPRINT_READER=0
@@ -189,7 +268,7 @@ check_fprintd() {
   fi
   local reply='' status=0
   if command -v dbus-send >/dev/null 2>&1; then
-    reply="$(dbus-send --system --print-reply --reply-timeout=8000 \
+    reply="$(timeout --kill-after=1s 6s dbus-send --system --print-reply --reply-timeout=4000 \
       --dest=net.reactivated.Fprint /net/reactivated/Fprint/Manager \
       net.reactivated.Fprint.Manager.GetDevices 2>&1)" || status=$?
     if (( status == 0 )); then
@@ -204,8 +283,12 @@ check_fprintd() {
     fi
   fi
   if [[ -n "$TARGET_USER" ]]; then
-    FPRINT_CHECK_LOG="$(fprintd-list "$TARGET_USER" 2>&1)" || true
-    say "$FPRINT_CHECK_LOG"
+    status=0
+    FPRINT_CHECK_LOG="$(timeout --kill-after=1s 8s fprintd-list "$TARGET_USER" 2>&1)" || status=$?
+    if (( status == 124 || status == 137 )); then
+      warn 'fprintd-list did not respond within 8 seconds; skipping it.'
+    fi
+    [[ -z "$FPRINT_CHECK_LOG" ]] || say "$FPRINT_CHECK_LOG"
     if grep -Eqi '^found [1-9][0-9]* devices|Device at /net/reactivated/Fprint/Device/|Using device /net/reactivated/Fprint/Device/' <<< "$FPRINT_CHECK_LOG"; then
       FPRINT_READER=1
     fi
@@ -221,7 +304,7 @@ check_fprintd() {
 start_dbus_if_needed() {
   local ready=0
   if command -v dbus-send >/dev/null 2>&1 && \
-     dbus-send --system --print-reply --reply-timeout=4000 \
+     timeout --kill-after=1s 5s dbus-send --system --print-reply --reply-timeout=3000 \
        --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
     ready=1
   fi
@@ -229,9 +312,9 @@ start_dbus_if_needed() {
   warn 'The system D-Bus is not currently responding.'
   if [[ -x /etc/init.d/dbus ]]; then
     info 'Starting D-Bus using the SysVinit service'
-    /etc/init.d/dbus start || warn 'Could not start dbus; fprintd may not be usable yet.'
+    timeout --kill-after=2s 12s /etc/init.d/dbus start || warn 'Could not start dbus; fprintd may not be usable yet.'
   elif command -v service >/dev/null 2>&1; then
-    service dbus start || warn 'Could not start dbus.'
+    timeout --kill-after=2s 12s service dbus start || warn 'Could not start dbus.'
   else
     warn 'No D-Bus init script was found; start the system bus before enrolling.'
   fi
@@ -285,7 +368,7 @@ verify_fingerprint() {
   (( TTY )) || { warn 'Live verification needs an interactive terminal.'; return 1; }
   info "Verifying the fingerprint for $TARGET_USER"
   local result=0 output=''
-  output="$(fprintd-verify "$TARGET_USER" 2>&1)" || result=$?
+  output="$(timeout --kill-after=2s 90s fprintd-verify "$TARGET_USER" 2>&1)" || result=$?
   say "$output"
   # Some fprintd versions can finish the CLI interaction even on a mismatch.
   # Require an actual match, not just a successful process exit.
@@ -303,7 +386,7 @@ enroll_and_verify() {
   (( TTY )) || { warn 'Enrollment requires an interactive terminal. Run: fprintd-enroll (as your normal user).'; return 1; }
   info "Enroll a fingerprint for $TARGET_USER"
   say 'Follow the prompts to touch/swipe the sensor repeatedly.'
-  if ! fprintd-enroll "$TARGET_USER"; then
+  if ! timeout --kill-after=2s 180s fprintd-enroll "$TARGET_USER"; then
     warn 'Enrollment failed. Check whether the sensor is supported or already in use.'
     return 1
   fi
@@ -348,7 +431,9 @@ enable_pam_safely() {
 info "AlternixOS fingerprint setup $SCRIPT_VERSION"
 scan_hardware
 if [[ "$MODE" == scan ]]; then
-  if command -v fprintd-list >/dev/null 2>&1; then check_fprintd || true; fi
+  if (( HARDWARE_ONLY == 0 )) && command -v fprintd-list >/dev/null 2>&1; then
+    check_fprintd || true
+  fi
   info 'Scan finished — no packages, fingerprints or PAM configuration changed'
   exit 0
 fi
