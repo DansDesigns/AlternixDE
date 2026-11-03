@@ -247,6 +247,12 @@ class ScrollerBar:
         if not self._visible:
             self._sync()
             return
+        # Onboard and other dock clients can alter the available screen area
+        # without a screens_reconfigured event. A gesture-triggered Scroller
+        # layout pass must move the strip to the *current* usable bottom edge,
+        # not leave it at a stale y coordinate.
+        if self._reposition():
+            self._raise_soon()
         self.draw()
 
     # --------------------------------------------------------------- drawing

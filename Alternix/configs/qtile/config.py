@@ -217,8 +217,40 @@ def _osm_lockclean():
 def lock_on_resume():
     subprocess.Popen(["osm-lockd"])
 
+def _configure_onboard_workarea():
+    """Keep Onboard docked without giving Qtile an extra bottom reservation.
+
+    Onboard's docking-shrink-workarea option advertises an X11 strut. Qtile
+    already reserves the bottom taskbar and our Scroller its own scrollbar;
+    with all three active, a later swipe-triggered relayout can leave a blank
+    strip, and Onboard hiding may not immediately clear its old reservation.
+    Leave docking and the user's keyboard sizing/position preferences alone.
+    """
+    try:
+        subprocess.run(
+            ["gsettings", "set", "org.onboard.window",
+             "docking-shrink-workarea", "false"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        # A missing GSettings backend should not stop Qtile from starting.
+        pass
+
+
+def _launch_onboard(qtile_obj):
+    # Also configure the option before a toolbar launch, since Qtile config
+    # reloads do not necessarily re-run the startup hook.
+    _configure_onboard_workarea()
+    subprocess.Popen(["onboard"])
+
+
 @hook.subscribe.startup
 def autostart():
+    # Apply for keyboard launches from any source, not only our bottom bar.
+    _configure_onboard_workarea()
     # Autostart Programs
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['picom', '-b'])
@@ -529,7 +561,7 @@ screens = [
                 widget.Spacer(length=bar.STRETCH),
                 # COMMENT OUT THE NEXT 3 LINES TO REMOVE THE KEYBOARD BUTTON:
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
-                             mouse_callbacks={'Button1': lazy.spawn("onboard")}),
+                             mouse_callbacks={'Button1': lazy.function(_launch_onboard)}),
                 widget.Spacer(length=15),
             ], size=40, margin=[0, 0, 0, 0], background=bg,
         ),
