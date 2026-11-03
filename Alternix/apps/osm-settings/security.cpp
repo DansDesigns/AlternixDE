@@ -910,7 +910,7 @@ void SecurityPage::finishClamScan(bool started, int exitCode, QProcess::ExitStat
     m_scanTimer->stop();
     const bool cancelled = m_scanCancelRequested;
     const bool hasSummary = m_scanTranscript.contains("SCAN SUMMARY", Qt::CaseInsensitive);
-    const QRegularExpression infectedRegex("Infected files:\s*(\d+)", QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpression infectedRegex("Infected files:\\s*(\\d+)", QRegularExpression::CaseInsensitiveOption);
     const QRegularExpressionMatch match = infectedRegex.match(m_scanTranscript);
     const int detections = match.hasMatch() ? match.captured(1).toInt() : -1;
     QString status;

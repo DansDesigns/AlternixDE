@@ -316,11 +316,11 @@ enum class VolumeGroup { Notifications, Media, Calls, Alarms };
 static QStringList restoreRoles(VolumeGroup group) {
     QStringList roles;
     switch (group) {
-    case VolumeGroup::Notifications: roles = {"event", "notification"}; break;
-    case VolumeGroup::Media: roles = {"music", "video", "movie", "game",
-                                      "animation", "production"}; break;
-    case VolumeGroup::Calls: roles = {"phone", "communication"}; break;
-    case VolumeGroup::Alarms: roles = {"alarm"}; break;
+    case VolumeGroup::Notifications: roles << "event" << "notification"; break;
+    case VolumeGroup::Media: roles << "music" << "video" << "movie" << "game"
+                                   << "animation" << "production"; break;
+    case VolumeGroup::Calls: roles << "phone" << "communication"; break;
+    case VolumeGroup::Alarms: roles << "alarm"; break;
     }
     QStringList ids;
     for (const QString &role : roles)
