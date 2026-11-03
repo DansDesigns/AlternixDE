@@ -393,6 +393,12 @@ public:
     QMap<QString, QFrame*> deviceFrames;
     QSet<QString> pollsInFlight;
     QSet<QString> togglesInFlight;
+    // A single slow/empty status query is not evidence of disconnection.
+    QMap<QString, int> failedStatusReads;
+    QMap<QString, int> emptyConnectionReads;
+    QString lastWifiSsid;
+    int lastWifiSignal = -1;
+    int zeroWifiSignalReads = 0;
     QMap<QString, qint64> lastErrorUntil;
     QMap<QString, QString> lastErrorMessage;
     QString modemId;
@@ -787,8 +793,10 @@ public:
                                lastErrorMessage.value(key).left(65));
                 label->setToolTip(lastErrorMessage.value(key));
             } else {
-                label->setText(detail.isEmpty() ? text : text + "\n" + detail);
-                label->setToolTip(detail);
+                const QString rendered = detail.isEmpty() ? text : text + "\n" + detail;
+                // Avoid forcing repaints on every refresh when nothing changed.
+                if (label->text() != rendered) label->setText(rendered);
+                if (label->toolTip() != detail) label->setToolTip(detail);
             }
         }
         if (QFrame *frame = deviceFrames.value(key, nullptr)) {
@@ -836,64 +844,147 @@ public:
         setDeviceState("rotation", QFileInfo::exists(rotateScriptPath()), rotateOn,
             rotateOn ? (monitor ? "Sensor active" : "Monitor not running") : "Rotation locked");
 
+        // Two-phase Wi-Fi refresh: never replace a confirmed SSID/signal with
+        // a temporary "Radio enabled" message while a second nmcli query runs.
         pollCommand("wifi", "nmcli", {"radio", "wifi"},
             [this](const QString &out, bool ok) {
+                if (togglesInFlight.contains("wifi")) return;
                 const QString value = out.trimmed().toLower();
                 if (!ok || (value != "enabled" && value != "disabled")) {
-                    setDeviceState("wifi", false, false, "NetworkManager unavailable");
+                    // A timed-out nmcli query must not flash 'off' or erase a
+                    // connected network. Only mark it unavailable if repeated.
+                    if (++failedStatusReads["wifi"] == 3)
+                        setDeviceState("wifi", false, false, "NetworkManager status unavailable");
                     return;
                 }
-                const bool enabled = value == "enabled";
-                const int signal = wifiSignalPercent();
-                const QString signalText = (signal >= 0)
-                    ? QString("%1% signal").arg(signal) : "Radio enabled";
-                setDeviceState("wifi", true, enabled, enabled ? signalText : "Radio disabled");
-                if (enabled) pollCommand("wifi-ssid", "nmcli",
-                    {"-t", "-f", "IN-USE,SSID", "device", "wifi", "list", "--rescan", "no"},
+                failedStatusReads["wifi"] = 0;
+                if (value == "disabled") {
+                    emptyConnectionReads["wifi"] = 0;
+                    lastWifiSsid.clear();
+                    lastWifiSignal = -1;
+                    zeroWifiSignalReads = 0;
+                    setDeviceState("wifi", true, false, "Radio disabled");
+                    return;
+                }
+
+                // Only show the generic message on the first reading or a
+                // genuine off -> on transition, not at every polling interval.
+                const DeviceState previous = devices.value("wifi");
+                if (!previous.known || !previous.enabled)
+                    setDeviceState("wifi", true, true, "Radio enabled");
+
+                pollCommand("wifi-ssid", "nmcli",
+                    {"-t", "-e", "no", "-f", "IN-USE,SSID,SIGNAL",
+                     "device", "wifi", "list", "--rescan", "no"},
                     [this](const QString &ssids, bool valid) {
-                        if (!valid || !devices.value("wifi").enabled) return;
+                        if (!valid || togglesInFlight.contains("wifi") ||
+                            !devices.value("wifi").enabled) return;
                         for (const QString &line : ssids.split('\n')) {
-                            if (line.startsWith("*:")) {
-                                const int percent = wifiSignalPercent();
-                                const QString name = line.mid(2).trimmed();
-                                setDeviceState("wifi", true, true,
-                                    percent < 0 ? name :
-                                    QString("%1% · %2").arg(percent).arg(name));
-                                break;
+                            if (!line.startsWith("*:")) continue;
+                            const QString inUse = line.mid(2);
+                            const int separator = inUse.lastIndexOf(':');
+                            const QString ssid = (separator >= 0 ? inUse.left(separator)
+                                                                  : inUse).trimmed();
+                            if (ssid.isEmpty()) continue;
+                            bool numeric = false;
+                            int signal = (separator >= 0 ? inUse.mid(separator + 1).trimmed()
+                                                         : QString()).toInt(&numeric);
+                            if (!numeric || signal < 0 || signal > 100)
+                                signal = wifiSignalPercent();
+                            if (ssid != lastWifiSsid) {
+                                lastWifiSsid = ssid;
+                                lastWifiSignal = -1;
+                                zeroWifiSignalReads = 0;
                             }
+                            // NM may briefly report 0 or an unknown signal
+                            // during an AP refresh. Retain the last confirmed
+                            // reading until the 0% value is seen twice.
+                            if (signal > 0) {
+                                lastWifiSignal = signal;
+                                zeroWifiSignalReads = 0;
+                            } else if (signal == 0) {
+                                if (++zeroWifiSignalReads >= 2) lastWifiSignal = 0;
+                            }
+                            emptyConnectionReads["wifi"] = 0;
+                            // A single zero reading is not proof of lost signal.
+                            // The card may show the SSID alone until confirmed.
+                            const int percent = lastWifiSignal >= 0 ? lastWifiSignal :
+                                                (signal == 0 ? -1 : signal);
+                            const QString detail = (percent < 0)
+                                ? ssid : QString("%1% · %2").arg(percent).arg(ssid);
+                            if (devices.value("wifi").detail != detail)
+                                setDeviceState("wifi", true, true, detail);
+                            return;
+                        }
+                        // Do not interpret one empty/partially updated AP list
+                        // as loss of the current connection.
+                        // The AP list can be empty while NetworkManager is
+                        // updating its cache. An associated kernel interface
+                        // independently confirms that the Wi-Fi link still exists.
+                        const QString iface = detectWifiInterface();
+                        const QString carrier = iface.isEmpty() ? QString() :
+                            readFile("/sys/class/net/" + iface + "/carrier");
+                        if (carrier == "1") {
+                            emptyConnectionReads["wifi"] = 0;
+                            return;
+                        }
+                        if (++emptyConnectionReads["wifi"] >= 2) {
+                            lastWifiSsid.clear();
+                            lastWifiSignal = -1;
+                            zeroWifiSignalReads = 0;
+                            if (devices.value("wifi").detail != "Not connected")
+                                setDeviceState("wifi", true, true, "Not connected");
                         }
                     });
             });
 
+        // Keep the last confirmed connected-device name while checking power.
+        // Bluetooth power-off is applied immediately once BlueZ confirms it.
         pollCommand("bluetooth", "bluetoothctl", {"show"},
             [this](const QString &out, bool ok) {
-                if (!ok || out.contains("No default controller", Qt::CaseInsensitive)) {
-                    setDeviceState("bluetooth", false, false, "No usable Bluetooth adapter");
-                    return;
-                }
+                if (togglesInFlight.contains("bluetooth")) return;
                 QRegularExpression re("(?:^|\\n)\\s*Powered:\\s*(yes|no)",
                                       QRegularExpression::CaseInsensitiveOption);
                 auto m = re.match(out);
-                if (!m.hasMatch()) {
-                    setDeviceState("bluetooth", false, false, "Cannot read adapter power");
+                if (!ok || !m.hasMatch()) {
+                    if (++failedStatusReads["bluetooth"] == 3)
+                        setDeviceState("bluetooth", false, false,
+                            out.contains("No default controller", Qt::CaseInsensitive)
+                                ? "No usable Bluetooth adapter" : "Bluetooth status unavailable");
                     return;
                 }
+                failedStatusReads["bluetooth"] = 0;
                 const bool powered = m.captured(1).compare("yes", Qt::CaseInsensitive) == 0;
-                setDeviceState("bluetooth", true, powered,
-                               powered ? "Adapter powered" : "Adapter switched off");
-                if (powered) pollCommand("bluetooth-connected", "bluetoothctl",
+                if (!powered) {
+                    emptyConnectionReads["bluetooth"] = 0;
+                    setDeviceState("bluetooth", true, false, "Adapter switched off");
+                    return;
+                }
+                const DeviceState previous = devices.value("bluetooth");
+                if (!previous.known || !previous.enabled)
+                    setDeviceState("bluetooth", true, true, "Adapter powered");
+
+                pollCommand("bluetooth-connected", "bluetoothctl",
                     {"devices", "Connected"},
                     [this](const QString &devicesText, bool valid) {
-                        if (!valid || !devices.value("bluetooth").enabled) return;
+                        if (!valid || togglesInFlight.contains("bluetooth") ||
+                            !devices.value("bluetooth").enabled ||
+                            devicesText.contains("Invalid command", Qt::CaseInsensitive) ||
+                            devicesText.contains("Too many arguments", Qt::CaseInsensitive) ||
+                            devicesText.contains("Error:", Qt::CaseInsensitive)) return;
                         for (const QString &line : devicesText.split('\n')) {
                             if (!line.startsWith("Device ")) continue;
                             const QString name = line.mid(7).section(' ', 1).trimmed();
-                            if (!name.isEmpty()) {
+                            if (name.isEmpty()) continue;
+                            emptyConnectionReads["bluetooth"] = 0;
+                            if (devices.value("bluetooth").detail != name)
                                 setDeviceState("bluetooth", true, true, name);
-                                return;
-                            }
+                            return;
                         }
-                        setDeviceState("bluetooth", true, true, "No device connected");
+                        // BlueZ sometimes returns a transient empty list.
+                        if (++emptyConnectionReads["bluetooth"] >= 2 &&
+                            devices.value("bluetooth").detail != "No device connected")
+                            setDeviceState("bluetooth", true, true, "No device connected");
                     });
             });
 
