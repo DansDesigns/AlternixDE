@@ -19,6 +19,7 @@
 #include <QAbstractItemView>
 #include <QDate>
 #include <QFont>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
@@ -709,11 +710,17 @@ protected:
         p.setBrush(QColor(40, 40, 40, m_bgAlpha));
         p.drawRoundedRect(QRectF(rect()).adjusted(1, 1, -1, -1), 18, 18);
 
-        drawHeader(p);
-        if (m_mode == ViewFull) drawFullView(p);
-        else if (m_mode == ViewWeek) drawWeekView(p);
-        else drawTodayView(p);
-        drawFooter(p);
+        // Today is a deliberately compact standalone layout.  Do not draw
+        // the full-calendar header, navigation, or footer over it: at small
+        // sizes those elements previously crowded out readable information.
+        if (m_mode == ViewToday) {
+            drawTodayView(p);
+        } else {
+            drawHeader(p);
+            if (m_mode == ViewFull) drawFullView(p);
+            else drawWeekView(p);
+            drawFooter(p);
+        }
     }
 
     void mousePressEvent(QMouseEvent *e) override {
@@ -732,6 +739,9 @@ protected:
         m_pressed = false;
         if ((e->pos() - m_pressPos).manhattanLength() > 12) { e->accept(); return; }
         const QPointF pt = e->pos();
+        // Today contains no tiny or invisible navigation controls.  Use the
+        // normal widget settings to change the saved Galactic Signature.
+        if (m_mode == ViewToday) { e->accept(); return; }
         if (signatureButtonRect().contains(pt)) {
             openSignaturePicker();
         } else if (prevRect().contains(pt)) {
@@ -982,58 +992,143 @@ private:
         }
     }
 
+    // Compact, resizable Today view: only the Gregorian date, the daily Kin
+    // (number + coloured solar seal), and its Galactic tone (Mayan dots/bars).
+    // Font sizes are calculated independently of the large full-calendar
+    // scaleUnit(), with a readable 16px floor at 320x240 and above.
     void drawTodayView(QPainter &p) {
-        const double u = scaleUnit();
-        const QRectF area = contentRect();
+        const QRectF bounds = QRectF(rect()).adjusted(1, 1, -1, -1);
+        const qreal w = bounds.width();
+        const qreal h = bounds.height();
+        if (w <= 0 || h <= 0) return;
+
         const int kin = kinForDate(m_focusDate);
+        const qreal margin = qBound<qreal>(9, qMin(w, h) * 0.045, 26);
+        const QRectF inner = bounds.adjusted(margin, margin, -margin, -margin);
+        const bool portrait = inner.height() > inner.width() * 1.10;
+        const qreal k = qBound<qreal>(1.0, qMin(w / 340.0, h / 270.0), 2.15);
+        const int dateSize = qBound(17, int(19 * k), 34);
+        const int kinSize = qBound(30, int(35 * k), 65);
+        const int nameSize = qBound(16, int(18 * k), 32);
+        const int toneSize = qBound(16, int(18 * k), 33);
+        const QColor text = m_textColour;
+        const QColor accent = kin > 0 ? sealColour((kin - 1) % 20) : m_accentColour;
 
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1));
-        p.setBrush(QColor(255, 255, 255, 18));
-        p.drawRoundedRect(area, 16, 16);
+        // Keep date and Kin text readable even when horizontal space is tight.
+        auto fitSingleLine = [&](const QString &value, QRectF box, int desired,
+                                 int floorSize, const QColor &colour, bool bold) {
+            QFont font = p.font();
+            font.setFamily("Sans Serif");
+            font.setBold(bold);
+            int px = desired;
+            while (px > floorSize) {
+                font.setPixelSize(px);
+                if (QFontMetrics(font).horizontalAdvance(value) <= box.width() - 4) break;
+                --px;
+            }
+            font.setPixelSize(px);
+            p.setPen(colour);
+            p.setFont(font);
+            p.drawText(box, Qt::AlignCenter | Qt::TextSingleLine, value);
+        };
 
-        p.setPen(m_textColour);
-        setPainterFont(p, int(18 * u), true);
-        p.drawText(QRectF(area.x(), area.y() + 18 * u, area.width(), 28 * u), Qt::AlignCenter,
-                   m_focusDate.toString("dddd d MMMM yyyy"));
-
-        if (kin == 0) {
-            p.setPen(m_accentColour);
-            setPainterFont(p, int(40 * u), true);
-            p.drawText(QRectF(area.x(), area.y() + 80 * u, area.width(), 56 * u), Qt::AlignCenter, "0.0 Hunab Ku");
-            p.setPen(m_textColour);
-            setPainterFont(p, int(16 * u));
-            p.drawText(QRectF(area.x() + 20 * u, area.y() + 150 * u, area.width() - 40 * u, 80 * u),
-                       Qt::AlignCenter | Qt::TextWordWrap,
-                       "Leap Day is treated as a timeless day outside the 260-kin spin.");
+        const QString dateLabel = m_focusDate.toString("ddd d MMM yyyy");
+        if (kin == 0) { // 29 February, 0.0 Hunab Ku
+            fitSingleLine(dateLabel, QRectF(inner.left(), inner.top(), inner.width(), 36 * k),
+                          dateSize, 16, text, true);
+            fitSingleLine("0.0 Hunab Ku", QRectF(inner.left(), inner.center().y() - 42 * k,
+                                                inner.width(), 84 * k),
+                          kinSize, 24, m_accentColour, true);
             return;
         }
 
-        QColor sig = tonedCellColour((kin - 1) % 20, 170);
-        QRectF badge(area.center().x() - 96 * u, area.y() + 68 * u, 192 * u, 48 * u);
-        p.setPen(Qt::NoPen);
-        p.setBrush(sig);
-        p.drawRoundedRect(badge, 16, 16);
-        p.setPen(readableTextFor(sig));
-        setPainterFont(p, int(24 * u), true);
-        p.drawText(badge, Qt::AlignCenter, QString("Kin %1").arg(kin));
+        const int tone = ((kin - 1) % 13) + 1;
+        const int sealIndex = (kin - 1) % 20;
+        const QString title = QString("Kin %1").arg(kin);
+        const QString name = signatureShort(kin);
+        const QString toneLabel = QString("Tone %1 · %2")
+                                      .arg(tone)
+                                      .arg(QString::fromLatin1(kToneNames[tone - 1]));
 
-        p.setPen(m_textColour);
-        setPainterFont(p, int(22 * u), true);
-        p.drawText(QRectF(area.x() + 20 * u, area.y() + 140 * u, area.width() - 40 * u, 34 * u),
-                   Qt::AlignCenter, signatureShort(kin));
-        setPainterFont(p, int(16 * u));
-        p.drawText(QRectF(area.x() + 20 * u, area.y() + 186 * u, area.width() - 40 * u, 28 * u),
-                   Qt::AlignCenter, kinDetailLine(kin));
-        drawKinEmblem(p, QRectF(area.center().x() - 77 * u, area.y() + 234 * u,
-                                154 * u, 161 * u), kin, m_accentColour, false);
-        p.setPen(QColor(m_textColour.red(), m_textColour.green(), m_textColour.blue(), 225));
-        setPainterFont(p, int(14 * u));
-        p.drawText(QRectF(area.x() + 24 * u, area.y() + 404 * u, area.width() - 48 * u, 66 * u),
-                   Qt::AlignCenter | Qt::TextWordWrap,
-                   m_myKin == 0 ? "Set your Gregorian birth date in widget settings." :
-                   kin == m_myKin ? "✦ This is your Galactic Signature today." :
-                                    QString("Your Galactic Signature: Kin %1 · %2")
-                                        .arg(m_myKin).arg(signatureShort(m_myKin)));
+        // Portrait: date, Kin, coloured seal and Mayan tone, tone name.
+        if (portrait) {
+            const qreal dateH = 36 * k;
+            const qreal kinH = 51 * k;
+            const qreal nameH = 47 * k;
+            const qreal toneLabelH = 32 * k;
+            fitSingleLine(dateLabel, QRectF(inner.left(), inner.top(), inner.width(), dateH),
+                          dateSize, 16, text, true);
+            const qreal ky = inner.top() + dateH + 4 * k;
+            fitSingleLine(title, QRectF(inner.left(), ky, inner.width(), kinH),
+                          kinSize, 27, accent, true);
+
+            // The longer signatures wrap over two lines; they never shrink
+            // down to illegible 9px text to fit a single line.
+            p.setPen(text);
+            setPainterFont(p, nameSize, true);
+            p.drawText(QRectF(inner.left() + 4, ky + kinH, inner.width() - 8, nameH),
+                       Qt::AlignCenter | Qt::TextWordWrap, name);
+
+            const qreal artTop = ky + kinH + nameH + 6 * k;
+            const qreal artBottom = inner.bottom() - toneLabelH - 7 * k;
+            const qreal artH = qMax<qreal>(14, artBottom - artTop);
+            const qreal artW = qMin(inner.width() * 0.77, artH * 0.89);
+            const QRectF art(inner.center().x() - artW / 2, artTop, artW, artH);
+            const qreal markH = art.height() * 0.27;
+            drawToneGlyph(p, QRectF(art.center().x() - art.width() * 0.32,
+                                    art.top(), art.width() * 0.64, markH),
+                          tone, text);
+            const qreal sealSize = qMin(art.width(), art.height() - markH - 3);
+            drawSealSymbol(p, QRectF(art.center().x() - sealSize / 2,
+                                     art.top() + markH + 3, sealSize, sealSize),
+                           sealIndex);
+            fitSingleLine(toneLabel, QRectF(inner.left(), inner.bottom() - toneLabelH,
+                                           inner.width(), toneLabelH),
+                          toneSize, 16, text, true);
+            return;
+        }
+
+        // Compact / landscape: date across the top, with the solar seal and
+        // Mayan number on the left and large Kin / tone text on the right.
+        const qreal dateH = qBound<qreal>(30, 34 * k, 52);
+        fitSingleLine(dateLabel, QRectF(inner.left(), inner.top(), inner.width(), dateH),
+                      dateSize, 16, text, true);
+        const qreal gap = qBound<qreal>(6, 10 * k, 20);
+        const QRectF body(inner.left(), inner.top() + dateH + gap,
+                          inner.width(), qMax<qreal>(0, inner.height() - dateH - gap));
+        const qreal leftW = body.width() * 0.43;
+        const QRectF emblemArea(body.left(), body.top(), leftW, body.height());
+        const QRectF words(body.left() + leftW + 6, body.top(),
+                           qMax<qreal>(0, body.width() - leftW - 6), body.height());
+        const qreal markH = qBound<qreal>(25, emblemArea.height() * 0.25, 56);
+        drawToneGlyph(p, QRectF(emblemArea.center().x() - leftW * 0.32,
+                                emblemArea.top(), leftW * 0.64, markH), tone, text);
+        const qreal sealSize = qMax<qreal>(0,
+            qMin(leftW - 6, emblemArea.height() - markH - 4));
+        drawSealSymbol(p, QRectF(emblemArea.center().x() - sealSize / 2,
+                                 emblemArea.top() + markH + 4,
+                                 sealSize, sealSize), sealIndex);
+
+        const qreal kinH = qBound<qreal>(38, words.height() * 0.30, 66);
+        const qreal toneH = words.width() < 225
+            ? qBound<qreal>(42, words.height() * 0.27, 60)
+            : qBound<qreal>(30, words.height() * 0.21, 54);
+        const qreal nameH = qMax<qreal>(0, words.height() - kinH - toneH - 4);
+        fitSingleLine(title, QRectF(words.left(), words.top(), words.width(), kinH),
+                      kinSize, 26, accent, true);
+        p.setPen(text);
+        setPainterFont(p, words.width() < 210 ? 16 : nameSize, true);
+        p.drawText(QRectF(words.left(), words.top() + kinH,
+                          words.width(), nameH),
+                   Qt::AlignCenter | Qt::TextWordWrap, name);
+        const QRectF labelBox(words.left(), words.bottom() - toneH,
+                              words.width(), toneH);
+        QFont toneFont = p.font();
+        toneFont.setPixelSize(words.width() < 225 ? 16 : toneSize);
+        toneFont.setBold(true);
+        p.setFont(toneFont);
+        p.setPen(text);
+        p.drawText(labelBox, Qt::AlignCenter | Qt::TextWordWrap, toneLabel);
     }
 
     void drawFooter(QPainter &p) {
