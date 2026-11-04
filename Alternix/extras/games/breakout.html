@@ -12,6 +12,8 @@
     justify-content: center;
     align-items: center;
     min-height: 100vh;
+    min-height: 100dvh;
+    padding: 10px 10px 65px;
     font-family: 'Segoe UI', system-ui, sans-serif;
     overflow: hidden;
     touch-action: none;
@@ -32,7 +34,7 @@
     box-shadow: 0 0 20px rgba(56, 189, 248, 0.15);
     touch-action: none;
     max-width: 96vw;
-    max-height: 70vh;
+    max-height: min(70vh, calc(100dvh - 230px));
     display: block;
   }
   .hud {
@@ -48,14 +50,62 @@
   .hud span { min-width: 78px; text-align: center; }
   .hud .hidden { display: none; }
   .controls-hint {
+    position: fixed;
+    left: 10px;
+    right: 10px;
+    bottom: max(9px, env(safe-area-inset-bottom));
+    z-index: 2;
     font-size: 13px;
     color: #94a3b8;
-    margin-top: 4px;
     text-align: center;
-    max-width: 90vw;
-    line-height: 1.6;
+    line-height: 1.5;
   }
-  .canvas-wrap { position: relative; }
+  .canvas-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: fit-content;
+    max-width: 96vw;
+  }
+  .playfield { position: relative; width: fit-content; max-width: 100%; }
+  .playfield canvas { max-width: 100%; }
+  .touch-area {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: clamp(62px, 12vh, 96px);
+    flex: none;
+    border: 1px solid #386176;
+    border-radius: 8px;
+    background: repeating-linear-gradient(135deg,
+      rgba(56,189,248,0.13) 0px, rgba(56,189,248,0.13) 10px,
+      rgba(15,23,42,0.94) 10px, rgba(15,23,42,0.94) 20px);
+    color: #cbd5e1;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .touch-area:hover, .touch-area.active { border-color: #38bdf8; }
+  .touch-area span {
+    pointer-events: none;
+    padding: 8px 16px;
+    border: 1px solid rgba(56,189,248,0.24);
+    border-radius: 6px;
+    background: rgba(11,17,32,0.88);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-shadow: 0 0 12px rgba(56,189,248,0.3);
+  }
+  @media (max-width: 540px) {
+    .hud { flex-wrap: wrap; justify-content: center; gap: 5px 12px; padding: 6px 10px; }
+    .hud span { min-width: auto; }
+    .controls-hint { font-size: 11px; }
+    body { padding-bottom: 70px; }
+  }
 
   .menu {
     position: absolute;
@@ -226,8 +276,8 @@
   }
   .big-score { font-size: 34px; font-weight: 700; color: #38bdf8; margin-bottom: 2px; }
   .hint { font-size: 11px; color: #64748b; margin-top: 12px; line-height: 1.6; }
-  :fullscreen canvas { max-height: 82vh; }
-  :-webkit-full-screen canvas { max-height: 82vh; }
+  :fullscreen canvas { max-height: min(82vh, calc(100dvh - 230px)); }
+  :-webkit-full-screen canvas { max-height: min(82vh, calc(100dvh - 230px)); }
 </style>
 </head>
 <body>
@@ -241,7 +291,8 @@
   </div>
 
   <div class="canvas-wrap">
-    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <div class="playfield">
+      <canvas id="gameCanvas" width="640" height="480"></canvas>
 
     <div id="menu" class="menu">
       <div class="panel" id="panel-main">
@@ -332,6 +383,8 @@
         <button class="btn" id="btn-over-menu">Main Menu</button>
       </div>
     </div>
+    </div>
+    <div id="touch-area" class="touch-area" role="group" aria-label="Touch area: drag sideways to move the paddle, tap to fire"><span>TOUCH AREA</span></div>
   </div>
 
   <div class="controls-hint" id="controls-hint">Arrow keys, mouse or touch drag to move &middot; Space / click / tap fires the cannon &middot; Esc / P for the menu &middot; F for fullscreen</div>
@@ -436,6 +489,7 @@
 
   /* ================= elements ============================================ */
   var canvas = document.getElementById('gameCanvas');
+  var touchArea = document.getElementById('touch-area');
   var ctx = canvas.getContext('2d');
 
   var hudScore1 = document.getElementById('hud-score1');
@@ -2032,58 +2086,73 @@
 
   window.addEventListener('blur', function () { keysDown = {}; });
 
-  function canvasX(clientX) {
-    var rect = canvas.getBoundingClientRect();
+  // Both the game canvas and the separate touch area map to the same
+  // horizontal playfield coordinate, independent of their displayed sizes.
+  function surfaceX(clientX, surface) {
+    var rect = surface.getBoundingClientRect();
     return (clientX - rect.left) * (canvas.width / rect.width);
   }
 
-  canvas.addEventListener('click', function () {
-    var p = pointerPlayer();
-    if (state === 'playing' && p) releaseHeld(p.index);
-  });
+  function bindPointerSurface(surface) {
+    surface.addEventListener('click', function () {
+      var p = pointerPlayer();
+      if (state === 'playing' && p) releaseHeld(p.index);
+    });
 
-  canvas.addEventListener('mousemove', function (e) {
-    if (state !== 'playing' && state !== 'countdown') return;
-    var p = pointerPlayer();
-    if (!p) return;
-    touchActive = false;
-    p.pointerActive = true;
-    p.x = canvasX(e.clientX) - p.w / 2;
-    clampPaddle(p);
-  });
-
-  canvas.addEventListener('touchstart', function (e) {
-    if (state !== 'playing' && state !== 'countdown') return;
-    var p = pointerPlayer();
-    if (!p) return;
-    e.preventDefault();
-    if (e.touches.length > 1) { releaseHeld(p.index); return; }
-    if (e.touches.length > 0) {
-      touchActive = true;
+    surface.addEventListener('mousemove', function (e) {
+      if (state !== 'playing' && state !== 'countdown') return;
+      var p = pointerPlayer();
+      if (!p) return;
+      touchActive = false;
       p.pointerActive = true;
-      tapStartX = canvasX(e.touches[0].clientX);
-      tapStartT = performance.now();
-      touchPaddleOffset = tapStartX - (p.x + p.w / 2);
-    }
-  }, { passive: false });
+      p.x = surfaceX(e.clientX, surface) - p.w / 2;
+      clampPaddle(p);
+    });
 
-  canvas.addEventListener('touchmove', function (e) {
-    var p = pointerPlayer();
-    if (!touchActive || e.touches.length === 0 || !p) return;
-    e.preventDefault();
-    var tx = canvasX(e.touches[0].clientX);
-    if (Math.abs(tx - tapStartX) > 12) tapStartT = 0;
-    p.pointerActive = true;
-    p.x = tx - touchPaddleOffset - p.w / 2;
-    clampPaddle(p);
-  }, { passive: false });
+    surface.addEventListener('touchstart', function (e) {
+      if (state !== 'playing' && state !== 'countdown') return;
+      var p = pointerPlayer();
+      if (!p) return;
+      e.preventDefault();
+      if (e.touches.length > 1) { releaseHeld(p.index); return; }
+      if (e.touches.length > 0) {
+        touchActive = true;
+        if (surface === touchArea) touchArea.classList.add('active');
+        p.pointerActive = true;
+        tapStartX = surfaceX(e.touches[0].clientX, surface);
+        tapStartT = performance.now();
+        touchPaddleOffset = tapStartX - (p.x + p.w / 2);
+      }
+    }, { passive: false });
 
-  canvas.addEventListener('touchend', function (e) {
-    var p = pointerPlayer();
-    if (state === 'playing' && p && tapStartT && performance.now() - tapStartT < 300) releaseHeld(p.index);
-    if (e.touches.length === 0) touchActive = false;
-  });
-  canvas.addEventListener('touchcancel', function () { touchActive = false; });
+    surface.addEventListener('touchmove', function (e) {
+      var p = pointerPlayer();
+      if (!touchActive || e.touches.length === 0 || !p) return;
+      e.preventDefault();
+      var tx = surfaceX(e.touches[0].clientX, surface);
+      if (Math.abs(tx - tapStartX) > 12) tapStartT = 0;
+      p.pointerActive = true;
+      p.x = tx - touchPaddleOffset - p.w / 2;
+      clampPaddle(p);
+    }, { passive: false });
+
+    surface.addEventListener('touchend', function (e) {
+      var p = pointerPlayer();
+      if (state === 'playing' && p && tapStartT && performance.now() - tapStartT < 300) releaseHeld(p.index);
+      if (e.touches.length === 0) {
+        touchActive = false;
+        touchArea.classList.remove('active');
+      }
+    });
+    surface.addEventListener('touchcancel', function () {
+      touchActive = false;
+      tapStartT = 0;
+      touchArea.classList.remove('active');
+    });
+  }
+
+  bindPointerSurface(canvas);
+  bindPointerSurface(touchArea);
 
   window.addEventListener('gamepadconnected', function () {
     if (!panels.settings.classList.contains('hidden')) refreshSettingsUI();
