@@ -745,6 +745,7 @@ sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
 cd "$ALT_ROOT/Alternix"
 
+
 # Keep the graphical authentication command consistent with the Location module.
 echo "• Updating osm-sudo..."
 sudo install -m 755 apps/osm-sudo /usr/local/bin/osm-sudo
@@ -823,6 +824,27 @@ elif [ -f /usr/local/bin/osm-launcher-lockclean ]; then
 else
     echo "[ERROR] osm-launcher-lockclean was not found in the repo or /usr/local/bin."
 fi
+
+
+echo "• Updating Breakout Game..."
+if [ -f "extras/games/breakout.png" ]; then
+    sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.png" /usr/share/icons/hicolor/64x64/apps/breakout.png
+fi
+
+cat <<EOF > "$TARGET_HOME/.local/share/applications/breakout.desktop"
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Breakout
+Comment=Break the block game
+Exec=brave-browser --app=file://$TARGET_HOME/extras/games/breakout.html --new-window --force-device-scale-factor=1.3
+Icon=breakout
+Terminal=false
+Categories=Game;
+StartupNotify=true
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/breakout.desktop"
+echo "✓ Breakout Game installed."
 
 
 echo "• Compiling osm-powerd..."
