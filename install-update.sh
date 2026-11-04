@@ -826,28 +826,90 @@ else
 fi
 
 
+
 echo "• Updating Breakout Game..."
-if [ -f "extras/games/breakout.png" ]; then
-    sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.png" /usr/share/icons/hicolor/64x64/apps/breakout.png
+
+# Find the source directory.
+GAME_SRC="$ALT_ROOT/Alternix/extras/games"
+if [ ! -f "$GAME_SRC/breakout.html" ]; then
+    GAME_SRC="$ALT_ROOT/extras/games"
 fi
 
-echo "• Placing updated Breakout.html"
-sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.html" "$TARGET_HOME/extras/games/breakout.html"
+# Find the actual user's home directory if not already set.
+if [ -z "${TARGET_HOME:-}" ]; then
+    TARGET_USER="${SUDO_USER:-$(id -un)}"
+    TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+fi
 
-cat <<EOF > "$TARGET_HOME/.local/share/applications/breakout.desktop"
+if [ ! -f "$GAME_SRC/breakout.html" ]; then
+    echo "✗ Breakout source not found: $GAME_SRC/breakout.html"
+
+elif [ ! -d "$TARGET_HOME" ] || [ "$TARGET_HOME" = "/root" ]; then
+    echo "✗ Invalid target home: $TARGET_HOME"
+
+else
+    TARGET_USER="$(stat -c '%U' "$TARGET_HOME")"
+    TARGET_GROUP="$(stat -c '%G' "$TARGET_HOME")"
+
+    GAME_DEST="$TARGET_HOME/extras/games"
+    DESKTOP_DIR="$TARGET_HOME/.local/share/applications"
+
+    # Create directories with correct user ownership.
+    sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" \
+        "$TARGET_HOME/extras" \
+        "$GAME_DEST" \
+        "$TARGET_HOME/.local" \
+        "$TARGET_HOME/.local/share" \
+        "$DESKTOP_DIR"
+
+    # Update the HTML game.
+    echo "• Installing Breakout HTML..."
+    sudo install -m 644 \
+        -o "$TARGET_USER" -g "$TARGET_GROUP" \
+        "$GAME_SRC/breakout.html" \
+        "$GAME_DEST/breakout.html"
+
+    # Update the game icon.
+    if [ -f "$GAME_SRC/breakout.png" ]; then
+        echo "• Installing Breakout icon..."
+        sudo install -D -m 644 \
+            "$GAME_SRC/breakout.png" \
+            /usr/share/icons/hicolor/64x64/apps/breakout.png
+    else
+        echo "⚠ Breakout icon not found; skipping."
+    fi
+
+    # Create the desktop launcher.
+    echo "• Creating Breakout launcher..."
+
+    sudo tee "$DESKTOP_DIR/breakout.desktop" > /dev/null <<EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Breakout
 Comment=Break the block game
-Exec=brave-browser --app=file://$TARGET_HOME/extras/games/breakout.html --new-window --force-device-scale-factor=1.3
+Exec=brave-browser --app=file://$GAME_DEST/breakout.html --new-window --force-device-scale-factor=1.3
 Icon=breakout
 Terminal=false
 Categories=Game;
 StartupNotify=true
 EOF
-chmod +x "$TARGET_HOME/.local/share/applications/breakout.desktop"
-echo "✓ Breakout Game installed."
+
+    sudo chown "$TARGET_USER:$TARGET_GROUP" \
+        "$DESKTOP_DIR/breakout.desktop"
+    sudo chmod 755 "$DESKTOP_DIR/breakout.desktop"
+
+    # Verify installation.
+    if [ -f "$GAME_DEST/breakout.html" ] && \
+       [ -f "$DESKTOP_DIR/breakout.desktop" ]; then
+        echo "✓ Breakout Game updated successfully."
+        echo "  HTML: $GAME_DEST/breakout.html"
+        echo "  Launcher: $DESKTOP_DIR/breakout.desktop"
+    else
+        echo "✗ Breakout installation failed."
+    fi
+fi
+
 
 
 echo "• Compiling osm-powerd..."
