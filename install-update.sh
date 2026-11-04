@@ -829,6 +829,7 @@ fi
 echo "• Updating Breakout Game..."
 if [ -f "extras/games/breakout.png" ]; then
     sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.png" /usr/share/icons/hicolor/64x64/apps/breakout.png
+    sudo cp "$ALT_ROOT/Alternix/extras/games/breakout.html" "$TARGET_HOME/extras/games/breakout.html"
 fi
 
 cat <<EOF > "$TARGET_HOME/.local/share/applications/breakout.desktop"
