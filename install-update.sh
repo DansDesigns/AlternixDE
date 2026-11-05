@@ -69,6 +69,20 @@ if ! /usr/bin/sudo -v; then
     exit 1
 fi
 
+# ────────────────────────────────────────────────
+# AlternixOS terminal policy: keep xterm/uxterm out of future APT operations.
+# uxterm is shipped by the same Debian/Devuan package as xterm.
+# This preference blocks xterm without blocking the x-terminal-emulator
+# virtual package, which Alacritty provides.
+# ────────────────────────────────────────────────
+echo "[Terminal] Blocking xterm/uxterm from future APT installations..."
+sudo install -d -m 0755 /etc/apt/preferences.d
+sudo tee /etc/apt/preferences.d/alternix-no-xterm.pref >/dev/null <<'ALT_NO_XTERM'
+Package: xterm
+Pin: version *
+Pin-Priority: -1
+ALT_NO_XTERM
+
 sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez
 
 # Refresh the signed Devuan package indexes before resolving the newest
@@ -1106,6 +1120,51 @@ for src in alternix-auth-setup.sh alternix-auth.c osm-lock.cpp; do
         "$ALT_ROOT/Alternix/apps/$src" "/usr/share/alternix/auth/$src"
 done
 sudo chmod 0755 /usr/share/alternix/auth/alternix-auth-setup.sh
+
+# ────────────────────────────────────────────────
+# AlternixOS terminal policy: remove xterm + uxterm and use Alacritty.
+# Run after all package operations, so dependencies cannot pull xterm back
+# into this installation/update. Do not autoremove unrelated X11 packages.
+# ────────────────────────────────────────────────
+echo "[Terminal] Enforcing Alacritty as the default terminal..."
+if ! command -v alacritty >/dev/null 2>&1; then
+    sudo apt-get install -y alacritty
+fi
+ALTERNIX_ALACRITTY="$(command -v alacritty || true)"
+if [ -z "$ALTERNIX_ALACRITTY" ] || [ ! -x "$ALTERNIX_ALACRITTY" ]; then
+    echo "ERROR: Alacritty is unavailable; refusing to remove the existing terminal." >&2
+    exit 1
+fi
+
+if dpkg-query -W -f='${Status}' xterm 2>/dev/null | grep -qx 'install ok installed'; then
+    # Make sure the purge would NOT remove any other packages (e.g. an X server).
+    if ! ALT_XTERM_SIMULATION="$(sudo apt-get -s purge xterm)"; then
+        echo "ERROR: Could not safely simulate removing xterm." >&2
+        exit 1
+    fi
+    ALT_XTERM_EXTRA_REMOVALS="$(printf '%s\n' "$ALT_XTERM_SIMULATION" | awk '$1 == "Remv" && $2 != "xterm" {print $2}')"
+    if [ -n "$ALT_XTERM_EXTRA_REMOVALS" ]; then
+        echo "ERROR: Purging xterm would also remove: $ALT_XTERM_EXTRA_REMOVALS" >&2
+        echo "Refusing to remove other packages. Check the x-terminal-emulator dependencies." >&2
+        exit 1
+    fi
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get purge -y xterm
+fi
+
+# Register Alacritty even if this package version did not register itself.
+sudo update-alternatives --install /usr/bin/x-terminal-emulator \
+    x-terminal-emulator "$ALTERNIX_ALACRITTY" 80
+sudo update-alternatives --set x-terminal-emulator "$ALTERNIX_ALACRITTY"
+
+if dpkg-query -W -f='${Status}' xterm 2>/dev/null | grep -qx 'install ok installed'; then
+    echo "ERROR: The xterm package is still installed." >&2
+    exit 1
+fi
+if [ "$(readlink -f /usr/bin/x-terminal-emulator)" != "$(readlink -f "$ALTERNIX_ALACRITTY")" ]; then
+    echo "ERROR: x-terminal-emulator does not resolve to Alacritty." >&2
+    exit 1
+fi
+echo "[Terminal] xterm/uxterm removed; x-terminal-emulator -> $ALTERNIX_ALACRITTY"
 
 # Commit the sudo authentication policy as the LAST privileged operation.
 # This also installs the protected verifier and new osm-lock executable.
