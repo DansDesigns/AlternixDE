@@ -38,23 +38,69 @@
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
+    bool opening = false;
     bool dismissing = false;
+    qreal openingProgress = 0.0;
     qreal dismissProgress = 0.0;
-    QPixmap dismissFrame;
+    QPixmap transitionFrame;
     QPointer<QTimer> iconLoader;
+    QVector<QPointer<QWidget>> openingChildren;
 
 public:
     using QWidget::QWidget;
 
-    bool isDismissing() const { return dismissing; }
+    bool isTransitioning() const { return opening || dismissing; }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
 
-    // Animate a snapshot INSIDE the fullscreen window. Moving/resizing the real
-    // fullscreen window is unreliable under window managers such as Qtile.
-    void dismissWithAnimation() {
-        if (dismissing) return;
+    // Inverse of the dismiss animation: rise/expand from the bottom centre
+    // while fading in. The fullscreen window itself never changes geometry,
+    // which avoids fighting Qtile's fullscreen window management.
+    // Call immediately after showFullScreen(), before the event loop starts,
+    // so the unanimated launcher is never painted to the screen first.
+    void openWithAnimation() {
+        if (isTransitioning()) return;
 
-        dismissFrame = grab(); // Capture all tiles, fades and the close button.
+        transitionFrame = grab(); // Render the finished layout, including child widgets.
+        if (transitionFrame.isNull()) return;
+
+        openingChildren.clear();
+        const auto children = findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QWidget *child : children) {
+            if (child->isVisible()) {
+                openingChildren.append(QPointer<QWidget>(child));
+                child->hide();
+            }
+        }
+
+        opening = true;
+        openingProgress = 0.0;
+        QVariantAnimation *animation = new QVariantAnimation(this);
+        animation->setDuration(320);
+        animation->setStartValue(0.0);
+        animation->setEndValue(1.0);
+        animation->setEasingCurve(QEasingCurve::OutCubic);
+        connect(animation, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant &v) {
+            openingProgress = v.toDouble();
+            update();
+        });
+        connect(animation, &QVariantAnimation::finished, this, [this]() {
+            opening = false;
+            for (const QPointer<QWidget> &child : openingChildren)
+                if (child) child->show();
+            openingChildren.clear();
+            transitionFrame = QPixmap();
+            update();
+        });
+        animation->start(QAbstractAnimation::DeleteWhenStopped);
+        update();
+    }
+
+    // Keep the existing pull-down-to-dismiss animation unchanged.
+    void dismissWithAnimation() {
+        if (isTransitioning()) return;
+
+        transitionFrame = grab(); // Capture all tiles, fades and the close button.
         dismissing = true;
         if (iconLoader) iconLoader->stop();
 
@@ -84,11 +130,11 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        if (dismissing) {
-            // Android-like closing: shrink towards the bottom centre, move
-            // down and fade. The real fullscreen window never changes size.
-            if (!dismissFrame.isNull()) {
-                const qreal t = dismissProgress;
+        if (isTransitioning()) {
+            // Both directions use identical geometry. During opening the
+            // closing progress simply runs backwards from 1 to 0.
+            if (!transitionFrame.isNull()) {
+                const qreal t = dismissing ? dismissProgress : 1.0 - openingProgress;
                 const qreal scale = 1.0 - 0.82 * t;
                 const qreal w = width() * scale;
                 const qreal h = height() * scale;
@@ -100,7 +146,7 @@ protected:
                 QPainterPath rounded;
                 rounded.addRoundedRect(target, 28.0 * t, 28.0 * t);
                 p.setClipPath(rounded);
-                p.drawPixmap(target, dismissFrame, QRectF(dismissFrame.rect()));
+                p.drawPixmap(target, transitionFrame, QRectF(transitionFrame.rect()));
             }
             return;
         }
@@ -486,7 +532,7 @@ class PullDownDismissFilter : public QObject {
     }
 
     void move(const QPointF &globalPosition) {
-        if (pointer == None || launcher->isDismissing()) return;
+        if (pointer == None || launcher->isTransitioning()) return;
         // Only a pull that BEGINS with the list at the top may close it.
         if (!listIsAtTop()) { pointer = None; return; }
 
@@ -519,14 +565,14 @@ protected:
     bool eventFilter(QObject *object, QEvent *event) override {
         switch (event->type()) {
         case QEvent::MouseButtonPress: {
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
             if (mouse->button() == Qt::LeftButton && pointer != Touch && inAppList(object))
                 start(Mouse, mouse->screenPos());
             break;
         }
         case QEvent::MouseMove: {
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
             if (pointer == Mouse) {
                 if (mouse->buttons() & Qt::LeftButton) move(mouse->screenPos());
@@ -535,13 +581,13 @@ protected:
             break;
         }
         case QEvent::MouseButtonRelease: {
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
             if (mouse->button() == Qt::LeftButton && pointer == Mouse) pointer = None;
             break;
         }
         case QEvent::TouchBegin: {
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             QTouchEvent *touch = static_cast<QTouchEvent*>(event);
             if (inAppList(object) && touch->touchPoints().size() == 1) {
                 const auto point = touch->touchPoints().first();
@@ -551,7 +597,7 @@ protected:
             break;
         }
         case QEvent::TouchUpdate: {
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             if (pointer != Touch) break;
             QTouchEvent *touch = static_cast<QTouchEvent*>(event);
             if (touch->touchPoints().size() != 1 ||
@@ -564,7 +610,7 @@ protected:
         }
         case QEvent::TouchEnd:
         case QEvent::TouchCancel:
-            if (launcher->isDismissing()) return true;
+            if (launcher->isTransitioning()) return true;
             if (pointer == Touch) pointer = None;
             touchId = -1;
             break;
@@ -698,6 +744,7 @@ int main(int argc, char **argv) {
         startPolkitAgent();
 
     window.showFullScreen();
+    window.openWithAnimation();  // Start before the first on-screen paint.
 
     // Observe touches and mouse drags anywhere in the scrollable app list.
     PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
