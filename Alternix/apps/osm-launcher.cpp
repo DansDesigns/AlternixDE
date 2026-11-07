@@ -75,7 +75,7 @@ public:
         opening = true;
         openingProgress = 0.0;
         QVariantAnimation *animation = new QVariantAnimation(this);
-        animation->setDuration(320);
+        animation->setDuration(180); // Faster opening; dismiss remains 320 ms.
         animation->setStartValue(0.0);
         animation->setEndValue(1.0);
         animation->setEasingCurve(QEasingCurve::OutCubic);
