@@ -25,16 +25,82 @@
 #include <QVector>
 #include <QDir>
 #include <QLockFile>
+#include <QScrollBar>
+#include <QTouchEvent>
+#include <QVariantAnimation>
+#include <QEasingCurve>
+#include <QPainterPath>
+#include <QPointer>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
+    bool dismissing = false;
+    qreal dismissProgress = 0.0;
+    QPixmap dismissFrame;
+    QPointer<QTimer> iconLoader;
+
 public:
     using QWidget::QWidget;
+
+    bool isDismissing() const { return dismissing; }
+    void setIconLoader(QTimer *timer) { iconLoader = timer; }
+
+    // Animate a snapshot INSIDE the fullscreen window. Moving/resizing the real
+    // fullscreen window is unreliable under window managers such as Qtile.
+    void dismissWithAnimation() {
+        if (dismissing) return;
+
+        dismissFrame = grab(); // Capture all tiles, fades and the close button.
+        dismissing = true;
+        if (iconLoader) iconLoader->stop();
+
+        // The snapshot replaces the live child widgets during the transition.
+        const auto children = findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+        for (QWidget *child : children) child->hide();
+
+        QVariantAnimation *animation = new QVariantAnimation(this);
+        animation->setDuration(320);
+        animation->setStartValue(0.0);
+        animation->setEndValue(1.0);
+        animation->setEasingCurve(QEasingCurve::InCubic);
+        connect(animation, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant &v) {
+            dismissProgress = v.toDouble();
+            update();
+        });
+        connect(animation, &QVariantAnimation::finished, this, [this]() {
+            close();
+        });
+        animation->start(QAbstractAnimation::DeleteWhenStopped);
+        update();
+    }
 
 protected:
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
+
+        if (dismissing) {
+            // Android-like closing: shrink towards the bottom centre, move
+            // down and fade. The real fullscreen window never changes size.
+            if (!dismissFrame.isNull()) {
+                const qreal t = dismissProgress;
+                const qreal scale = 1.0 - 0.82 * t;
+                const qreal w = width() * scale;
+                const qreal h = height() * scale;
+                const QRectF target((width() - w) / 2.0,
+                                    height() - h + height() * 0.08 * t,
+                                    w, h);
+                p.setRenderHint(QPainter::SmoothPixmapTransform);
+                p.setOpacity(1.0 - t);
+                QPainterPath rounded;
+                rounded.addRoundedRect(target, 28.0 * t, 28.0 * t);
+                p.setClipPath(rounded);
+                p.drawPixmap(target, dismissFrame, QRectF(dismissFrame.rect()));
+            }
+            return;
+        }
+
         p.fillRect(rect(), QColor(0,0,0,140));
 
         int w = width();
@@ -264,6 +330,126 @@ public:
     }
 };
 
+// ──────────────────────────────  Pull-down-to-dismiss gesture
+// An application-wide filter sees mouse/touch events even when the gesture
+// starts on an app tile or its nested labels (not just on the scroll viewport).
+// It does not consume ordinary events, so QScroller retains normal scrolling.
+class PullDownDismissFilter : public QObject {
+    enum Pointer { None, Mouse, Touch };
+    LauncherWindow *launcher;
+    QScrollArea *scroll;
+    Pointer pointer = None;
+    QPointF pressPosition;
+    bool directionConfirmed = false;
+    int touchId = -1;
+
+    bool inAppList(QObject *object) const {
+        const QWidget *widget = qobject_cast<QWidget*>(object);
+        const QWidget *viewport = scroll->viewport();
+        return widget && (widget == viewport || viewport->isAncestorOf(widget));
+    }
+
+    bool listIsAtTop() const {
+        const QScrollBar *bar = scroll->verticalScrollBar();
+        return bar->value() <= bar->minimum() + 1;
+    }
+
+    void start(Pointer type, const QPointF &globalPosition) {
+        pointer = listIsAtTop() ? type : None;
+        pressPosition = globalPosition;
+        directionConfirmed = false;
+    }
+
+    void move(const QPointF &globalPosition) {
+        if (pointer == None || launcher->isDismissing()) return;
+        // Only a pull that BEGINS with the list at the top may close it.
+        if (!listIsAtTop()) { pointer = None; return; }
+
+        const qreal dx = globalPosition.x() - pressPosition.x();
+        const qreal dy = globalPosition.y() - pressPosition.y();
+
+        // Never reinterpret a normal upward or sideways scroll as dismiss.
+        if (!directionConfirmed && qAbs(dx) + qAbs(dy) >= 16.0) {
+            if (dy <= 0 || dy < qAbs(dx) * 1.2) {
+                pointer = None;
+                return;
+            }
+            directionConfirmed = true;
+        }
+
+        // A deliberate pull: 75-125 logical pixels, scaled for screen height.
+        const qreal threshold = qBound(75.0, launcher->height() * 0.11, 125.0);
+        if (directionConfirmed && dy >= threshold && dy > qAbs(dx) * 1.2) {
+            pointer = None;
+            QScroller::scroller(scroll->viewport())->stop();
+            launcher->dismissWithAnimation();
+        }
+    }
+
+public:
+    PullDownDismissFilter(LauncherWindow *window, QScrollArea *area, QObject *parent = nullptr)
+        : QObject(parent), launcher(window), scroll(area) {}
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            if (launcher->isDismissing()) return true;
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton && pointer != Touch && inAppList(object))
+                start(Mouse, mouse->screenPos());
+            break;
+        }
+        case QEvent::MouseMove: {
+            if (launcher->isDismissing()) return true;
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (pointer == Mouse) {
+                if (mouse->buttons() & Qt::LeftButton) move(mouse->screenPos());
+                else pointer = None;
+            }
+            break;
+        }
+        case QEvent::MouseButtonRelease: {
+            if (launcher->isDismissing()) return true;
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton && pointer == Mouse) pointer = None;
+            break;
+        }
+        case QEvent::TouchBegin: {
+            if (launcher->isDismissing()) return true;
+            QTouchEvent *touch = static_cast<QTouchEvent*>(event);
+            if (inAppList(object) && touch->touchPoints().size() == 1) {
+                const auto point = touch->touchPoints().first();
+                touchId = point.id();
+                start(Touch, point.screenPos());
+            }
+            break;
+        }
+        case QEvent::TouchUpdate: {
+            if (launcher->isDismissing()) return true;
+            if (pointer != Touch) break;
+            QTouchEvent *touch = static_cast<QTouchEvent*>(event);
+            if (touch->touchPoints().size() != 1 ||
+                touch->touchPoints().first().id() != touchId) {
+                pointer = None; // Multi-touch must not close the launcher.
+                break;
+            }
+            move(touch->touchPoints().first().screenPos());
+            break;
+        }
+        case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
+            if (launcher->isDismissing()) return true;
+            if (pointer == Touch) pointer = None;
+            touchId = -1;
+            break;
+        default:
+            break;
+        }
+        return QObject::eventFilter(object, event);
+    }
+};
+
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
@@ -384,6 +570,10 @@ int main(int argc, char **argv) {
 
     window.showFullScreen();
 
+    // Observe touches and mouse drags anywhere in the scrollable app list.
+    PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
+    a.installEventFilter(pullFilter);
+
     // ──────────────────────────────  Lazy icon loader
     QTimer *iconTimer = new QTimer(&window);
     iconTimer->setInterval(30);   // 30ms per icon (row-order)
@@ -399,6 +589,7 @@ int main(int argc, char **argv) {
         ++current;
     });
 
+    window.setIconLoader(iconTimer);
     iconTimer->start();
 
     return a.exec();
