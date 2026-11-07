@@ -28,6 +28,8 @@
 #include <QScrollBar>
 #include <QTouchEvent>
 #include <QVariantAnimation>
+#include <QGraphicsEffect>
+#include <QPair>
 #include <QEasingCurve>
 #include <QPainterPath>
 #include <QPointer>
@@ -36,15 +38,45 @@
 #include <QByteArray>
 #include <unistd.h>
 
+// ──────────────────────────────  Per-item scale/fade for the opening cascade.
+// The app tiles live in a QGridLayout. Animating their actual geometry would
+// fight the layout and cause jumps, so scale only their PAINTED content.
+// Like osm-notify, each row grows from 30% and fades from transparent to solid.
+class LauncherRevealEffect : public QGraphicsEffect {
+    qreal progress = 0.0;
+
+public:
+    explicit LauncherRevealEffect(QObject *parent = nullptr) : QGraphicsEffect(parent) {}
+
+    void setProgress(qreal value) {
+        value = qBound(qreal(0.0), value, qreal(1.0));
+        if (qAbs(progress - value) < 0.0001) return;
+        progress = value;
+        update();
+    }
+
+protected:
+    void draw(QPainter *painter) override {
+        if (progress <= 0.0) return;
+        const QRectF bounds = sourceBoundingRect(Qt::LogicalCoordinates);
+        const qreal scale = 0.30 + 0.70 * progress;
+        painter->save();
+        painter->setOpacity(progress);
+        painter->translate(bounds.center());
+        painter->scale(scale, scale);
+        painter->translate(-bounds.center());
+        drawSource(painter);
+        painter->restore();
+    }
+};
+
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
     bool opening = false;
     bool dismissing = false;
-    qreal openingProgress = 0.0;
     qreal dismissProgress = 0.0;
-    QPixmap transitionFrame;
+    QPixmap dismissFrame;
     QPointer<QTimer> iconLoader;
-    QVector<QPointer<QWidget>> openingChildren;
 
 public:
     using QWidget::QWidget;
@@ -52,55 +84,97 @@ public:
     bool isTransitioning() const { return opening || dismissing; }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
 
-    // Inverse of the dismiss animation: rise/expand from the bottom centre
-    // while fading in. The fullscreen window itself never changes geometry,
-    // which avoids fighting Qtile's fullscreen window management.
-    // Call immediately after showFullScreen(), before the event loop starts,
-    // so the unanimated launcher is never painted to the screen first.
-    void openWithAnimation() {
-        if (isTransitioning()) return;
+    // Animate actual app tiles in rows, as osm-notify animates its cards.
+    // Unlike a fullscreen snapshot, the background and grid remain stable.
+    void openWithAnimation(QScrollArea *scroll, const QVector<QWidget*> &tiles,
+                           int columns, QWidget *closeButton) {
+        if (isTransitioning() || !scroll || columns < 1) return;
 
-        transitionFrame = grab(); // Render the finished layout, including child widgets.
-        if (transitionFrame.isNull()) return;
+        // Ensure the grid has its final positions before assigning rows.
+        if (layout()) layout()->activate();
+        if (scroll->widget() && scroll->widget()->layout())
+            scroll->widget()->layout()->activate();
 
-        openingChildren.clear();
-        const auto children = findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
-        for (QWidget *child : children) {
-            if (child->isVisible()) {
-                openingChildren.append(QPointer<QWidget>(child));
-                child->hide();
-            }
+        const int visibleTop = scroll->verticalScrollBar()->value();
+        const int visibleBottom = visibleTop + scroll->viewport()->height();
+
+        // Store only tiles currently on screen; animating hundreds of offscreen
+        // tiles wastes time and makes scrolling feel sluggish on older devices.
+        QVector<QPair<QPointer<LauncherRevealEffect>, int>> effects;
+        QVector<QPointer<QWidget>> effectedWidgets;
+        int firstRow = -1;
+        int lastRow = -1;
+
+        for (int index = 0; index < tiles.size(); ++index) {
+            QWidget *tile = tiles.at(index);
+            if (!tile) continue;
+            const QRect tileRect = tile->geometry(); // relative to scroll->widget()
+            if (tileRect.bottom() < visibleTop || tileRect.top() >= visibleBottom)
+                continue;
+
+            const int row = index / columns;
+            if (firstRow < 0) firstRow = row;
+            lastRow = row;
+            auto *effect = new LauncherRevealEffect(tile);
+            tile->setGraphicsEffect(effect);
+            effects.append(qMakePair(QPointer<LauncherRevealEffect>(effect), row));
+            effectedWidgets.append(QPointer<QWidget>(tile));
         }
 
+        // The close button appears immediately after the visible grid rows.
+        if (closeButton) {
+            auto *effect = new LauncherRevealEffect(closeButton);
+            closeButton->setGraphicsEffect(effect);
+            effects.append(qMakePair(QPointer<LauncherRevealEffect>(effect),
+                                     lastRow < 0 ? 0 : lastRow + 1));
+            effectedWidgets.append(QPointer<QWidget>(closeButton));
+        }
+
+        if (effects.isEmpty()) return;
         opening = true;
-        openingProgress = 0.0;
-        QVariantAnimation *animation = new QVariantAnimation(this);
-        animation->setDuration(180); // Faster opening; dismiss remains 320 ms.
+
+        // Short overlapping animations give a clear top-to-bottom cascade
+        // without making opening feel slow. A row scales and fades in 105ms;
+        // the following row begins 40ms later.
+        const int rowTimeMs = 105;
+        const int rowStaggerMs = 40;
+        const int first = firstRow < 0 ? 0 : firstRow;
+        const int rowCount = qMax(1, lastRow - first + 2); // include close button
+        const int totalMs = (rowCount - 1) * rowStaggerMs + rowTimeMs;
+
+        auto *animation = new QVariantAnimation(this);
+        animation->setDuration(totalMs);
         animation->setStartValue(0.0);
-        animation->setEndValue(1.0);
-        animation->setEasingCurve(QEasingCurve::OutCubic);
+        animation->setEndValue(double(totalMs));
+        animation->setEasingCurve(QEasingCurve::Linear);
         connect(animation, &QVariantAnimation::valueChanged, this,
-                [this](const QVariant &v) {
-            openingProgress = v.toDouble();
-            update();
+                [effects, first, rowStaggerMs, rowTimeMs](const QVariant &value) {
+            const qreal elapsed = value.toDouble();
+            for (const auto &pair : effects) {
+                if (!pair.first) continue;
+                const qreal t = qBound(qreal(0.0),
+                    (elapsed - (pair.second - first) * rowStaggerMs) / rowTimeMs,
+                    qreal(1.0));
+                const qreal remaining = 1.0 - t;
+                pair.first->setProgress(1.0 - remaining * remaining * remaining);
+            }
         });
-        connect(animation, &QVariantAnimation::finished, this, [this]() {
+        connect(animation, &QVariantAnimation::finished, this,
+                [this, effectedWidgets]() {
+            // Remove all effects once the cascade finishes: normal scrolling
+            // then renders tiles without any additional graphics-effect cost.
+            for (const auto &tile : effectedWidgets)
+                if (tile) tile->setGraphicsEffect(nullptr);
             opening = false;
-            for (const QPointer<QWidget> &child : openingChildren)
-                if (child) child->show();
-            openingChildren.clear();
-            transitionFrame = QPixmap();
-            update();
         });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
-        update();
     }
 
-    // Keep the existing pull-down-to-dismiss animation unchanged.
+    // Keep the original pull-down-to-dismiss animation unchanged.
     void dismissWithAnimation() {
         if (isTransitioning()) return;
 
-        transitionFrame = grab(); // Capture all tiles, fades and the close button.
+        dismissFrame = grab(); // Capture all tiles, fades and the close button.
         dismissing = true;
         if (iconLoader) iconLoader->stop();
 
@@ -130,11 +204,10 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        if (isTransitioning()) {
-            // Both directions use identical geometry. During opening the
-            // closing progress simply runs backwards from 1 to 0.
-            if (!transitionFrame.isNull()) {
-                const qreal t = dismissing ? dismissProgress : 1.0 - openingProgress;
+        if (dismissing) {
+            // Closing still shrinks the whole page towards the bottom centre.
+            if (!dismissFrame.isNull()) {
+                const qreal t = dismissProgress;
                 const qreal scale = 1.0 - 0.82 * t;
                 const qreal w = width() * scale;
                 const qreal h = height() * scale;
@@ -146,7 +219,7 @@ protected:
                 QPainterPath rounded;
                 rounded.addRoundedRect(target, 28.0 * t, 28.0 * t);
                 p.setClipPath(rounded);
-                p.drawPixmap(target, transitionFrame, QRectF(transitionFrame.rect()));
+                p.drawPixmap(target, dismissFrame, QRectF(dismissFrame.rect()));
             }
             return;
         }
@@ -743,8 +816,15 @@ int main(int argc, char **argv) {
     if (polkitPamUsesAlternix() && !polkitAgentRunning())
         startPolkitAgent();
 
+    // Suppress the first fullscreen paint until the row effects are installed;
+    // otherwise the entire launcher can flash for one frame before cascading.
+    window.setUpdatesEnabled(false);
     window.showFullScreen();
-    window.openWithAnimation();  // Start before the first on-screen paint.
+    QVector<QWidget*> tileWidgets;
+    tileWidgets.reserve(tiles.size());
+    for (AppTile *tile : tiles) tileWidgets.append(tile);
+    window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
+    window.setUpdatesEnabled(true);
 
     // Observe touches and mouse drags anywhere in the scrollable app list.
     PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
@@ -752,17 +832,25 @@ int main(int argc, char **argv) {
 
     // ──────────────────────────────  Lazy icon loader
     QTimer *iconTimer = new QTimer(&window);
-    iconTimer->setInterval(30);   // 30ms per icon (row-order)
-    int current = 0;
+    // Preload just the first visible row before it fades in. Later icons still
+    // load lazily, but more quickly while the visible rows are cascading.
+    const int initialIcons = qMin(cols, tiles.size());
+    for (int i = 0; i < initialIcons; ++i) tiles[i]->loadIcon();
+    iconTimer->setInterval(8);
+    int current = initialIcons;
+    const int visibleIconLimit = qMin(tiles.size(),
+        (qMax(1, scroll->viewport()->height() / 160) + 2) * cols);
 
     QObject::connect(iconTimer, &QTimer::timeout, &window,
-                     [iconTimer, &tiles, &current]() mutable {
+                     [iconTimer, &tiles, &current, visibleIconLimit]() mutable {
         if (current >= tiles.size()) {
             iconTimer->stop();
             return;
         }
         tiles[current]->loadIcon();
         ++current;
+        if (current >= visibleIconLimit && iconTimer->interval() != 30)
+            iconTimer->setInterval(30);
     });
 
     window.setIconLoader(iconTimer);
