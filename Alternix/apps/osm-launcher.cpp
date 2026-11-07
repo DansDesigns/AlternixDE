@@ -216,9 +216,10 @@ public:
         animation->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
-    // Opening: gradients -> backdrop -> every currently visible row from the
-    // bottom upwards -> close button. All other rows remain ready to cascade
-    // when scrolled into view, instead of being permanently static.
+    // Opening: prepare ALL rows before first paint, then wait for Qt/Qtile to
+    // finish the fullscreen layout BEFORE deciding which row is lowest visible.
+    // Choosing immediately after showFullScreen() captured the temporary viewport
+    // height, frequently making row 3 look like the bottom of the screen.
     void openWithAnimation(QScrollArea *scroll, const QVector<QWidget*> &tiles,
                            int columns, QWidget *closeButton) {
         if (isTransitioning() || !scroll || columns < 1) return;
@@ -230,19 +231,8 @@ public:
         animationTiles.reserve(tiles.size());
         for (QWidget *tile : tiles) animationTiles.append(tile);
 
-        if (layout()) layout()->activate();
-        if (scroll->widget() && scroll->widget()->layout())
-            scroll->widget()->layout()->activate();
-
-        constexpr int gradientMs = 90;
-        constexpr int backdropMs = 80;
-        constexpr int cardMs = 85;
-        constexpr int contentMs = 90;
-        constexpr int rowPauseMs = 8;
-        constexpr int closeMs = 100;
-
-        // Critical: initialise the effects for ALL rows before releasing the
-        // first fullscreen repaint, not just the first three visible rows.
+        // Install hidden-scale effects on EVERY row before the window can paint.
+        // This includes rows that will only become visible after scrolling.
         rowReveals.clear();
         rowReveals.resize((animationTiles.size() + animationColumns - 1) /
                           animationColumns);
@@ -260,13 +250,64 @@ public:
             }
         }
 
+        // The close button is always last, after the whole visible cascade.
+        if (closeButton) {
+            auto *effect = new LauncherRevealEffect(0.75, closeButton);
+            closeButton->setGraphicsEffect(effect);
+        }
+
+        opening = true;
+        gradientOpacity = 0.0;
+        backdropOpacity = 0.0;
+        update();
+
+        // Keep the delayed reveal for rows initially outside the viewport.
+        connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+                this, [this](int) { revealVisiblePendingRows(); });
+        connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged,
+                this, [this](int, int) { revealVisiblePendingRows(); });
+
+        // Let fullscreen Show/Resize/LayoutRequest events settle. The first
+        // animation tick must query the ACTUAL scroll viewport, never its
+        // pre-event-loop geometry. All tiles remain invisible until then.
+        QTimer::singleShot(0, this, [this]() { beginOpeningCascade(0); });
+    }
+
+    void beginOpeningCascade(int layoutChecks) {
+        if (!opening || !animationScroll) return;
+        if (layout()) layout()->activate();
+        QWidget *content = animationScroll->widget();
+        if (content && content->layout()) content->layout()->activate();
+
+        // Some X11/Qtile layouts need an extra frame to apply fullscreen size.
+        // A 3-row temporary viewport must not determine a 5-row cascade.
+        const int viewportH = animationScroll->viewport()->height();
+        const QRect screenRect = QApplication::primaryScreen()->geometry();
+        const bool fullScreenReady = width() >= screenRect.width() - 8 &&
+                                     height() >= screenRect.height() - 8;
+        if (layoutChecks < 8 && (!fullScreenReady || viewportH <= 0 ||
+                                 viewportH < height() - 200)) {
+            QTimer::singleShot(16, this, [this, layoutChecks]() {
+                beginOpeningCascade(layoutChecks + 1);
+            });
+            return;
+        }
+
+        constexpr int gradientMs = 90;
+        constexpr int backdropMs = 80;
+        constexpr int cardMs = 85;
+        constexpr int contentMs = 90;
+        constexpr int rowPauseMs = 8;
+        constexpr int closeMs = 100;
+
         const int cardsBegin = gradientMs + backdropMs;
         const QVector<QVector<QWidget*>> rows = visibleRows();
         QVector<LauncherRevealStep> steps;
         QVector<int> initialRows;
 
-        // The visible rows cascade bottom -> top, and the other rows will be
-        // revealed in the same direction when scrolling reaches them.
+        // This loop is deliberately based on the live viewport rather than
+        // numbered rows (1/2/3). E.g. if rows 1–6 are visible, it animates
+        // 6 -> 5 -> 4 -> 3 -> 2 -> 1, including the partially visible row.
         for (int row = rows.size() - 1; row >= 0; --row) {
             if (rows.at(row).isEmpty()) continue;
             const int rowStart = cardsBegin +
@@ -275,27 +316,25 @@ public:
             queueRowReveal(row, rowStart, cardMs, contentMs, steps);
         }
 
+        // Checkable on the target device: prints the actual rows selected.
+        if (!initialRows.isEmpty())
+            qInfo() << "osm-launcher: opening bottom-to-top, rows"
+                    << initialRows.first() + 1 << "through"
+                    << initialRows.last() + 1 << "(viewport height"
+                    << viewportH << ")";
+
         const int closeStart = cardsBegin +
             initialRows.size() * (cardMs + contentMs + rowPauseMs);
-        if (closeButton) {
-            auto *effect = new LauncherRevealEffect(0.75, closeButton);
-            closeButton->setGraphicsEffect(effect);
-            steps.append(LauncherRevealStep(effect, closeStart, closeMs));
+        if (animationCloseButton) {
+            // No Q_OBJECT macro on LauncherRevealEffect: qobject_cast would not
+            // compile under Qt5. The effect was installed by this method.
+            if (auto *effect = static_cast<LauncherRevealEffect*>(
+                    animationCloseButton->graphicsEffect()))
+                steps.append(LauncherRevealStep(effect, closeStart, closeMs));
         }
 
-        opening = true;
-        gradientOpacity = 0.0;
-        backdropOpacity = 0.0;
-        update();
-
-        // This remains active for the lifetime of the launcher, so all future
-        // rows encountered by wheel, touchscreen, or mouse drag are animated.
-        connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
-                this, [this](int) { revealVisiblePendingRows(); });
-        connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged,
-                this, [this](int, int) { revealVisiblePendingRows(); });
-
-        const int totalMs = qMax(closeStart + (closeButton ? closeMs : 0), cardsBegin);
+        const int totalMs = qMax(closeStart +
+            (animationCloseButton ? closeMs : 0), cardsBegin);
         auto *animation = new QVariantAnimation(this);
         animation->setDuration(totalMs);
         animation->setStartValue(0.0);
@@ -318,9 +357,10 @@ public:
             }
         });
         connect(animation, &QVariantAnimation::finished, this,
-                [this, initialRows, closeButton]() {
+                [this, initialRows]() {
             for (int row : initialRows) finishRowReveal(row);
-            if (closeButton) closeButton->setGraphicsEffect(nullptr);
+            if (animationCloseButton)
+                animationCloseButton->setGraphicsEffect(nullptr);
             gradientOpacity = 1.0;
             backdropOpacity = 1.0;
             opening = false;
