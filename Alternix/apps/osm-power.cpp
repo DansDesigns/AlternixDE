@@ -14,6 +14,8 @@
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QProcess>
+#include <QStandardPaths>
+#include <QMessageBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -695,14 +697,53 @@ private slots:
     }
 
     void doSleep() {
-        // Lock before sleeping. pm-suspend goes around elogind, so qtile's
-        // resume hook never hears about this sleep and cannot lock on wake.
-        // Same steps as osm-sudo, with the lock in between: authenticate
-        // first, because the lockscreen is fullscreen and on top and would
-        // hide osm-lock's prompt; then lock, give it a moment to appear,
-        // and suspend.
-        QProcess::startDetached("sh", QStringList() << "-c"
-            << "osm-lock --auth || exit 1; osm-lockd & sleep 1; sudo -S pm-suspend");
+        // Sleep itself must NOT ask for a PIN/pattern. The lockscreen will
+        // request it once, when the user unlocks after waking.
+        //
+        // Ask elogind via its D-Bus interface rather than sudo/pm-suspend.
+        // This also emits PrepareForSleep, unlike directly running pm-suspend.
+        if (QStandardPaths::findExecutable("osm-lockd").isEmpty() ||
+            QStandardPaths::findExecutable("dbus-send").isEmpty()) {
+            QMessageBox::warning(this, "Sleep unavailable",
+                "osm-lockd or dbus-send is missing; sleep was not started.");
+            return;
+        }
+
+        // Preflight: only proceed if the active session may suspend without
+        // another polkit/sudo prompt. Do not lock an unsuspendable machine.
+        const QStringList preflight = QStringList()
+            << "--system" << "--print-reply"
+            << "--dest=org.freedesktop.login1"
+            << "/org/freedesktop/login1"
+            << "org.freedesktop.login1.Manager.CanSuspend";
+        QProcess probe;
+        probe.start("dbus-send", preflight);
+        const bool finished = probe.waitForFinished(3000);
+        const bool allowed = finished && probe.exitStatus() == QProcess::NormalExit &&
+            probe.exitCode() == 0 &&
+            QString::fromUtf8(probe.readAllStandardOutput()).contains("string \"yes\"");
+        if (!allowed) {
+            QMessageBox::warning(this, "Sleep unavailable",
+                "elogind cannot suspend this session without extra authentication. "
+                "Check elogind and PolicyKit permissions; no sleep was started.");
+            return;
+        }
+
+        // Lock before suspending, so the desktop cannot be exposed on wake.
+        // The separate shell survives closing this full-screen power menu.
+        // D-Bus 'false' disables interactive polkit authentication for sleep.
+        const bool started = QProcess::startDetached("sh", QStringList() << "-c"
+            << "osm-lockd >/dev/null 2>&1 & "
+               "sleep 1; "
+               "exec dbus-send --system --print-reply "
+               "--dest=org.freedesktop.login1 "
+               "/org/freedesktop/login1 "
+               "org.freedesktop.login1.Manager.Suspend boolean:false");
+        if (!started) {
+            QMessageBox::warning(this, "Sleep unavailable",
+                "Could not launch the sleep command.");
+            return;
+        }
         close();
     }
 
