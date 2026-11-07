@@ -7,11 +7,14 @@
 #include <QFrame>
 #include <QScreen>
 #include <QTimer>
-#include <QLockFile>
-#include <QDebug>
+#include <QSocketNotifier>
 #include <QCryptographicHash>
-#include <QDateTime>
-#include <csignal>
+#include <QDebug>
+#include <cerrno>
+#include <cstddef>
+#include <cstring>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <QPainter>
 #include <QMouseEvent>
@@ -1509,64 +1512,88 @@ protected:
     }
 };
 
-// ──────────────────────────────  Show existing instance from osm-widgets
-// Async-signal-safe: do NOT call Qt or manipulate a QWidget in a signal handler.
-static volatile sig_atomic_t g_notifyShowRequested = 0;
-static void requestNotifyShow(int) { g_notifyShowRequested = 1; }
+// ──────────────────────────────  Activation IPC (X11/Qtile, Linux)
+// Qtile can keep launching plain `osm-notify` as before: the first instance
+// stays hidden and owns the top-edge strips. A subsequent `osm-notify` or
+// `osm-notify --show` signals the resident instance to display its panel.
+//
+// An AF_UNIX abstract socket is tied to the lifetime of the first process.
+// It needs no lock file, no extra Qt module, no signal handler, and can't
+// leave behind stale socket paths after a crash or logout.
+static sockaddr_un notifyAddress(socklen_t &length) {
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const QByteArray identity = QByteArray("alternix.osm-notify.") +
+        QByteArray::number(::getuid()) + "." +
+        QCryptographicHash::hash(qgetenv("DISPLAY"),
+                                 QCryptographicHash::Sha256).toHex().left(16);
+    // Abstract address: a leading NUL byte, not a filesystem path.
+    addr.sun_path[0] = '\0';
+    static_assert(sizeof(addr.sun_path) > 48, "short sockaddr_un path");
+    const int count = qMin(int(sizeof(addr.sun_path) - 1), identity.size());
+    std::memcpy(addr.sun_path + 1, identity.constData(), size_t(count));
+    length = socklen_t(offsetof(sockaddr_un, sun_path) + 1 + count);
+    return addr;
+}
 
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
+    const bool forceShow = a.arguments().contains("--show");
 
-    // Normal invocations (from launchers, keyboard shortcuts or osm-widgets)
-    // should always SHOW the panel, including when the daemon is already alive.
-    // Only the explicit --daemon/--background form starts it hidden at login.
-    const QStringList arguments = a.arguments();
-    const bool startHidden = arguments.contains("--daemon") ||
-                             arguments.contains("--background") ||
-                             arguments.contains("--start-hidden");
-    const QString lockDir = QDir::homePath() + "/.cache/Alternix";
-    QDir().mkpath(lockDir);
-    const QString display = QString::fromLocal8Bit(qgetenv("DISPLAY"));
-    // Per display prevents one X session from suppressing another.
-    const QByteArray displayKey = QCryptographicHash::hash(
-        display.toUtf8(), QCryptographicHash::Sha256).toHex().left(12);
-    QLockFile instanceLock(lockDir + "/osm-notify-" +
-                           QString::fromLatin1(displayKey.constData()) + ".lock");
-    instanceLock.setStaleLockTime(0);
-    if (!instanceLock.tryLock(0)) {
-        if (instanceLock.error() != QLockFile::LockFailedError) {
-            qWarning() << "osm-notify: cannot acquire instance lock:"
-                       << instanceLock.error();
+    const int notifySocket = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (notifySocket < 0) {
+        qWarning() << "osm-notify: cannot create activation socket:" << std::strerror(errno);
+        return 1;
+    }
+    socklen_t addressLength = 0;
+    const sockaddr_un addr = notifyAddress(addressLength);
+    if (::bind(notifySocket, reinterpret_cast<const sockaddr *>(&addr), addressLength) != 0) {
+        const int bindError = errno;
+        if (bindError == EADDRINUSE) {
+            // Existing instance: all legacy invocations mean "show".
+            // There is no need to spawn another panel or install new edge bars.
+            const char command[] = "show";
+            const ssize_t sent = ::sendto(notifySocket, command, sizeof(command) - 1, 0,
+                reinterpret_cast<const sockaddr *>(&addr), addressLength);
+            const int sendError = errno;
+            ::close(notifySocket);
+            if (sent == ssize_t(sizeof(command) - 1)) return 0;
+            qWarning() << "osm-notify: existing instance could not be activated:"
+                       << std::strerror(sendError);
             return 1;
         }
-        // Previously only --show signalled an existing instance, so every
-        // legacy launch command just exited without opening the panel.
-        if (!startHidden) {
-            qint64 pid = 0;
-            QString hostname, appname;
-            if (!instanceLock.getLockInfo(&pid, &hostname, &appname) || pid <= 1 ||
-                ::kill(static_cast<pid_t>(pid), SIGUSR1) != 0) {
-                qWarning() << "osm-notify: could not activate running instance";
-                return 1;
-            }
-        }
-        return 0;
+        ::close(notifySocket);
+        qWarning() << "osm-notify: cannot bind activation socket:"
+                   << std::strerror(bindError);
+        return 1;
     }
 
-    std::signal(SIGUSR1, requestNotifyShow);
     NotificationOverlay overlay;
-    QTimer showSignalPoll;
-    showSignalPoll.setInterval(60);
-    QObject::connect(&showSignalPoll, &QTimer::timeout, &overlay, [&overlay]() {
-        if (g_notifyShowRequested) {
-            g_notifyShowRequested = 0;
-            if (!overlay.closing)
-                overlay.openPanel();
-        }
-    });
-    showSignalPoll.start();
-    if (!startHidden)
+    // The registered activation endpoint is serviced on Qt's event loop,
+    // avoiding signals and polling. No new link libraries are necessary.
+    QSocketNotifier showRequests(notifySocket, QSocketNotifier::Read, &overlay);
+    QObject::connect(&showRequests,
+        QOverload<int>::of(&QSocketNotifier::activated), &overlay,
+        [&overlay, notifySocket](int) {
+            char command[32];
+            while (true) {
+                const ssize_t n = ::recv(notifySocket, command, sizeof(command), MSG_DONTWAIT);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                if (n == 4 && std::memcmp(command, "show", 4) == 0 &&
+                    !overlay.isVisible() && !overlay.closing)
+                    overlay.openPanel();
+            }
+        });
+    QObject::connect(&a, &QCoreApplication::aboutToQuit, &overlay,
+                     [notifySocket]() { ::close(notifySocket); });
+
+    // Preserve the original Qtile autostart: plain `osm-notify` stays hidden.
+    // Only explicit `--show` opens immediately if no instance is running.
+    if (forceShow)
         QTimer::singleShot(0, &overlay, [&overlay]() { overlay.openPanel(); });
 
     QRect g = QApplication::primaryScreen()->geometry();
