@@ -31,6 +31,10 @@
 #include <QEasingCurve>
 #include <QPainterPath>
 #include <QPointer>
+#include <QFile>
+#include <QMessageBox>
+#include <QByteArray>
+#include <unistd.h>
 
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
@@ -172,6 +176,83 @@ static QList<AppEntry> loadDesktopEntries() {
     return apps;
 }
 
+// Existing Alternix authentication: PolicyKit uses /etc/pam.d/polkit-1,
+// while sudo / osm-sudo use /etc/pam.d/sudo.  Do NOT replace either with a
+// launcher-specific sudo hack; keep the real policy authorization step.
+static bool isPolkitName(const QString &path) {
+    const QString name = QFileInfo(path).fileName().toLower();
+    return name == "pkexec" || name.endsWith("-pkexec");
+}
+
+static bool needsPolkit(const QString &command) {
+    const QStringList args = QProcess::splitCommand(command);
+    for (const QString &arg : args)
+        if (isPolkitName(arg)) return true;
+    return false;
+}
+
+static bool polkitPamUsesAlternix() {
+    QFile f("/etc/pam.d/polkit-1");
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    const QByteArray rules = f.readAll();
+    return rules.contains("pam_exec.so") &&
+           rules.contains("/usr/local/libexec/alternix-auth --pam");
+}
+
+static bool isKnownPolkitAgent(const QString &file) {
+    const QString n = QFileInfo(file).fileName().toLower();
+    return n == "lxpolkit" || n == "lxqt-policykit-agent" ||
+           n == "polkit-mate-authentication-agent-1" ||
+           n == "polkit-gnome-authentication-agent-1" ||
+           n == "polkit-kde-authentication-agent-1" || n == "xfce-polkit";
+}
+
+// Use /proc rather than guessing from one package name. A package may have
+// installed mate-polkit or policykit-1-gnome rather than lxpolkit.
+static bool polkitAgentRunning() {
+    const uid_t uid = getuid();
+    QDirIterator it("/proc", QDir::Dirs | QDir::NoDotAndDotDot);
+    while (it.hasNext()) {
+        const QString pidPath = it.next();
+        const QString pidName = QFileInfo(pidPath).fileName();
+        if (pidName.isEmpty() || !pidName.at(0).isDigit()) continue;
+        if (QFileInfo(pidPath).ownerId() != uint(uid)) continue;
+        QFile cmd(pidPath + "/cmdline");
+        if (!cmd.open(QIODevice::ReadOnly)) continue;
+        const QList<QByteArray> argv = cmd.read(8192).split('\0');
+        for (const QByteArray &arg : argv) {
+            if (arg.isEmpty()) continue;
+            if (isKnownPolkitAgent(QString::fromLocal8Bit(arg))) return true;
+        }
+    }
+    return false;
+}
+
+static bool startPolkitAgent() {
+    if (polkitAgentRunning()) return true;
+    // An installed agent is needed before pkexec can request graphical
+    // authentication. Start it as this desktop user, never with sudo.
+    // Xsession/XDG startup from alternix-auth-setup.sh covers other apps.
+    const QStringList paths = {
+        "/usr/bin/lxpolkit",
+        "/usr/libexec/polkit-mate-authentication-agent-1",
+        "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1",
+        "/usr/lib/x86_64-linux-gnu/polkit-mate/polkit-mate-authentication-agent-1",
+        "/usr/lib/policykit-1-gnome/polkit-gnome-authentication-agent-1",
+        "/usr/libexec/polkit-gnome-authentication-agent-1",
+        "/usr/bin/lxqt-policykit-agent",
+        "/usr/libexec/lxqt-policykit-agent",
+        "/usr/libexec/xfce-polkit",
+        "/usr/lib/polkit-kde-authentication-agent-1",
+        "/usr/libexec/polkit-kde-authentication-agent-1"
+    };
+    for (const QString &path : paths) {
+        if (QFileInfo(path).isExecutable() &&
+            QProcess::startDetached(path, QStringList())) return true;
+    }
+    return false;
+}
+
 // Launch a .desktop command without putting it through a shell by default.
 // pkexec identifies the authorizing application by its *live parent process*.
 // QProcess::startDetached() followed by closing this launcher leaves pkexec
@@ -185,7 +266,7 @@ static bool launchDesktopCommand(const QString &command) {
 
     const QString program = parts.takeFirst();
     const QString basename = QFileInfo(program).fileName().toLower();
-    const bool needsLiveParent = (basename == "pkexec" || basename.endsWith("-pkexec"));
+    const bool needsLiveParent = isPolkitName(basename) || needsPolkit(command);
     if (needsLiveParent) {
         QStringList shellArgs = {
             "-c", "\"$@\"; status=$?; exit \"$status\"", "alternix-app", program
@@ -302,10 +383,54 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *e) override {
         if (!dragging && e->button() == Qt::LeftButton) {
-            if (launchDesktopCommand(entry.exec)) {
+            const QString command = entry.exec;
+            if (needsPolkit(command)) {
+                if (!polkitPamUsesAlternix()) {
+                    QMessageBox::warning(this, "AlternixOS PolicyKit authentication",
+                        "The PolicyKit PAM rule is not currently connected to "
+                        "the existing Alternix pattern/PIN verifier.\n\n"
+                        "The existing authentication setup may have rolled back "
+                        "PolicyKit after its live test failed. Run the updated "
+                        "alternix-auth-setup.sh from your normal desktop session.");
+                    QFrame::mouseReleaseEvent(e);
+                    return;
+                }
+                if (!polkitAgentRunning() && !startPolkitAgent()) {
+                    QMessageBox::warning(this, "PolicyKit graphical agent unavailable",
+                        "No installed graphical PolicyKit agent could be started "
+                        "in the current Qtile session.\n\n"
+                        "An existing PolicyKit agent is required before "
+                        "Synaptic can request the Alternix pattern/PIN.");
+                    QFrame::mouseReleaseEvent(e);
+                    return;
+                }
+                // A newly spawned agent must register over the D-Bus session
+                // before pkexec requests authentication. Check again without
+                // freezing the desktop or leaving a sudo prompt behind.
+                QPointer<QWidget> launcherWindow = window();
+                QTimer::singleShot(1100, this, [this, command, launcherWindow]() {
+                    if (!polkitAgentRunning()) {
+                        QMessageBox::warning(this, "PolicyKit agent could not register",
+                            "The graphical agent did not stay running. Check "
+                            "the Qtile session D-Bus address and the PolicyKit "
+                            "diagnostic output before retrying Synaptic.");
+                        return;
+                    }
+                    if (launchDesktopCommand(command)) {
+                        if (launcherWindow) launcherWindow->close();
+                    } else {
+                        qWarning() << "osm-launcher: failed to launch" << command;
+                        QMessageBox::warning(this, "Could not start application",
+                                             "Failed to start: " + command);
+                    }
+                });
+                QFrame::mouseReleaseEvent(e);
+                return;
+            }
+            if (launchDesktopCommand(command)) {
                 if (QWidget *w = window()) w->close();
             } else {
-                qWarning() << "osm-launcher: failed to start desktop command:" << entry.exec;
+                qWarning() << "osm-launcher: failed to start desktop command:" << command;
             }
         }
         QFrame::mouseReleaseEvent(e);
@@ -567,6 +692,10 @@ int main(int argc, char **argv) {
 
     KeyFilter *kf = new KeyFilter();
     window.installEventFilter(kf);
+
+    // Best-effort only: don't block ordinary apps if PolicyKit is not installed.
+    if (polkitPamUsesAlternix() && !polkitAgentRunning())
+        startPolkitAgent();
 
     window.showFullScreen();
 

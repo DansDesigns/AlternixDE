@@ -91,6 +91,11 @@ rollback_polkit_auth_policy() {
     else
         rm -f /etc/X11/Xsession.d/96alternix-polkit-agent
     fi
+    if [[ -f "$TMP/polkit-xdg-before" ]]; then
+        install -o root -g root -m 0644 "$TMP/polkit-xdg-before" /etc/xdg/autostart/alternix-polkit-agent.desktop
+    else
+        rm -f /etc/xdg/autostart/alternix-polkit-agent.desktop
+    fi
 }
 auth_setup_exit() {
     local exit_code=$?
@@ -330,33 +335,120 @@ PY_POLICY
 # we even attempt to switch PAM.  The protected credential is already present.
 # This is deliberately an interactive, one-time setup test; it is not a
 # non-interactive sudo -n probe.  A headless/ISO build must NOT activate PAM.
+for dep in runuser setpriv timeout; do
+    command -v "$dep" >/dev/null || { echo "ERROR: Missing dependency: $dep. PAM unchanged." >&2; exit 1; }
+done
+# An updater run under sudo can lose the *login user's* D-Bus address,
+# particularly on SysVinit/Qtile sessions started with dbus-launch.  Reading
+# the real user's own running session environment only supplies hints for
+# launching an UNPRIVILEGED agent. It does not decide who can authenticate.
+ALT_SESSION_DISPLAY=''
+ALT_SESSION_XAUTH=''
+ALT_SESSION_RUNTIME=''
+ALT_SESSION_DBUS=''
+mapfile -d '' -t ALT_SESSION_VARS < <(python3 - "$USER_UID" <<'PY_ALT_SESSION'
+import os, pathlib, re, stat, sys
+uid = int(sys.argv[1])
+keys = {'DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'}
+candidates = []
+for p in pathlib.Path('/proc').iterdir():
+    if not p.name.isdigit():
+        continue
+    try:
+        if p.stat().st_uid != uid:
+            continue
+        raw = (p / 'environ').read_bytes()[:131072]
+        env = {}
+        for pair in raw.split(b'\0'):
+            if b'=' not in pair:
+                continue
+            k, v = pair.split(b'=', 1)
+            key = k.decode('ascii', errors='ignore')
+            if key in keys:
+                env[key] = v.decode('utf-8', errors='replace')
+        display = env.get('DISPLAY', '')
+        if not re.fullmatch(r':[0-9]+(?:\.[0-9]+)?', display):
+            continue
+        # Avoid trusting unreadable or unrelated Xauthority files.
+        xa = env.get('XAUTHORITY', '')
+        if xa:
+            try:
+                st = os.lstat(xa)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_mode & 0o022:
+                    env.pop('XAUTHORITY', None)
+            except OSError:
+                env.pop('XAUTHORITY', None)
+        runtime = env.get('XDG_RUNTIME_DIR', '')
+        if runtime:
+            try:
+                st = os.lstat(runtime)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid or st.st_mode & 0o077:
+                    env.pop('XDG_RUNTIME_DIR', None)
+            except OSError:
+                env.pop('XDG_RUNTIME_DIR', None)
+        if not env.get('DBUS_SESSION_BUS_ADDRESS', '').startswith('unix:'):
+            env.pop('DBUS_SESSION_BUS_ADDRESS', None)
+        comm = (p / 'comm').read_text(errors='replace').strip()
+        score = (10 if 'qtile' in comm else 0) + (6 if 'dbus-daemon' in comm else 0) + (
+            4 if env.get('DBUS_SESSION_BUS_ADDRESS') else 0) + (
+            2 if env.get('XAUTHORITY') else 0) + (
+            1 if env.get('XDG_RUNTIME_DIR') else 0)
+        candidates.append((score, env))
+    except (OSError, UnicodeError, ValueError):
+        continue
+if candidates:
+    chosen = dict(max(candidates, key=lambda t:t[0])[1])
+    # The main Qtile process may predate dbus-launch; some descendant apps
+    # have the correct bus even if Qtile's initial environ doesn't show it.
+    for key in ('DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY', 'XDG_RUNTIME_DIR'):
+        if key not in chosen:
+            matches = [item for item in candidates if item[1].get('DISPLAY') == chosen['DISPLAY']
+                       and item[1].get(key)]
+            if matches:
+                chosen[key] = max(matches, key=lambda t:t[0])[1][key]
+    for k in sorted(chosen):
+        sys.stdout.buffer.write((k + '=' + chosen[k]).encode() + b'\0')
+PY_ALT_SESSION
+)
+for entry in "${ALT_SESSION_VARS[@]}"; do
+    case "$entry" in
+      DISPLAY=*) ALT_SESSION_DISPLAY="${entry#*=}" ;;
+      XAUTHORITY=*) ALT_SESSION_XAUTH="${entry#*=}" ;;
+      XDG_RUNTIME_DIR=*) ALT_SESSION_RUNTIME="${entry#*=}" ;;
+      DBUS_SESSION_BUS_ADDRESS=*) ALT_SESSION_DBUS="${entry#*=}" ;;
+    esac
+done
+if [[ -z "${DISPLAY:-}" && -n "$ALT_SESSION_DISPLAY" ]]; then
+    export DISPLAY="$ALT_SESSION_DISPLAY"
+fi
+
 if [[ -z "${DISPLAY:-}" ]]; then
     echo 'ERROR: No graphical DISPLAY in installer/updater environment. sudo PAM was NOT changed.' >&2
     echo 'Run authentication activation from the user desktop (with a terminal and root approval).' >&2
     exit 1
 fi
-for dep in runuser setpriv timeout; do
-    command -v "$dep" >/dev/null || { echo "ERROR: Missing dependency: $dep. PAM unchanged." >&2; exit 1; }
-done
+
 AUTH_SESSION_ENV=("HOME=$USER_HOME" "USER=$LOGIN_USER" "LOGNAME=$LOGIN_USER"
-                  'PATH=/usr/local/bin:/usr/bin:/bin' "DISPLAY=$DISPLAY")
-if [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]] &&
-   [[ "$(stat -c %u "$XAUTHORITY")" = "$USER_UID" ]]; then
+                  'PATH=/usr/local/bin:/usr/bin:/bin' "DISPLAY=${ALT_SESSION_DISPLAY:-$DISPLAY}")
+if [[ -n "$ALT_SESSION_XAUTH" ]]; then
+    AUTH_SESSION_ENV+=("XAUTHORITY=$ALT_SESSION_XAUTH")
+elif [[ -n "${XAUTHORITY:-}" && -f "$XAUTHORITY" ]] &&
+     [[ "$(stat -c %u "$XAUTHORITY")" = "$USER_UID" ]]; then
     AUTH_SESSION_ENV+=("XAUTHORITY=$XAUTHORITY")
 elif [[ -f "$USER_HOME/.Xauthority" ]]; then
     AUTH_SESSION_ENV+=("XAUTHORITY=$USER_HOME/.Xauthority")
 fi
-# sudo's environment can contain /run/user/0, which is not a desktop
-# PolicyKit session for the target login user. Prefer their own runtime bus.
-if [[ -d "/run/user/$USER_UID" ]] && [[ "$(stat -c %u "/run/user/$USER_UID")" = "$USER_UID" ]]; then
+# On SysVinit Qtile often uses dbus-launch / dbus-run-session with an
+# abstract bus address, not /run/user/<UID>/bus. Prefer the live Qtile bus.
+if [[ -n "$ALT_SESSION_RUNTIME" ]]; then
+    AUTH_SESSION_ENV+=("XDG_RUNTIME_DIR=$ALT_SESSION_RUNTIME")
+elif [[ -d "/run/user/$USER_UID" ]] && [[ "$(stat -c %u "/run/user/$USER_UID")" = "$USER_UID" ]]; then
     AUTH_SESSION_ENV+=("XDG_RUNTIME_DIR=/run/user/$USER_UID")
-    if [[ -S "/run/user/$USER_UID/bus" ]]; then
-        AUTH_SESSION_ENV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus")
-    fi
-else
-    for key in XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS; do
-        if [[ -n "${!key:-}" ]]; then AUTH_SESSION_ENV+=("$key=${!key}"); fi
-    done
+fi
+if [[ -n "$ALT_SESSION_DBUS" ]]; then
+    AUTH_SESSION_ENV+=("DBUS_SESSION_BUS_ADDRESS=$ALT_SESSION_DBUS")
+elif [[ -S "/run/user/$USER_UID/bus" ]]; then
+    AUTH_SESSION_ENV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus")
 fi
 
 # pam_exec does not forward DISPLAY/XAUTHORITY from the sudo process.
@@ -551,7 +643,13 @@ POLKIT_RULE
 # Prefer whichever supported agent is actually installed, not lxpolkit alone.
 cat > "$TMP/96alternix-polkit-agent" <<'POLKIT_XSESSION'
 # AlternixOS graphical PolicyKit agent; PAM handles pattern/PIN verification.
+# Also sourced through XDG autostart when Qtile does not use Xsession.d.
 if [ -n "${DISPLAY:-}" ]; then
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -n "${XDG_RUNTIME_DIR:-}" ] &&
+       [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+        export DBUS_SESSION_BUS_ADDRESS
+    fi
     alternix_agent_running=0
     if command -v pgrep >/dev/null 2>&1 && \
        pgrep -u "$(id -u)" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
@@ -580,6 +678,19 @@ if [ -n "${DISPLAY:-}" ]; then
 fi
 POLKIT_XSESSION
 
+# XDG autostart sources the same existing Xsession startup fragment.
+# No additional authentication or repair script is installed.
+cat > "$TMP/alternix-polkit-agent.desktop" <<'POLKIT_XDG'
+[Desktop Entry]
+Type=Application
+Name=AlternixOS PolicyKit Agent
+Comment=Start the installed PolicyKit agent in the user session
+Exec=/bin/sh -c ". /etc/X11/Xsession.d/96alternix-polkit-agent"
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+POLKIT_XDG
+
 # All backups are taken BEFORE touching PolicyKit; failed live verification
 # restores only PolicyKit, not already-committed sudo authentication.
 if [[ -f /etc/pam.d/polkit-1 ]]; then
@@ -593,14 +704,18 @@ fi
 if [[ -f /etc/X11/Xsession.d/96alternix-polkit-agent ]]; then
     install -o root -g root -m 0600 /etc/X11/Xsession.d/96alternix-polkit-agent "$TMP/polkit-agent-before"
 fi
+if [[ -f /etc/xdg/autostart/alternix-polkit-agent.desktop ]]; then
+    install -o root -g root -m 0600 /etc/xdg/autostart/alternix-polkit-agent.desktop "$TMP/polkit-xdg-before"
+fi
 
 # One transaction for PolicyKit, committed only after a verified pkexec call.
 POLKIT_ACTIVATION_IN_PROGRESS=1
 install -o root -g root -m 0644 "$TMP/polkit-pam" /etc/pam.d/.polkit-1.alternix-candidate
 mv -f /etc/pam.d/.polkit-1.alternix-candidate /etc/pam.d/polkit-1
-install -d -o root -g root -m 0755 /etc/polkit-1/rules.d /etc/X11/Xsession.d
+install -d -o root -g root -m 0755 /etc/polkit-1/rules.d /etc/X11/Xsession.d /etc/xdg/autostart
 install -o root -g root -m 0644 "$TMP/00-alternix-auth.rules" /etc/polkit-1/rules.d/00-alternix-auth.rules
 install -o root -g root -m 0644 "$TMP/96alternix-polkit-agent" /etc/X11/Xsession.d/96alternix-polkit-agent
+install -o root -g root -m 0644 "$TMP/alternix-polkit-agent.desktop" /etc/xdg/autostart/alternix-polkit-agent.desktop
 
 # Try to start an installed unprivileged agent in the existing desktop.
 # Preserve the session's login identity; do not launch Qt GUI as root.
@@ -610,7 +725,7 @@ if [[ -n "$POLKIT_AGENT" ]]; then
        ! pgrep -u "$USER_UID" -f '(^|/)(lxpolkit|polkit-mate-authentication-agent-1|polkit-gnome-authentication-agent-1|lxqt-policykit-agent|xfce-polkit|polkit-kde-authentication-agent-1)( |$)' >/dev/null 2>&1; then
         # Keep diagnostics from a failed graphical registration. A missing
         # session bus or Xauthority commonly causes an immediate agent exit.
-        setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
+        setpriv --reuid "$LOGIN_USER" --regid "$(id -g "$LOGIN_USER")" --init-groups -- \
             env -i "${AUTH_SESSION_ENV[@]}" "$POLKIT_AGENT" \
             </dev/null >"$TMP/polkit-agent-stdout" 2>"$TMP/polkit-agent-stderr" &
         agent_pid=$!
@@ -630,10 +745,14 @@ fi
 
 # --disable-internal-agent prevents a misleading terminal-password fallback.
 # The actual desktop may use an agent that is not named lxpolkit.
+echo "[Auth] Testing PolicyKit through the desktop session: ${ALT_SESSION_DISPLAY:-$DISPLAY}"
+if [[ -z "$ALT_SESSION_DBUS" && ! -S "/run/user/$USER_UID/bus" ]]; then
+    echo '[Auth] WARNING: No desktop D-Bus address was discoverable; graphical agent registration may fail.' >&2
+fi
 echo '[Auth] Testing PolicyKit through the graphical session...'
 POLKIT_TEST_OUTPUT=''
 if POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
-    setpriv --reuid "$LOGIN_USER" --regid "$LOGIN_USER" --init-groups -- \
+    setpriv --reuid "$LOGIN_USER" --regid "$(id -g "$LOGIN_USER")" --init-groups -- \
     env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec --disable-internal-agent /usr/bin/id -u \
     2>"$TMP/polkit-test-errors")" && [[ "$POLKIT_TEST_OUTPUT" = 0 ]]; then
     POLKIT_ACTIVATION_IN_PROGRESS=0
