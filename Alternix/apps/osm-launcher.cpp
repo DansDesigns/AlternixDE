@@ -31,7 +31,6 @@
 #include <QGraphicsEffect>
 #include <QPair>
 #include <QEasingCurve>
-#include <QPainterPath>
 #include <QPointer>
 #include <QFile>
 #include <QMessageBox>
@@ -88,9 +87,13 @@ class LauncherWindow : public QWidget {
     qreal gradientOpacity = 1.0;
     qreal backdropOpacity = 1.0;
     bool dismissing = false;
-    qreal dismissProgress = 0.0;
-    QPixmap dismissFrame;
     QPointer<QTimer> iconLoader;
+    // Retain the live layout targets so every close action, including a
+    // pull-down gesture, can reverse the currently visible opening cascade.
+    QPointer<QScrollArea> animationScroll;
+    QVector<QPointer<QWidget>> animationTiles;
+    QPointer<QWidget> animationCloseButton;
+    int animationColumns = 4;
 
 public:
     using QWidget::QWidget;
@@ -104,6 +107,13 @@ public:
     void openWithAnimation(QScrollArea *scroll, const QVector<QWidget*> &tiles,
                            int columns, QWidget *closeButton) {
         if (isTransitioning() || !scroll || columns < 1) return;
+
+        animationScroll = scroll;
+        animationColumns = columns;
+        animationCloseButton = closeButton;
+        animationTiles.clear();
+        animationTiles.reserve(tiles.size());
+        for (QWidget *tile : tiles) animationTiles.append(tile);
 
         if (layout()) layout()->activate();
         if (scroll->widget() && scroll->widget()->layout())
@@ -209,33 +219,112 @@ public:
         animation->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
-    // Keep the original pull-down-to-dismiss animation unchanged.
+    // Reverse the opening cascade on every close action, including pull-down:
+    // close button -> last visible row's contents -> its cards -> earlier rows
+    // -> transparent backdrop -> top/bottom gradients. The real fullscreen
+    // window and grid remain fixed so Qtile never has to animate a resize.
     void dismissWithAnimation() {
         if (isTransitioning()) return;
-
-        dismissFrame = grab(); // Capture all tiles, fades and the close button.
         dismissing = true;
         if (iconLoader) iconLoader->stop();
+        if (animationScroll)
+            QScroller::scroller(animationScroll->viewport())->stop();
 
-        // The snapshot replaces the live child widgets during the transition.
-        const auto children = findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
-        for (QWidget *child : children) child->hide();
+        constexpr int gradientMs = 90;
+        constexpr int backdropMs = 80;
+        constexpr int cardMs = 85;
+        constexpr int contentMs = 90;
+        constexpr int rowPauseMs = 8;
+        constexpr int closeMs = 100;
 
-        QVariantAnimation *animation = new QVariantAnimation(this);
-        animation->setDuration(320);
+        QVector<LauncherRevealStep> steps;
+        int nextRowStart = animationCloseButton ? closeMs : 0;
+        int currentRow = -1;
+
+        // Keep the entire set-up offscreen for one paint cycle, avoiding a
+        // flash when the graphics effects are attached to the live widgets.
+        setUpdatesEnabled(false);
+        if (animationCloseButton) {
+            auto *effect = new LauncherRevealEffect(0.75, animationCloseButton);
+            effect->setProgress(1.0);
+            animationCloseButton->setGraphicsEffect(effect);
+            steps.append(LauncherRevealStep(effect, 0, closeMs));
+        }
+
+        if (animationScroll && animationColumns > 0) {
+            const int visibleTop = animationScroll->verticalScrollBar()->value();
+            const int visibleBottom = visibleTop + animationScroll->viewport()->height();
+
+            // Traverse backwards so the bottommost *visible* row disappears
+            // first, even when the app list was scrolled before dismissal.
+            for (int index = animationTiles.size() - 1; index >= 0; --index) {
+                QWidget *tile = animationTiles.at(index);
+                if (!tile) continue;
+                const QRect tileRect = tile->geometry();
+                if (tileRect.bottom() < visibleTop || tileRect.top() >= visibleBottom)
+                    continue;
+
+                const int row = index / animationColumns;
+                if (row != currentRow) {
+                    if (currentRow >= 0)
+                        nextRowStart += contentMs + cardMs + rowPauseMs;
+                    currentRow = row;
+                }
+
+                // Reverse the opening of this row: first the icon and title
+                // shrink/fade, then the cards shrink/fade together.
+                const auto labels = tile->findChildren<QLabel*>();
+                for (QLabel *label : labels) {
+                    auto *effect = new LauncherRevealEffect(0.85, label);
+                    effect->setProgress(1.0);
+                    label->setGraphicsEffect(effect);
+                    steps.append(LauncherRevealStep(effect, nextRowStart, contentMs));
+                }
+
+                auto *effect = new LauncherRevealEffect(0.30, tile);
+                effect->setProgress(1.0);
+                tile->setGraphicsEffect(effect);
+                steps.append(LauncherRevealStep(effect,
+                                                nextRowStart + contentMs, cardMs));
+            }
+        }
+
+        const int backdropStart = currentRow < 0 ? nextRowStart :
+            nextRowStart + contentMs + cardMs + rowPauseMs;
+        const int gradientStart = backdropStart + backdropMs;
+        const int totalMs = gradientStart + gradientMs;
+        gradientOpacity = 1.0;
+        backdropOpacity = 1.0;
+        setUpdatesEnabled(true);
+        update();
+
+        auto *animation = new QVariantAnimation(this);
+        animation->setDuration(totalMs);
         animation->setStartValue(0.0);
-        animation->setEndValue(1.0);
-        animation->setEasingCurve(QEasingCurve::InCubic);
+        animation->setEndValue(double(totalMs));
+        animation->setEasingCurve(QEasingCurve::Linear);
         connect(animation, &QVariantAnimation::valueChanged, this,
-                [this](const QVariant &v) {
-            dismissProgress = v.toDouble();
+                [this, steps, backdropStart, backdropMs, gradientStart, gradientMs]
+                (const QVariant &value) {
+            const qreal elapsed = value.toDouble();
+            auto easeInCubic = [](qreal v) -> qreal {
+                v = qBound(qreal(0), v, qreal(1));
+                return v * v * v;
+            };
+            for (const LauncherRevealStep &step : steps) {
+                if (step.effect)
+                    step.effect->setProgress(1.0 - easeInCubic(
+                        (elapsed - step.startMs) / step.durationMs));
+            }
+            backdropOpacity = 1.0 - easeInCubic((elapsed - backdropStart) / backdropMs);
+            gradientOpacity = 1.0 - easeInCubic((elapsed - gradientStart) / gradientMs);
             update();
         });
         connect(animation, &QVariantAnimation::finished, this, [this]() {
+            // At this point every visible layer has disappeared.
             close();
         });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
-        update();
     }
 
 protected:
@@ -243,27 +332,7 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        if (dismissing) {
-            // Closing still shrinks the whole page towards the bottom centre.
-            if (!dismissFrame.isNull()) {
-                const qreal t = dismissProgress;
-                const qreal scale = 1.0 - 0.82 * t;
-                const qreal w = width() * scale;
-                const qreal h = height() * scale;
-                const QRectF target((width() - w) / 2.0,
-                                    height() - h + height() * 0.08 * t,
-                                    w, h);
-                p.setRenderHint(QPainter::SmoothPixmapTransform);
-                p.setOpacity(1.0 - t);
-                QPainterPath rounded;
-                rounded.addRoundedRect(target, 28.0 * t, 28.0 * t);
-                p.setClipPath(rounded);
-                p.drawPixmap(target, dismissFrame, QRectF(dismissFrame.rect()));
-            }
-            return;
-        }
-
-        // Background layers are animated independently during opening.
+        // Background layers animate independently during opening and closing.
         p.setOpacity(backdropOpacity);
         p.fillRect(rect(), QColor(0,0,0,140));
         p.setOpacity(gradientOpacity);
@@ -579,7 +648,9 @@ protected:
                         return;
                     }
                     if (launchDesktopCommand(command)) {
-                        if (launcherWindow) launcherWindow->close();
+                        if (auto *launcher = dynamic_cast<LauncherWindow*>(launcherWindow.data()))
+                            launcher->dismissWithAnimation();
+                        else if (launcherWindow) launcherWindow->close();
                     } else {
                         qWarning() << "osm-launcher: failed to launch" << command;
                         QMessageBox::warning(this, "Could not start application",
@@ -590,7 +661,9 @@ protected:
                 return;
             }
             if (launchDesktopCommand(command)) {
-                if (QWidget *w = window()) w->close();
+                if (auto *launcher = dynamic_cast<LauncherWindow*>(window()))
+                    launcher->dismissWithAnimation();
+                else if (QWidget *w = window()) w->close();
             } else {
                 qWarning() << "osm-launcher: failed to start desktop command:" << command;
             }
@@ -608,7 +681,9 @@ public:
             if (ke->key() == Qt::Key_Escape) {
                 if (auto w = qobject_cast<QWidget*>(obj)) {
                     while (w && !w->isWindow()) w = w->parentWidget();
-                    if (w) w->close();
+                    if (auto *launcher = dynamic_cast<LauncherWindow*>(w))
+                        launcher->dismissWithAnimation();
+                    else if (w) w->close();
                     return true;
                 }
             }
@@ -847,7 +922,8 @@ int main(int argc, char **argv) {
     closeBtn->setStyleSheet(
         "QPushButton { background-color: #66000000; color: red; font-size: 30pt; padding: 6px 18px; border-radius: 8px; }"
         "QPushButton:hover { background-color: #282828; }");
-    QObject::connect(closeBtn, &QPushButton::clicked, &window, &QWidget::close);
+    QObject::connect(closeBtn, &QPushButton::clicked, &window,
+                     [&window]() { window.dismissWithAnimation(); });
     closeRow->addWidget(closeBtn);
     closeRow->addStretch();
     main->addLayout(closeRow);
