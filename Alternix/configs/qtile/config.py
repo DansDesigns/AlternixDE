@@ -229,7 +229,7 @@ def _configure_onboard_workarea():
     try:
         subprocess.run(
             ["gsettings", "set", "org.onboard.window",
-             "docking-shrink-workarea", "false"],
+             "docking-shrink-workarea", "true"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
@@ -256,7 +256,7 @@ def autostart():
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-powerd'])
-    subprocess.Popen(['osm-notify'])
+    subprocess.Popen(['osm-notify --daemon'])
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['touchegg'])
