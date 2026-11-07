@@ -32,6 +32,11 @@
 #define STORE "/var/lib/alternix-auth"
 #define ITERATIONS 240000
 #define SECRET_MAX 1024
+/* The prompt enforces 3 pattern tries and 2 PIN tries.  The protected
+ * verifier also slows repeated failures across prompts, but a correct
+ * credential must never be refused merely because a previous prompt failed. */
+#define LOCK_SLOWDOWN_INITIAL_MS 2000
+#define LOCK_SLOWDOWN_MAX_MS 8000
 #define GUI "/usr/local/bin/osm-lock"
 static uid_t owner;
 static void wipe(void *p,size_t n){ OPENSSL_cleanse(p,n); }
@@ -145,8 +150,14 @@ static int load_credential(uid_t uid,int *enh,unsigned char salt[16],unsigned ch
  if(!v[0]||strcmp(v[0],"1")||!v[1]||(strcmp(v[1],"1")&&strcmp(v[1],"0"))||!v[2]||!v[3]||!v[4]||hexdecode(v[2],salt,16)||hexdecode(v[3],pd,32)||hexdecode(v[4],id,32))return -1;
  *enh=(*v[1]=='1');wipe(buf,sizeof(buf));return 0;
 }
+static int wait_milliseconds(int ms){
+ struct timespec delay={.tv_sec=ms/1000,.tv_nsec=(long)(ms%1000)*1000000L};
+ while(nanosleep(&delay,&delay)!=0){if(errno!=EINTR)return -1;}
+ return 0;
+}
 static int limited_check(uid_t uid,const char *kind,const char *value){
- char path[256]; int enhanced=0,ret=-1;unsigned char salt[16],pd[32],id[32],calc[32];
+ char path[256];int enhanced=0,ret=-1;
+ unsigned char salt[16],pd[32],id[32],calc[32]={0};
  if(load_credential(uid,&enhanced,salt,pd,id)!=0)return -1;
  if(ufile(path,sizeof(path),"attempts",uid)!=0)return -1;
  int fd=open(path,O_RDWR|O_CREAT|O_NOFOLLOW|O_CLOEXEC,0600);
@@ -154,19 +165,49 @@ static int limited_check(uid_t uid,const char *kind,const char *value){
  struct stat st;
  if(fstat(fd,&st)!=0||!S_ISREG(st.st_mode)||st.st_uid!=0||(st.st_mode&077)!=0||flock(fd,LOCK_EX)!=0){close(fd);return -1;}
  int failures=0;long until=0;char b[128]={0};ssize_t z=read(fd,b,sizeof(b)-1);
- if(z>0)sscanf(b,"%d %ld",&failures,&until);
+ if(z>0 && sscanf(b,"%d %ld",&failures,&until)!=2){failures=0;until=0;}
+ if(failures<0)failures=0;
  time_t now=time(NULL);
- if(until>now)goto done;
- if(until && until<=now){failures=0;until=0;}
+ int cooling_down=(until>now);
+ if(!cooling_down && until){failures=0;until=0;}
+ if(cooling_down){
+  /* Old behaviour denied everything until 'until', including the correct
+   * credentials at the NEXT prompt. Instead delay every candidate uniformly
+   * BEFORE verification. This preserves cross-prompt brute-force throttling
+   * without turning the previous user's mistake into a forced denial.
+   * Further incorrect guesses cause progressively longer delays. */
+  int ms=LOCK_SLOWDOWN_INITIAL_MS;
+  if(failures>0){
+   int extra=failures>6?6000:failures*1000;
+   ms+=extra;
+  }
+  if(ms>LOCK_SLOWDOWN_MAX_MS)ms=LOCK_SLOWDOWN_MAX_MS;
+  if(wait_milliseconds(ms)!=0)goto done;
+ }
  if((!strcmp(kind,"P:")||!strcmp(kind,"I:")) && derive(salt,kind,value,calc)==0){
   const unsigned char *expect=!strcmp(kind,"P:")?pd:id;
-  if(CRYPTO_memcmp(calc,expect,32)==0){ret=0;failures=0;until=0;}
+  if(CRYPTO_memcmp(calc,expect,32)==0){
+   /* Success ALWAYS clears the root-owned failure state, even during a
+    * cooldown inherited from an earlier denied/timed-out prompt. */
+   ret=0;failures=0;until=0;
+  }
  }
- if(ret!=0){failures++;if(failures>=5){failures=0;until=(long)now+90;}}
- if(lseek(fd,0,SEEK_SET)<0||ftruncate(fd,0)!=0)goto done;
+ if(ret!=0){
+  if(cooling_down){
+   /* Retain the current 90-second slowdown window. The count controls the
+    * extra delay applied to later wrong guesses in this same window. */
+   if(failures<1000)failures++;
+  }else{
+   failures++;
+   if(failures>=5){failures=0;until=(long)now+90;}
+  }
+ }
+ if(lseek(fd,0,SEEK_SET)<0||ftruncate(fd,0)!=0){ret=-1;goto done;}
  int n=snprintf(b,sizeof(b),"%d %ld\n",failures,until);
- if(write(fd,b,n)!=n||fsync(fd)!=0)ret=-1;
- done: flock(fd,LOCK_UN);close(fd);wipe(calc,sizeof(calc));wipe(pd,sizeof(pd));wipe(id,sizeof(id));return ret;
+ if(n<0||n>=(int)sizeof(b)||write(fd,b,n)!=n||fsync(fd)!=0)ret=-1;
+ done: flock(fd,LOCK_UN);close(fd);
+ wipe(calc,sizeof(calc));wipe(pd,sizeof(pd));wipe(id,sizeof(id));wipe(salt,sizeof(salt));
+ return ret;
 }
 static int get_payload(char *line,char **kind,char **data){
  if(!strncmp(line,"P:",2)){*kind="P:";*data=line+2;return 0;}
