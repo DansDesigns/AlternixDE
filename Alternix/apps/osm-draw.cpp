@@ -52,7 +52,8 @@ public:
           m_showPreview(false),
           m_zoomFactor(1.0),
           m_panActive(false),
-          m_viewOffset(0, 0)
+          m_viewOffset(0, 0),
+          m_viewInitialized(false)
     {
         // Optimised for incremental painting
         setAttribute(Qt::WA_StaticContents, true);
@@ -229,6 +230,22 @@ protected:
 
     void resizeEvent(QResizeEvent *event) override {
         QWidget::resizeEvent(event);
+
+        if (event->size().isEmpty())
+            return;
+
+        if (!m_viewInitialized) {
+            // Centre the drawing page once the canvas has its real layout size.
+            centerCanvas();
+            m_viewInitialized = true;
+        } else if (event->oldSize().isValid()) {
+            // Keep the page centred relative to a resized window, while
+            // preserving any offset the user introduced with the Grab tool.
+            const QSize delta = event->size() - event->oldSize();
+            m_viewOffset += QPointF(delta.width() / 2.0, delta.height() / 2.0);
+        }
+
+        update();
     }
 
     void mousePressEvent(QMouseEvent *e) override {
@@ -367,6 +384,7 @@ private:
     bool    m_panActive;
     QPoint  m_panLastPos;
     QPointF m_viewOffset;
+    bool    m_viewInitialized;
 
     QStack<QImage> m_undoStack;
     QStack<QImage> m_redoStack;
