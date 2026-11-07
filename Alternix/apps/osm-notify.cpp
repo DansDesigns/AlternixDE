@@ -1573,21 +1573,32 @@ int main(int argc, char **argv) {
     // The registered activation endpoint is serviced on Qt's event loop,
     // avoiding signals and polling. No new link libraries are necessary.
     QSocketNotifier showRequests(notifySocket, QSocketNotifier::Read, &overlay);
-    QObject::connect(&showRequests,
-        QOverload<int>::of(&QSocketNotifier::activated), &overlay,
-        [&overlay, notifySocket](int) {
-            char command[32];
-            while (true) {
-                const ssize_t n = ::recv(notifySocket, command, sizeof(command), MSG_DONTWAIT);
-                if (n < 0) {
-                    if (errno == EINTR) continue;
-                    break;
-                }
-                if (n == 4 && std::memcmp(command, "show", 4) == 0 &&
-                    !overlay.isVisible() && !overlay.closing)
-                    overlay.openPanel();
+    // Qt 5.15 replaced activated(int) with a QSocketDescriptor/Type signal.
+    // Connect to the visible overload directly: some Qt 5.15 headers hide
+    // the obsolete int overload and include a private trailing signal token.
+    // The receiving lambda can ignore that trailing token safely.
+    auto processShowRequests = [&overlay, notifySocket]() {
+        char command[32];
+        while (true) {
+            const ssize_t n = ::recv(notifySocket, command, sizeof(command), MSG_DONTWAIT);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                break;
             }
+            if (n == 4 && std::memcmp(command, "show", 4) == 0 &&
+                !overlay.isVisible() && !overlay.closing)
+                overlay.openPanel();
+        }
+    };
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    QObject::connect(&showRequests, &QSocketNotifier::activated, &overlay,
+        [processShowRequests](QSocketDescriptor, QSocketNotifier::Type) {
+            processShowRequests();
         });
+#else
+    QObject::connect(&showRequests, &QSocketNotifier::activated, &overlay,
+        [processShowRequests](int) { processShowRequests(); });
+#endif
     QObject::connect(&a, &QCoreApplication::aboutToQuit, &overlay,
                      [notifySocket]() { ::close(notifySocket); });
 
