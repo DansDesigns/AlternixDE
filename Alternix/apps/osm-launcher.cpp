@@ -38,15 +38,16 @@
 #include <QByteArray>
 #include <unistd.h>
 
-// ──────────────────────────────  Per-item scale/fade for the opening cascade.
-// The app tiles live in a QGridLayout. Animating their actual geometry would
-// fight the layout and cause jumps, so scale only their PAINTED content.
-// Like osm-notify, each row grows from 30% and fades from transparent to solid.
+// ──────────────────────────────  Paint-only scale/fade for the opening cascade.
+// The grid must keep its real geometry while revealing each tile. A graphics
+// effect scales only the rendered card, avoiding conflicts with QGridLayout.
 class LauncherRevealEffect : public QGraphicsEffect {
     qreal progress = 0.0;
+    qreal initialScale = 0.30;
 
 public:
-    explicit LauncherRevealEffect(QObject *parent = nullptr) : QGraphicsEffect(parent) {}
+    explicit LauncherRevealEffect(qreal scale = 0.30, QObject *parent = nullptr)
+        : QGraphicsEffect(parent), initialScale(scale) {}
 
     void setProgress(qreal value) {
         value = qBound(qreal(0.0), value, qreal(1.0));
@@ -59,7 +60,7 @@ protected:
     void draw(QPainter *painter) override {
         if (progress <= 0.0) return;
         const QRectF bounds = sourceBoundingRect(Qt::LogicalCoordinates);
-        const qreal scale = 0.30 + 0.70 * progress;
+        const qreal scale = initialScale + (1.0 - initialScale) * progress;
         painter->save();
         painter->setOpacity(progress);
         painter->translate(bounds.center());
@@ -70,9 +71,22 @@ protected:
     }
 };
 
+struct LauncherRevealStep {
+    QPointer<LauncherRevealEffect> effect;
+    int startMs;
+    int durationMs;
+
+    LauncherRevealStep(LauncherRevealEffect *target, int start, int duration)
+        : effect(target), startMs(start), durationMs(duration) {}
+};
+
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
     bool opening = false;
+    // Independent alpha for the two background layers. The top/bottom edge
+    // gradients appear first; the translucent fullscreen shade comes next.
+    qreal gradientOpacity = 1.0;
+    qreal backdropOpacity = 1.0;
     bool dismissing = false;
     qreal dismissProgress = 0.0;
     QPixmap dismissFrame;
@@ -84,13 +98,13 @@ public:
     bool isTransitioning() const { return opening || dismissing; }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
 
-    // Animate actual app tiles in rows, as osm-notify animates its cards.
-    // Unlike a fullscreen snapshot, the background and grid remain stable.
+    // Ordered opening: edge gradients -> transparent backdrop -> each row's
+    // cards -> that row's icons and names -> next row -> close button.
+    // Child label effects keep icons/names invisible while their card grows.
     void openWithAnimation(QScrollArea *scroll, const QVector<QWidget*> &tiles,
                            int columns, QWidget *closeButton) {
         if (isTransitioning() || !scroll || columns < 1) return;
 
-        // Ensure the grid has its final positions before assigning rows.
         if (layout()) layout()->activate();
         if (scroll->widget() && scroll->widget()->layout())
             scroll->widget()->layout()->activate();
@@ -98,74 +112,99 @@ public:
         const int visibleTop = scroll->verticalScrollBar()->value();
         const int visibleBottom = visibleTop + scroll->viewport()->height();
 
-        // Store only tiles currently on screen; animating hundreds of offscreen
-        // tiles wastes time and makes scrolling feel sluggish on older devices.
-        QVector<QPair<QPointer<LauncherRevealEffect>, int>> effects;
-        QVector<QPointer<QWidget>> effectedWidgets;
-        int firstRow = -1;
-        int lastRow = -1;
+        constexpr int gradientMs = 90;
+        constexpr int backdropMs = 80;
+        constexpr int cardMs = 85;
+        constexpr int contentMs = 90;
+        constexpr int rowPauseMs = 8;
+        constexpr int closeMs = 100;
+
+        const int cardsBegin = gradientMs + backdropMs;
+        int nextRowStart = cardsBegin;
+        int currentRow = -1;
+        QVector<LauncherRevealStep> steps;
+        QVector<QPointer<QWidget>> affectedWidgets;
 
         for (int index = 0; index < tiles.size(); ++index) {
             QWidget *tile = tiles.at(index);
             if (!tile) continue;
-            const QRect tileRect = tile->geometry(); // relative to scroll->widget()
+            const QRect tileRect = tile->geometry();
             if (tileRect.bottom() < visibleTop || tileRect.top() >= visibleBottom)
-                continue;
+                continue; // Never animate tiles outside the viewport.
 
             const int row = index / columns;
-            if (firstRow < 0) firstRow = row;
-            lastRow = row;
-            auto *effect = new LauncherRevealEffect(tile);
-            tile->setGraphicsEffect(effect);
-            effects.append(qMakePair(QPointer<LauncherRevealEffect>(effect), row));
-            effectedWidgets.append(QPointer<QWidget>(tile));
+            if (row != currentRow) {
+                if (currentRow >= 0)
+                    nextRowStart += cardMs + contentMs + rowPauseMs;
+                currentRow = row;
+            }
+
+            // First grow/fade the tile's background (labels stay transparent).
+            auto *cardEffect = new LauncherRevealEffect(0.30, tile);
+            tile->setGraphicsEffect(cardEffect);
+            steps.append(LauncherRevealStep(cardEffect, nextRowStart, cardMs));
+            affectedWidgets.append(tile);
+
+            // The app icon and title are a separate, subsequent stage within
+            // the SAME row. Effects preserve label geometry and touch targets.
+            const auto labels = tile->findChildren<QLabel*>();
+            for (QLabel *label : labels) {
+                auto *contentEffect = new LauncherRevealEffect(0.85, label);
+                label->setGraphicsEffect(contentEffect);
+                steps.append(LauncherRevealStep(contentEffect,
+                                                nextRowStart + cardMs, contentMs));
+                affectedWidgets.append(label);
+            }
         }
 
-        // The close button appears immediately after the visible grid rows.
+        const int closeStart = currentRow < 0 ? cardsBegin :
+            nextRowStart + cardMs + contentMs + rowPauseMs;
         if (closeButton) {
-            auto *effect = new LauncherRevealEffect(closeButton);
+            auto *effect = new LauncherRevealEffect(0.75, closeButton);
             closeButton->setGraphicsEffect(effect);
-            effects.append(qMakePair(QPointer<LauncherRevealEffect>(effect),
-                                     lastRow < 0 ? 0 : lastRow + 1));
-            effectedWidgets.append(QPointer<QWidget>(closeButton));
+            steps.append(LauncherRevealStep(effect, closeStart, closeMs));
+            affectedWidgets.append(closeButton);
         }
 
-        if (effects.isEmpty()) return;
+        // No children are visible when progress starts. Unlike the old opening
+        // snapshot, this keeps the actual fullscreen window and layout stable.
         opening = true;
+        gradientOpacity = 0.0;
+        backdropOpacity = 0.0;
+        update();
 
-        // Short overlapping animations give a clear top-to-bottom cascade
-        // without making opening feel slow. A row scales and fades in 105ms;
-        // the following row begins 40ms later.
-        const int rowTimeMs = 105;
-        const int rowStaggerMs = 40;
-        const int first = firstRow < 0 ? 0 : firstRow;
-        const int rowCount = qMax(1, lastRow - first + 2); // include close button
-        const int totalMs = (rowCount - 1) * rowStaggerMs + rowTimeMs;
-
+        const int totalMs = closeStart + (closeButton ? closeMs : 0);
         auto *animation = new QVariantAnimation(this);
-        animation->setDuration(totalMs);
+        animation->setDuration(qMax(totalMs, cardsBegin));
         animation->setStartValue(0.0);
-        animation->setEndValue(double(totalMs));
+        animation->setEndValue(double(qMax(totalMs, cardsBegin)));
         animation->setEasingCurve(QEasingCurve::Linear);
         connect(animation, &QVariantAnimation::valueChanged, this,
-                [effects, first, rowStaggerMs, rowTimeMs](const QVariant &value) {
+                [this, steps, gradientMs, backdropMs](const QVariant &value) {
             const qreal elapsed = value.toDouble();
-            for (const auto &pair : effects) {
-                if (!pair.first) continue;
-                const qreal t = qBound(qreal(0.0),
-                    (elapsed - (pair.second - first) * rowStaggerMs) / rowTimeMs,
-                    qreal(1.0));
-                const qreal remaining = 1.0 - t;
-                pair.first->setProgress(1.0 - remaining * remaining * remaining);
+            auto easeOutCubic = [](qreal v) -> qreal {
+                v = qBound(qreal(0), v, qreal(1));
+                return 1.0 - (1.0 - v) * (1.0 - v) * (1.0 - v);
+            };
+            gradientOpacity = easeOutCubic(elapsed / gradientMs);
+            backdropOpacity = easeOutCubic((elapsed - gradientMs) / backdropMs);
+            update();
+            for (const LauncherRevealStep &step : steps) {
+                if (step.effect)
+                    step.effect->setProgress(easeOutCubic(
+                        (elapsed - step.startMs) / step.durationMs));
             }
         });
         connect(animation, &QVariantAnimation::finished, this,
-                [this, effectedWidgets]() {
-            // Remove all effects once the cascade finishes: normal scrolling
-            // then renders tiles without any additional graphics-effect cost.
-            for (const auto &tile : effectedWidgets)
-                if (tile) tile->setGraphicsEffect(nullptr);
+                [this, affectedWidgets]() {
+            // Remove transient effects afterwards: scroll performance stays
+            // exactly as it was before the opening animation.
+            for (const QPointer<QWidget> &widget : affectedWidgets)
+                if (widget) widget->setGraphicsEffect(nullptr);
+            gradientOpacity = 1.0;
+            backdropOpacity = 1.0;
             opening = false;
+            update();
         });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
     }
@@ -224,7 +263,10 @@ protected:
             return;
         }
 
+        // Background layers are animated independently during opening.
+        p.setOpacity(backdropOpacity);
         p.fillRect(rect(), QColor(0,0,0,140));
+        p.setOpacity(gradientOpacity);
 
         int w = width();
         int h = height();
@@ -244,6 +286,7 @@ protected:
         bottom.setColorAt(0.5, QColor(0,0,0,255)); // <- start fade later
         bottom.setColorAt(1.0, QColor(0, 0, 0, 255));
         p.fillRect(0, h - fadeH * 2, w, fadeH * 2, bottom);
+        p.setOpacity(1.0);
     }
 };
 
