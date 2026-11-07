@@ -37,6 +37,18 @@
 #include <QByteArray>
 #include <unistd.h>
 
+// Shared cascade timings: opening now matches the previous closing speed,
+// then BOTH directions have been accelerated 2x. Keep the stages synchronized
+// so a row's card and its icon/label always animate at the same cadence.
+namespace LauncherTiming {
+constexpr int gradientMs = 28;  // formerly 55ms on close
+constexpr int backdropMs = 24;  // formerly 48ms on close
+constexpr int cardMs = 25;      // formerly 50ms on close
+constexpr int contentMs = 26;   // formerly 52ms on close
+constexpr int rowPauseMs = 2;   // formerly 3ms on close (rounded)
+constexpr int buttonMs = 28;    // formerly 55ms on close
+}
+
 // ──────────────────────────────  Paint-only scale/fade for the opening cascade.
 // The grid must keep its real geometry while revealing each tile. A graphics
 // effect scales only the rendered card, avoiding conflicts with QGridLayout.
@@ -181,9 +193,9 @@ public:
                 pending.append(row);
         if (pending.isEmpty()) return;
 
-        constexpr int cardMs = 85;
-        constexpr int contentMs = 90;
-        constexpr int pauseMs = 8;
+        constexpr int cardMs = LauncherTiming::cardMs;
+        constexpr int contentMs = LauncherTiming::contentMs;
+        constexpr int pauseMs = LauncherTiming::rowPauseMs;
         QVector<LauncherRevealStep> steps;
         for (int i = 0; i < pending.size(); ++i)
             queueRowReveal(pending[i], i * (cardMs + contentMs + pauseMs),
@@ -293,12 +305,12 @@ public:
             return;
         }
 
-        constexpr int gradientMs = 90;
-        constexpr int backdropMs = 80;
-        constexpr int cardMs = 85;
-        constexpr int contentMs = 90;
-        constexpr int rowPauseMs = 8;
-        constexpr int closeMs = 100;
+        constexpr int gradientMs = LauncherTiming::gradientMs;
+        constexpr int backdropMs = LauncherTiming::backdropMs;
+        constexpr int cardMs = LauncherTiming::cardMs;
+        constexpr int contentMs = LauncherTiming::contentMs;
+        constexpr int rowPauseMs = LauncherTiming::rowPauseMs;
+        constexpr int closeMs = LauncherTiming::buttonMs;
 
         const int cardsBegin = gradientMs + backdropMs;
         const QVector<QVector<QWidget*>> rows = visibleRows();
@@ -387,13 +399,14 @@ public:
         if (animationScroll)
             QScroller::scroller(animationScroll->viewport())->stop();
 
-        // Around 40-45% shorter than the previous row-by-row close.
-        constexpr int closeMs = 55;
-        constexpr int contentMs = 52;
-        constexpr int cardMs = 50;
-        constexpr int rowPauseMs = 3;
-        constexpr int backdropMs = 48;
-        constexpr int gradientMs = 55;
+        // Same per-stage durations as opening, reversed, and 2x faster
+        // than the previous closing sequence.
+        constexpr int closeMs = LauncherTiming::buttonMs;
+        constexpr int contentMs = LauncherTiming::contentMs;
+        constexpr int cardMs = LauncherTiming::cardMs;
+        constexpr int rowPauseMs = LauncherTiming::rowPauseMs;
+        constexpr int backdropMs = LauncherTiming::backdropMs;
+        constexpr int gradientMs = LauncherTiming::gradientMs;
 
         QVector<LauncherRevealStep> steps;
         const QVector<QVector<QWidget*>> rows = visibleRows();
