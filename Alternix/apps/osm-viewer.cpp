@@ -349,11 +349,12 @@ public:
 
         connect(zoomSlider, &QSlider::valueChanged, this, &MainWindow::onZoomSliderChanged);
 
-        currentMode = Mode::None;
         imageZoomFactor = 1.0;
         pdfZoomFactor  = 1.0;
 
-        updateActions();
+        // A blank editor is already visible on launch. Initialise it as a
+        // new editable document so Save and Save As work immediately.
+        newFile();
     }
 
     /*──────────────────────────────────────*/
