@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 //  osm-widgets  —  Alternix desktop widget overlay
 //
+//  XInput2 observes desktop swipes without intercepting normal clicks.
 //  A frameless, override-redirect window per screen that sits
 //  permanently at the bottom of the stack, directly on the Qtile
 //  desktop. Widgets are dynamically loaded .so plugins from:
@@ -13,8 +14,8 @@
 //  and this daemon reloads itself. No IPC, no D-Bus.
 //
 //  Build:
-//    g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl \
-//        $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext
+//    g++ -std=c++17 -fPIC osm-widgets.cpp -o osm-widgets -ldl \
+//        $(pkg-config --cflags --libs Qt5Widgets xi x11 xext)
 // ─────────────────────────────────────────────────────────────
 
 #include <QApplication>
@@ -32,6 +33,12 @@
 #include <QLibrary>
 #include <QLockFile>
 #include <QMouseEvent>
+#include <QCursor>
+#include <QSocketNotifier>
+#include <QSet>
+#include <QProcess>
+#include <QElapsedTimer>
+#include <QtMath>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QDateTime>
@@ -44,6 +51,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/extensions/shape.h>
+#include <X11/extensions/XInput2.h>
+#include <cstring>
 
 static const char *WIDGET_DIR = "/usr/local/lib/alternix/widgets";
 
@@ -341,6 +350,16 @@ public:
 
     int index() const { return m_index; }
 
+    // Gestures are only valid on the bare desktop, never on a widget.
+    bool isBareDesktopPoint(const QPoint &global) const {
+        if (!isVisible() || m_edit || !geometry().contains(global)) return false;
+        const QPoint local = mapFromGlobal(global);
+        for (WidgetFrame *frame : m_frames)
+            if (frame && frame->isVisible() && frame->geometry().contains(local))
+                return false;
+        return true;
+    }
+
 private:
     QScreen           *m_screen;
     int                m_index;
@@ -355,6 +374,21 @@ private:
 class WidgetHost : public QObject {
 public:
     WidgetHost() : m_watcher(nullptr), m_enabled(true), m_edit(false) {}
+
+    bool gesturesAllowed(const QPoint &at) const {
+        if (!m_enabled || m_edit) return false;
+        for (const DesktopOverlay *overlay : m_overlays)
+            if (overlay && overlay->isBareDesktopPoint(at)) return true;
+        return false;
+    }
+
+    bool isOurDesktopWindow(Window window) const {
+        if (window == None) return true; // Root window; no child under cursor.
+        for (const DesktopOverlay *overlay : m_overlays)
+            if (overlay && overlay->isVisible() && Window(overlay->winId()) == window)
+                return true;
+        return false;
+    }
 
     void start() {
         buildOverlays();
@@ -556,6 +590,252 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
+//  Non-intercepting desktop swipe observer (XInput2)
+// ─────────────────────────────────────────────────────────────
+// The XShape mask above deliberately passes non-widget mouse/touch clicks
+// straight to the desktop. A transparent full-screen QWidget would break
+// root-window clicks and Qtile. XI2 raw events are delivered independently
+// of the window that actually receives the click/touch, so we only *observe*
+// the gesture and do not synthesize or swallow any pointer input.
+class DesktopSwipeMonitor : public QObject {
+public:
+    explicit DesktopSwipeMonitor(WidgetHost *host, QObject *parent = nullptr)
+        : QObject(parent), m_host(host) {
+        m_display = XOpenDisplay(nullptr);  // Separate queue, not Qt's XCB queue.
+        if (!m_display) {
+            qWarning("osm-widgets: swipes unavailable (no X display)");
+            return;
+        }
+
+        int eventBase = 0, errorBase = 0;
+        if (!XQueryExtension(m_display, "XInputExtension", &m_opcode,
+                             &eventBase, &errorBase)) {
+            qWarning("osm-widgets: swipes unavailable (XInput extension missing)");
+            return;
+        }
+        int major = 2, minor = 2; // raw touch events arrived with XI2.2
+        if (XIQueryVersion(m_display, &major, &minor) != Success ||
+            major < 2 || (major == 2 && minor < 2)) {
+            qWarning("osm-widgets: swipes need XInput2.2 or later");
+            return;
+        }
+
+        unsigned char bits[XIMaskLen(XI_LASTEVENT)];
+        std::memset(bits, 0, sizeof(bits));
+        XISetMask(bits, XI_RawButtonPress);
+        XISetMask(bits, XI_RawButtonRelease);
+        XISetMask(bits, XI_RawMotion);
+        XISetMask(bits, XI_RawTouchBegin);
+        XISetMask(bits, XI_RawTouchUpdate);
+        XISetMask(bits, XI_RawTouchEnd);
+        XIEventMask mask;
+        mask.deviceid = XIAllMasterDevices;
+        mask.mask_len = sizeof(bits);
+        mask.mask = bits;
+        if (XISelectEvents(m_display, DefaultRootWindow(m_display), &mask, 1)
+            != Success) {
+            qWarning("osm-widgets: cannot subscribe to XInput2 desktop swipes");
+            return;
+        }
+        XFlush(m_display);
+        m_socket = new QSocketNotifier(ConnectionNumber(m_display),
+                                        QSocketNotifier::Read, this);
+        connect(m_socket, &QSocketNotifier::activated,
+                this, [this](int) { drainEvents(); });
+        m_clock.start();
+        qInfo("osm-widgets: desktop swipes enabled (XInput2)");
+    }
+
+    ~DesktopSwipeMonitor() override {
+        delete m_socket; // Must detach before closing the display fd.
+        if (m_display) XCloseDisplay(m_display);
+    }
+
+private:
+    struct Swipe {
+        bool active = false;
+        bool touch = false;
+        int source = -1;
+        int detail = -1;
+        QPoint start;
+        QPoint last;
+        qint64 startMs = 0;
+    } m_swipe;
+
+    Display *m_display = nullptr;
+    WidgetHost *m_host = nullptr;
+    QSocketNotifier *m_socket = nullptr;
+    QElapsedTimer m_clock;
+    QSet<quint64> m_contacts;
+    int m_opcode = -1;
+    qint64 m_lastActivatedMs = -100000;
+
+    static quint64 contactKey(const XIRawEvent *event) {
+        // The touch ID is unique *per device*, not necessarily globally.
+        return (quint64(quint32(event->sourceid)) << 32) |
+               quint32(event->detail);
+    }
+
+    // Only the desktop root (or a desktop-type background window) qualifies.
+    // In particular a NORMAL app, popup, dock, and a widget are excluded.
+    bool pointOnDesktop(const QPoint &p) const {
+        if (!m_host || !m_host->gesturesAllowed(p)) return false;
+        const Window root = DefaultRootWindow(m_display);
+        Window returnedRoot = None, child = None;
+        int rx = 0, ry = 0, wx = 0, wy = 0;
+        unsigned int buttons = 0;
+        if (!XQueryPointer(m_display, root, &returnedRoot, &child,
+                           &rx, &ry, &wx, &wy, &buttons)) return false;
+        if (m_host->isOurDesktopWindow(child)) return true;
+
+        Atom property = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE", False);
+        Atom desktop = XInternAtom(m_display, "_NET_WM_WINDOW_TYPE_DESKTOP", False);
+        Atom actual = None;
+        int format = 0;
+        unsigned long nitems = 0, bytesAfter = 0;
+        unsigned char *data = nullptr;
+        bool found = false;
+        if (child != None &&
+            XGetWindowProperty(m_display, child, property, 0, 16, False,
+                               XA_ATOM, &actual, &format, &nitems,
+                               &bytesAfter, &data) == Success &&
+            actual == XA_ATOM && format == 32 && data) {
+            const Atom *types = reinterpret_cast<const Atom*>(data);
+            for (unsigned long i = 0; i < nitems; ++i)
+                if (types[i] == desktop) { found = true; break; }
+        }
+        if (data) XFree(data);
+        return found;
+    }
+
+    QPoint cursorPosition() const {
+        Window rootRet = None, childRet = None;
+        int x = 0, y = 0, winX = 0, winY = 0;
+        unsigned int mask = 0;
+        if (m_display && XQueryPointer(m_display, DefaultRootWindow(m_display),
+                                       &rootRet, &childRet, &x, &y,
+                                       &winX, &winY, &mask))
+            return QPoint(x, y);
+        return QCursor::pos();
+    }
+
+    void begin(bool touch, int source, int detail) {
+        m_swipe = Swipe();
+        if (!m_clock.isValid()) return;
+        const QPoint p = cursorPosition();
+        if (!pointOnDesktop(p)) return;
+        m_swipe.active = true;
+        m_swipe.touch = touch;
+        m_swipe.source = source;
+        m_swipe.detail = detail;
+        m_swipe.start = m_swipe.last = p;
+        m_swipe.startMs = m_clock.elapsed();
+    }
+
+    void move(bool touch, int source, int detail) {
+        if (!m_swipe.active || m_swipe.touch != touch ||
+            m_swipe.source != source || (touch && m_swipe.detail != detail)) return;
+        m_swipe.last = cursorPosition();
+    }
+
+    void finish(bool touch, int source, int detail) {
+        if (!m_swipe.active || m_swipe.touch != touch ||
+            m_swipe.source != source || (touch && m_swipe.detail != detail)) return;
+        const Swipe swipe = m_swipe;
+        m_swipe = Swipe();
+
+        QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+        if (!cfg.value("Gestures/Enabled", true).toBool()) return;
+        if (touch && !cfg.value("Gestures/TouchEnabled", true).toBool()) return;
+        if (!touch && !cfg.value("Gestures/MouseEnabled", true).toBool()) return;
+        if (!m_host->gesturesAllowed(swipe.start)) return;
+
+        const qint64 elapsed = m_clock.elapsed() - swipe.startMs;
+        const int maxMs = qBound(350, cfg.value("Gestures/MaxDurationMs", 1600).toInt(), 5000);
+        const int cooldown = qBound(250, cfg.value("Gestures/CooldownMs", 850).toInt(), 4000);
+        if (elapsed < 45 || elapsed > maxMs ||
+            m_clock.elapsed() - m_lastActivatedMs < cooldown) return;
+
+        const QPoint p = cursorPosition();
+        const QPoint delta = p - swipe.start;
+        const int minDistance = qBound(50, cfg.value("Gestures/MinDistancePx", 115).toInt(), 500);
+        if (qAbs(delta.y()) < minDistance ||
+            qAbs(delta.y()) < qAbs(delta.x()) * 1.5) return;
+        // The *start* must be bare desktop; the release may be over an app.
+        // This lets an upward swipe start near the bottom of a busy screen.
+        const bool upward = delta.y() < 0;
+        if (!cfg.value(upward ? "Gestures/SwipeUpLauncher"
+                              : "Gestures/SwipeDownNotify", true).toBool()) return;
+
+        const QString executable = upward ? QStringLiteral("osm-launcher")
+                                          : QStringLiteral("osm-notify");
+        const QString installedPath = QStringLiteral("/usr/local/bin/") + executable;
+        const QString program = QFileInfo(installedPath).isExecutable()
+                                    ? installedPath : executable;
+        const QStringList args = upward ? QStringList() : QStringList{"--show"};
+        if (QProcess::startDetached(program, args)) {
+            m_lastActivatedMs = m_clock.elapsed();
+        } else {
+            qWarning() << "osm-widgets: failed to launch" << program;
+        }
+    }
+
+    void rawEvent(const XIRawEvent *event, int kind) {
+        const int source = event->sourceid;
+        switch (kind) {
+        case XI_RawTouchBegin: {
+            const quint64 key = contactKey(event);
+            m_contacts.insert(key);
+            if (m_contacts.size() == 1) begin(true, source, event->detail);
+            else m_swipe = Swipe(); // never activate on two/three-finger gestures
+            break;
+        }
+        case XI_RawTouchUpdate:
+            if (m_contacts.size() == 1)
+                move(true, source, event->detail);
+            break;
+        case XI_RawTouchEnd: {
+            const quint64 key = contactKey(event);
+            const bool sole = m_contacts.size() == 1 && m_contacts.contains(key);
+            if (sole) finish(true, source, event->detail);
+            m_contacts.remove(key);
+            break;
+        }
+        case XI_RawButtonPress:
+            if (event->detail == 1 && m_contacts.isEmpty() && !m_swipe.active)
+                begin(false, source, event->detail);
+            break;
+        case XI_RawMotion:
+            if (m_swipe.active && !m_swipe.touch && m_contacts.isEmpty())
+                move(false, source, event->detail);
+            break;
+        case XI_RawButtonRelease:
+            if (event->detail == 1 && m_contacts.isEmpty())
+                finish(false, source, event->detail);
+            break;
+        }
+    }
+
+    void drainEvents() {
+        while (m_display && XPending(m_display)) {
+            XEvent event;
+            XNextEvent(m_display, &event);
+            if (event.type != GenericEvent || event.xcookie.extension != m_opcode)
+                continue;
+            if (!XGetEventData(m_display, &event.xcookie)) continue;
+            switch (event.xcookie.evtype) {
+            case XI_RawButtonPress: case XI_RawButtonRelease: case XI_RawMotion:
+            case XI_RawTouchBegin: case XI_RawTouchUpdate: case XI_RawTouchEnd:
+                rawEvent(static_cast<XIRawEvent*>(event.xcookie.data),
+                         event.xcookie.evtype);
+                break;
+            }
+            XFreeEventData(m_display, &event.xcookie);
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────────────
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -584,6 +864,7 @@ int main(int argc, char **argv)
 
     WidgetHost host;
     host.start();
+    DesktopSwipeMonitor swipes(&host);
 
     int r = app.exec();
     XCloseDisplay(g_dpy);

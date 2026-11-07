@@ -7,6 +7,11 @@
 #include <QFrame>
 #include <QScreen>
 #include <QTimer>
+#include <QLockFile>
+#include <QCryptographicHash>
+#include <QDateTime>
+#include <csignal>
+#include <unistd.h>
 #include <QPainter>
 #include <QMouseEvent>
 #include <QProcess>
@@ -1503,11 +1508,48 @@ protected:
     }
 };
 
+// ──────────────────────────────  Show existing instance from osm-widgets
+// Async-signal-safe: do NOT call Qt or manipulate a QWidget in a signal handler.
+static volatile sig_atomic_t g_notifyShowRequested = 0;
+static void requestNotifyShow(int) { g_notifyShowRequested = 1; }
+
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
 
+    const bool showRequested = a.arguments().contains("--show");
+    const QString lockDir = QDir::homePath() + "/.cache/Alternix";
+    QDir().mkpath(lockDir);
+    const QString display = QString::fromLocal8Bit(qgetenv("DISPLAY"));
+    // Per display prevents one X session from suppressing another.
+    const QByteArray displayKey = QCryptographicHash::hash(
+        display.toUtf8(), QCryptographicHash::Sha256).toHex().left(12);
+    QLockFile instanceLock(lockDir + "/osm-notify-" +
+                           QString::fromLatin1(displayKey.constData()) + ".lock");
+    instanceLock.setStaleLockTime(0);
+    if (!instanceLock.tryLock(0)) {
+        if (showRequested) {
+            qint64 pid = 0;
+            QString hostname, appname;
+            if (instanceLock.getLockInfo(&pid, &hostname, &appname) && pid > 1)
+                ::kill(static_cast<pid_t>(pid), SIGUSR1);
+        }
+        return 0;
+    }
+
+    std::signal(SIGUSR1, requestNotifyShow);
     NotificationOverlay overlay;
+    QTimer showSignalPoll;
+    showSignalPoll.setInterval(60);
+    QObject::connect(&showSignalPoll, &QTimer::timeout, &overlay, [&overlay]() {
+        if (g_notifyShowRequested) {
+            g_notifyShowRequested = 0;
+            overlay.openPanel();
+        }
+    });
+    showSignalPoll.start();
+    if (showRequested)
+        QTimer::singleShot(0, &overlay, [&overlay]() { overlay.openPanel(); });
 
     QRect g = QApplication::primaryScreen()->geometry();
     int W = g.width();
