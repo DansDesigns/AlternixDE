@@ -457,7 +457,7 @@ fi
 # genuine sudo after provisional PAM activation and rolls back on failure.
 echo '[Auth] Testing the PAM-style pattern/PIN window before changing sudo PAM...'
 echo '[Auth] Enter your existing pattern or fallback PIN.'
-if ! timeout --kill-after=5s 150s \
+if ! timeout --kill-after=5s 45s \
     env -i 'PATH=/usr/sbin:/usr/bin:/sbin:/bin' \
     "PAM_RUSER=$LOGIN_USER" 'PAM_USER=root' 'PAM_SERVICE=sudo' 'PAM_TYPE=auth' \
     /usr/local/libexec/alternix-auth --pam; then
@@ -525,7 +525,7 @@ fi
 
 echo '[Auth] Testing a real sudo request through Alternix PAM...'
 echo '[Auth] Confirm your pattern/PIN to activate sudo authentication.'
-if ! timeout --kill-after=5s 150s \
+if ! timeout --kill-after=5s 45s \
     runuser -u "$LOGIN_USER" -- env -i "${AUTH_SESSION_ENV[@]}" \
     /bin/sh -c '/usr/bin/sudo -k && exec /usr/bin/sudo -v'; then
     echo 'ERROR: The real sudo/PAM challenge failed; restoring previous sudo settings.' >&2
@@ -751,7 +751,7 @@ if [[ -z "$ALT_SESSION_DBUS" && ! -S "/run/user/$USER_UID/bus" ]]; then
 fi
 echo '[Auth] Testing PolicyKit through the graphical session...'
 POLKIT_TEST_OUTPUT=''
-if POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 150s \
+if POLKIT_TEST_OUTPUT="$(timeout --kill-after=5s 45s \
     setpriv --reuid "$LOGIN_USER" --regid "$(id -g "$LOGIN_USER")" --init-groups -- \
     env -i "${AUTH_SESSION_ENV[@]}" /usr/bin/pkexec --disable-internal-agent /usr/bin/id -u \
     2>"$TMP/polkit-test-errors")" && [[ "$POLKIT_TEST_OUTPUT" = 0 ]]; then

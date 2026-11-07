@@ -31,6 +31,7 @@ test with:
 #include <QGridLayout>
 #include <QRandomGenerator>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QtMath>
 #include <QCloseEvent>
 #include <QKeyEvent>
@@ -59,6 +60,15 @@ class LockScreen : public QWidget {
 
     QVector<QString> currentSeq;
     int attemptCount = 0;
+    int pinAttemptCount = 0;
+
+    // One 20-second monotonic deadline for the entire pattern -> PIN flow.
+    // The countdown never restarts when switching methods or retrying.
+    static constexpr int authenticationWindowMs = 20000;
+    QElapsedTimer authenticationClock;
+    QTimer *authenticationTimer = nullptr;
+    bool authenticationStarted = false;
+    bool authorizationDenied = false;
 
     bool pinModeActive = false;
     bool pinSetupMode = false;
@@ -67,6 +77,7 @@ class LockScreen : public QWidget {
     QString pinSetupFirst;
 
     QLabel *titleLabel = nullptr;
+    QLabel *countdownLabel = nullptr;
     QPushButton *securityToggle = nullptr;
     QPushButton *cancelButton = nullptr;
     QPushButton *pinButton = nullptr;
@@ -87,6 +98,11 @@ public:
         titleLabel->setStyleSheet("font-size:20px; color:white;");
         titleLabel->setAlignment(Qt::AlignCenter);
         titleLabel->setGeometry(0, 5, width(), 30);
+
+        countdownLabel = new QLabel(this);
+        countdownLabel->setAlignment(Qt::AlignCenter);
+        countdownLabel->setStyleSheet("font-size:24px; color:#dddddd; background:transparent;");
+        countdownLabel->hide(); // Enrollment is not an authentication attempt.
 
         securityToggle = new QPushButton("Enhanced Security Mode", this);
         securityToggle->setFlat(true);
@@ -120,13 +136,9 @@ public:
                 "QPushButton { background:transparent; color:white; font-size:16px; } "
                 "QPushButton:hover { color:#bbbbbb; }");
             connect(pinButton, &QPushButton::clicked, this, [this]() {
-                if (firstRun) return;
-                pinModeActive = true;
-                pinSetupMode = false;
-                pinInput.clear();
-                titleLabel->setText("Enter Fallback PIN");
-                buildPinPad();
-                update();
+                // Manual PIN fallback is allowed, but still has only two tries
+                // and shares the same 20-second authentication deadline.
+                activatePinFallback();
             });
         }
 
@@ -158,6 +170,11 @@ public:
             titleLabel->setText("Enter your pattern");
 
         generateGrid();
+
+        authenticationTimer = new QTimer(this);
+        authenticationTimer->setInterval(100);
+        connect(authenticationTimer, &QTimer::timeout,
+                this, [this]() { refreshAuthenticationCountdown(); });
 
         // KEYBOARD GRAB — DO NOT REMOVE
         // Qtile's shortcuts (Win+Enter for a terminal and the rest) are
@@ -191,6 +208,8 @@ protected:
         if (desiredY < 40) desiredY = 40; // clamp minimum
 
         titleLabel->setGeometry(0, desiredY, width(), 40);
+        if (countdownLabel)
+            countdownLabel->setGeometry(0, qMax(38, desiredY - 44), width(), 36);
 
         if (pinWidget && pinWidget->isVisible())
             positionPinPad();
@@ -256,6 +275,7 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent *ev) override {
+        if (authenticationTimedOut()) return;
         if (securityToggle->isVisible() && securityToggle->geometry().contains(ev->pos())) {
             QWidget::mousePressEvent(ev);
             return;
@@ -294,6 +314,7 @@ protected:
     void closeEvent(QCloseEvent *e) override { e->ignore(); }
 
     void keyPressEvent(QKeyEvent *e) override {
+        if (authenticationTimedOut()) { e->accept(); return; }
         if ((e->key() == Qt::Key_F4 && (e->modifiers() & Qt::AltModifier)) ||
             ((e->key() == Qt::Key_W || e->key() == Qt::Key_Q) &&
              (e->modifiers() & (Qt::MetaModifier | Qt::ControlModifier)))) {
@@ -347,7 +368,64 @@ protected:
         e->ignore();
     }
 
+public:
+    // Called just after the fullscreen window is shown. PAM receives a READY
+    // handshake before starting its own independent 20-second watchdog.
+    void beginAuthenticationCountdown() {
+        if (firstRun || authenticationStarted) return;
+        authenticationStarted = true;
+        authenticationClock.start();
+        countdownLabel->show();
+        refreshAuthenticationCountdown();
+        if (pamPrompt) {
+            static const char ready[] = "READY\n";
+            if (::write(3, ready, sizeof(ready) - 1) != ssize_t(sizeof(ready) - 1))
+                denyAuthorization();
+        }
+        authenticationTimer->start();
+    }
+
 private:
+    void denyAuthorization() {
+        if (authorizationDenied) return;
+        authorizationDenied = true;
+        if (authenticationTimer) authenticationTimer->stop();
+        qApp->exit(1); // PAM, --auth and osm-lockscreen all treat nonzero as DENIED.
+    }
+
+    bool authenticationTimedOut() {
+        if (authorizationDenied) return true;
+        if (authenticationStarted && authenticationClock.elapsed() >= authenticationWindowMs) {
+            countdownLabel->setText("Time expired");
+            denyAuthorization();
+            return true;
+        }
+        return false;
+    }
+
+    void refreshAuthenticationCountdown() {
+        if (!authenticationStarted || authorizationDenied) return;
+        if (authenticationTimedOut()) return;
+        const int left = (authenticationWindowMs - int(authenticationClock.elapsed()) + 999) / 1000;
+        countdownLabel->setText(QString("%1s remaining").arg(left));
+        countdownLabel->setStyleSheet(left <= 5
+            ? "font-size:24px; color:#ff8080; background:transparent;"
+            : "font-size:24px; color:#dddddd; background:transparent;");
+    }
+
+    void activatePinFallback() {
+        if (firstRun || authenticationTimedOut() || pinModeActive) return;
+        pinModeActive = true;
+        pinSetupMode = false;
+        pinSetupConfirm = false;
+        pinInput.clear();
+        pinAttemptCount = 0;
+        titleLabel->setText("Enter Fallback PIN (2 attempts)");
+        if (pinButton) pinButton->hide();
+        buildPinPad();
+        update();
+    }
+
     // ---------- CONFIG ----------
     static QString authPath() { return "/usr/local/libexec/alternix-auth"; }
 
@@ -364,7 +442,7 @@ private:
     }
 
     bool submitPam(const QByteArray &payload) {
-        if (!pamPrompt || payload.size() > 900) return false;
+        if (!pamPrompt || payload.size() > 900 || authenticationTimedOut()) return false;
         const QByteArray message = payload + "\n";
         const ssize_t written = ::write(3, message.constData(), size_t(message.size()));
         if (written != message.size()) { qApp->exit(1); return false; }
@@ -576,6 +654,7 @@ private:
     }
 
     void handlePinPress(const QString &label) {
+        if (authenticationTimedOut()) return;
         int req = requiredPinLength();
 
         if (label == "⌫") {
@@ -600,6 +679,7 @@ private:
     }
 
     void submitPinEntry() {
+        if (authenticationTimedOut()) return;
         int req = requiredPinLength();
         if (pinInput.size() < req) return;
 
@@ -625,39 +705,55 @@ private:
                 }
             }
         } else {
+            // The root-owned verifier checks EVERY entry, including incorrect
+            // entries in PAM mode. The PAM parent verifies the successful
+            // candidate again, so the GUI never grants privileges on its own.
             const QString hash = sha256(pinInput);
-            if (pamPrompt) { submitPam(("I:" + hash).toLatin1()); return; }
-            bool valid = secureAuth ? authOperation("--verify", ("I:" + hash + "\n").toLatin1())
-                                    : (hash == passwordHash);
-            if (valid) qApp->quit();
-            else { pinInput.clear(); update(); }
+            const QByteArray candidate = ("I:" + hash).toLatin1();
+            const bool valid = secureAuth
+                    ? authOperation("--verify", candidate + "\n")
+                    : (hash == passwordHash);
+            if (authenticationTimedOut()) return;
+            if (valid) {
+                if (pamPrompt) submitPam(candidate);
+                else qApp->quit();
+                return;
+            }
+            pinInput.clear();
+            ++pinAttemptCount;
+            if (pinAttemptCount >= 2) {
+                denyAuthorization();
+                return;
+            }
+            titleLabel->setText("Incorrect PIN - 1 attempt left");
+            update();
         }
     }
 
     void verifyPattern() {
-        if (pamPrompt) {
-            submitPam(("P:" + QStringList::fromVector(currentSeq).join(",")).toLatin1());
+        if (authenticationTimedOut()) return;
+        const QByteArray candidate =
+            ("P:" + QStringList::fromVector(currentSeq).join(",")).toLatin1();
+        const bool valid = secureAuth
+                ? authOperation("--verify", candidate + "\n")
+                : (currentSeq == patternHash);
+        if (authenticationTimedOut()) return;
+        if (valid) {
+            if (pamPrompt) submitPam(candidate);
+            else qApp->quit();
             return;
         }
-        bool ok = secureAuth
-                ? authOperation("--verify", ("P:" + QStringList::fromVector(currentSeq).join(",") + "\n").toLatin1())
-                : (currentSeq == patternHash);
-        if (ok) qApp->quit();
-        else {
-            attemptCount++;
-            currentSeq.clear();
-            if (attemptCount < 3) generateGrid();
-            update();
-            if (attemptCount >= 3) {
-                pinModeActive = true;
-                pinSetupMode = false;
-                pinSetupConfirm = false;
-                pinInput.clear();
-                titleLabel->setText("Enter Fallback PIN");
-                buildPinPad();
-                update();
-            }
+
+        ++attemptCount;
+        currentSeq.clear();
+        if (attemptCount >= 3) {
+            activatePinFallback();
+            return;
         }
+        titleLabel->setText(QString("Incorrect pattern - %1 attempt%2 left")
+                            .arg(3 - attemptCount).arg(attemptCount == 2 ? "" : "s"));
+        generateGrid();
+        update();
     }
 
     // Cancel button on the pattern/PIN *entry* pages (not shown during
@@ -667,7 +763,7 @@ private:
     // of unlocking.
     void cancelEntry() {
         if (firstRun && !secureAuth) return;
-        qApp->exit(1);
+        denyAuthorization();
     }
 };
 
@@ -694,6 +790,7 @@ int main(int argc, char *argv[]) {
 
     lock.show();
     lock.raise();
+    QTimer::singleShot(0, &lock, [&lock]() { lock.beginAuthenticationCountdown(); });
     return app.exec();
 }
 

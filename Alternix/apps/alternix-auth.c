@@ -45,18 +45,30 @@ static int ufile(char *out,size_t len,const char *kind,uid_t uid){
  return n>0 && (size_t)n<len ? 0:-1;
 }
 static int read_secret(int fd,char *buf,size_t cap,int timeout){
- size_t n=0; int newline=0;
+ /* A single CLOCK_MONOTONIC deadline, independent of input byte count.
+  * A malicious GUI cannot extend the PAM deadline by trickling bytes. */
+ struct timespec ts;
+ if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0)return -1;
+ int64_t deadline=(int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000+timeout;
+ size_t n=0;int newline=0;
  while(n<cap-1){
+  if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0)return -1;
+  int64_t remaining=deadline-((int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000);
+  if(remaining<=0)return -1;
   struct pollfd f={.fd=fd,.events=POLLIN|POLLHUP};
-  int r=poll(&f,1,timeout);
+  int r=poll(&f,1,(int)remaining);
+  if(r<0 && errno==EINTR)continue;
   if(r<=0)return -1;
   char c;ssize_t z=read(fd,&c,1);
+  if(z<0 && errno==EINTR)continue;
   if(z<=0)break;
   if(c=='\n'){newline=1;break;}
   if(c=='\r'||(unsigned char)c<32 || (unsigned char)c>126)return -1;
   buf[n++]=c;
  }
  buf[n]=0;
+ if(clock_gettime(CLOCK_MONOTONIC,&ts)!=0 ||
+    (int64_t)ts.tv_sec*1000+ts.tv_nsec/1000000>deadline)return -1;
  return newline && n>1 ? 0:-1;
 }
 static int hexdecode(const char *hex,unsigned char *out,size_t len){
@@ -316,7 +328,17 @@ static int launch_prompt(uid_t uid,char *line,size_t limit){
   if(dbus)setenv("DBUS_SESSION_BUS_ADDRESS",dbus,1);
   char *const a[]={ (char*)GUI,(char*)"--pam-prompt",NULL};execv(GUI,a);_exit(126);
  }
- close(p[1]);int r=read_secret(p[0],line,limit,120000);close(p[0]);
+ close(p[1]);
+ /* The GUI sends READY only when the fullscreen page is displayed. Allow
+  * a bounded startup delay, then a strict 20-second authentication window.
+  * The candidate is accepted only if the GUI exits successfully AND the
+  * protected verifier confirms the credential. */
+ char ready[16]={0};
+ int r=read_secret(p[0],ready,sizeof(ready),15000);
+ if(r==0 && strcmp(ready,"READY")==0)
+  r=read_secret(p[0],line,limit,20000);
+ else r=-1;
+ close(p[0]);wipe(ready,sizeof(ready));
  if(r!=0)kill(pid,SIGTERM);
  int status=0;waitpid(pid,&status,0);
  return r==0&&WIFEXITED(status)&&WEXITSTATUS(status)==0?0:-1;
