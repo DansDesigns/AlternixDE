@@ -33,6 +33,8 @@ echo "[Config] Updating Grub Entry.."
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
+sudo apt install libxi-dev
+
 # Check both independent Settings modules before making any system changes.
 # The clock/PAM implementation now belongs to date-time.cpp, NOT location.cpp.
 ALT_SETTINGS_SOURCE="$ALT_ROOT/Alternix/apps/osm-settings"
@@ -680,75 +682,75 @@ g++ osm-settings.cpp -o osm-settings -fPIC -ldl $(pkg-config --cflags --libs Qt5
 chmod +x osm-settings && sudo mv osm-settings /usr/local/bin/
 
 
-echo "• Building wifi.so..."
+echo "• Updating wifi.so..."
 g++ -fPIC -shared wifi.cpp -o wifi.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 wifi.so /usr/local/bin/
 
-echo "• Building bluetooth.so..."
+echo "• Updating bluetooth.so..."
 g++ -fPIC -shared bluetooth.cpp -o bluetooth.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 bluetooth.so /usr/local/bin/
 
-echo "• Building apps.so..."
+echo "• Updating apps.so..."
 g++ -fPIC -shared apps.cpp -o apps.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 apps.so /usr/local/bin/
 
-echo "• Building mobile.so..."
+echo "• Updating mobile.so..."
 g++ -fPIC -shared mobile.cpp -o mobile.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 mobile.so /usr/local/bin/
 
-echo "• Building location.so..."
+echo "• Updating location.so..."
 g++ location.cpp -o location.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 location.so /usr/local/bin/
 
-echo "• Building date-time.so..."
+echo "• Updating date-time.so..."
 g++ date-time.cpp -o date-time.so -shared -fPIC -O2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 date-time.so /usr/local/bin/
 
-echo "• Building battery.so..."
+echo "• Updating battery.so..."
 g++ -fPIC -shared battery.cpp -o battery.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 battery.so /usr/local/bin/
 
-echo "• Building emulation.so..."
+echo "• Updating emulation.so..."
 g++ emulation.cpp -o emulation.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 emulation.so /usr/local/bin/
 
-echo "• Building security.so..."
+echo "• Updating security.so..."
 g++ -shared -fPIC security.cpp -o security.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo install -m755 security.so /usr/local/bin/
 
-echo "• Building ethernet.so..."
+echo "• Updating ethernet.so..."
 g++ -fPIC -shared ethernet.cpp -o ethernet.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 ethernet.so /usr/local/bin/
 
-echo "• Building display.so..."
+echo "• Updating display.so..."
 g++ display.cpp -o display.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 display.so /usr/local/bin/
 
-echo "• Building sound.so..."
+echo "• Updating sound.so..."
 g++ -std=c++17 -fPIC -shared sound.cpp -o sound.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo install -m755 sound.so /usr/local/bin/
 
-echo "• Building kernel.so..."
+echo "• Updating kernel.so..."
 g++ -std=c++17 -fPIC -shared kernel.cpp -o kernel.so `pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core`
 sudo install -m755 kernel.so /usr/local/bin/
 
-echo "• Building storage.so..."
+echo "• Updating storage.so..."
 g++ -fPIC -shared storage.cpp -o storage.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 storage.so /usr/local/bin/
 
-echo "• Building accounts.so..."
+echo "• Updating accounts.so..."
 g++ -std=c++11 accounts.cpp -o accounts.so -shared -fPIC $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 accounts.so /usr/local/bin/
 
-echo "• Building system.so..."
+echo "• Updating system.so..."
 g++ -fPIC -shared system.cpp -o system.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 system.so /usr/local/bin/
 
-echo "• Building ui.so..."
+echo "• Updating ui.so..."
 g++ -fPIC -shared ui.cpp -o ui.so $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m755 ui.so /usr/local/bin/
 
-echo "• Building reticulum.so..."
+echo "• Updating reticulum.so..."
 g++ -std=c++17 -Wall -Wextra -fPIC -shared -o reticulum.so reticulum.cpp $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m755 reticulum.so /usr/local/bin/reticulum.so
 
@@ -764,7 +766,7 @@ cd "$ALT_ROOT/Alternix"
 echo "• Updating osm-sudo..."
 sudo install -m 755 apps/osm-sudo /usr/local/bin/osm-sudo
 
-echo "• Building osm-kernels..."
+echo "• Updating osm-kernels..."
 g++ -fPIC apps/osm-kernels.cpp -o osm-kernels $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-kernels /usr/local/bin/
 
@@ -787,19 +789,19 @@ Keywords=kernel;linux;mainline;liquorix;xanmod;grub;
 EOF
 chmod +x "$HOME/.local/share/applications/osm-kernels.desktop"
 
-echo "• Building osm-lockscreen..."
+echo "• Updating osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-lockscreen /usr/local/bin/
 
-echo "• Building osm-launcher..."
+echo "• Updating osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
 
-echo "• Building osm-notify..."
+echo "• Updating osm-notify..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
 chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
 
-echo "• Building osm-clock..."
+echo "• Updating osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
 
@@ -807,30 +809,30 @@ echo "• Updating osm-power..."
 g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
-echo "• Building osm-files..."
+echo "• Updating osm-files..."
 g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
 
-echo "• Building osm-viewer..."
+echo "• Updating osm-viewer..."
 g++ -fPIC apps/osm-viewer.cpp -o osm-viewer $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core poppler-qt5) -Wno-deprecated-declarations
 chmod +x osm-viewer && sudo mv osm-viewer /usr/local/bin/
 
-echo "• Building osm-draw..."
+echo "• Updating osm-draw..."
 g++ -fPIC apps/osm-draw.cpp -o osm-draw -std=c++17 $(pkg-config --cflags --libs Qt5Widgets)
 chmod +x osm-draw && sudo mv osm-draw /usr/local/bin/
 
-echo "• Building osm-paper..."
+echo "• Updating osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
 echo "• Installing osm-paper-restore..."
 sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
 
-echo "• Building osm-lockscreen..."
+echo "• Updating osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-lockscreen /usr/local/bin/
 
-echo "• Building osm-launcher-lock-cleaner..."
+echo "• Updating osm-launcher-lock-cleaner..."
 # Resolve the source in the repository instead of assuming it is in the working directory.
 LOCKCLEAN_SRC="$(find "$ALT_ROOT" -type f -name 'osm-launcher-lockclean' -print -quit)"
 if [ -n "$LOCKCLEAN_SRC" ]; then
@@ -993,15 +995,19 @@ fi
 echo "• Updating desktop widgets..."
 cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets folder missing"; exit 1; }
 
-echo "• Building calendar widget..."
+echo "• Updating osm-widgets..."
+g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext -lXi
+sudo install -m 755 osm-widgets /usr/local/bin/
+
+echo "• Updating calendar widget..."
 g++ -I. -std=c++11 -fPIC -shared widgets/calendar.cpp -o calendar.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 calendar.so /usr/local/lib/alternix/widgets/calendar.so
 
-echo "• Building 13-moon-calendar widget..."
+echo "• Updating 13-moon-calendar widget..."
 g++ -I. -std=c++11 -fPIC -shared widgets/moon-calendar.cpp -o moon-calendar.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 moon-calendar.so /usr/local/lib/alternix/widgets/moon-calendar.so
 
-echo "• Building tzolkin widget..."
+echo "• Updating tzolkin widget..."
 g++ -I. -std=c++11 -fPIC -shared widgets/tzolkin.cpp -o tzolkin.so $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -Dm755 tzolkin.so /usr/local/lib/alternix/widgets/tzolkin.so
 
