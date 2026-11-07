@@ -7,6 +7,8 @@
 #include <QDateTime>
 #include <QPainter>
 #include <QMouseEvent>
+#include <QTouchEvent>
+#include <QEvent>
 #include <QScreen>
 #include <QDir>
 #include <QFile>
@@ -51,6 +53,9 @@ public:
         setWindowModality(Qt::ApplicationModal);
         setFocusPolicy(Qt::StrongFocus);
         setAttribute(Qt::WA_ShowWithoutActivating, false);
+        // Handle touchscreen swipes directly instead of relying on
+        // platform-specific touch-to-mouse synthesis.
+        setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         // Set geometry to screen size
         QScreen *scr = QGuiApplication::primaryScreen();
@@ -64,6 +69,10 @@ public:
         // Root container for layout
         QWidget *root = new QWidget(this);
         root->setGeometry(rect());
+        // The wallpaper, clock and status labels are visual-only.  Let all
+        // mouse presses/drags pass through them to this full-screen widget,
+        // so a swipe can begin ANYWHERE rather than only on the padlock.
+        root->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
         QVBoxLayout *mainLayout = new QVBoxLayout(root);
         mainLayout->setContentsMargins(40,40,40,40);
@@ -226,54 +235,75 @@ protected:
         adjustScaling();
     }
 
-    // ─── MOUSE EVENTS FOR SLIDER ───
+    // ─── FULL-SCREEN SWIPE-TO-UNLOCK (MOUSE + TOUCH) ───
+    // A press anywhere on the lockscreen can start the swipe; only a
+    // sufficiently long UPWARD drag can open the existing PIN/pattern dialog.
     void mousePressEvent(QMouseEvent *e) override {
-        if (e->button() != Qt::LeftButton)
+        if (e->button() == Qt::LeftButton) {
+            beginSlide(e->pos().y());
+            e->accept();
             return;
-
-        int cx = width()/2;
-        QRect tg = slideTextLabel->geometry();
-		// Icon position on screem: og: 30..
-        int baseY = tg.top() - (50 * scaleFactor);
-        int arrowY = baseY + sliderOffset;
-
-        int rad = int(60 * scaleFactor);
-        QRect handle(cx-rad, arrowY-rad, rad*2, rad*2);
-
-        if (handle.contains(e->pos())) {
-            sliding = true;
-            slidingBack = false;
-            slideBackTimer->stop();
-            lastPos = e->pos();
         }
+        e->accept();
     }
 
     void mouseMoveEvent(QMouseEvent *e) override {
-        if (!sliding)
-            return;
-
-        int dy = e->pos().y() - lastPos.y();
-        lastPos = e->pos();
-
-        sliderOffset += dy;
-        double maxUp = -height()*0.3;
-        if (sliderOffset < maxUp) sliderOffset = maxUp;
-        if (sliderOffset > 0) sliderOffset = 0;
-
-        update();
+        if (sliding && activeTouchId == -1 && (e->buttons() & Qt::LeftButton))
+            moveSlide(e->pos().y());
+        e->accept();
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
-        Q_UNUSED(e);
+        if (e->button() == Qt::LeftButton && sliding && activeTouchId == -1) {
+            moveSlide(e->pos().y());
+            finishSlide();
+        }
+        e->accept();
+    }
 
-        if (!sliding)
-            return;
-        sliding = false;
-
-        if (-sliderOffset > height()*0.2) {
-            triggerUnlock();
-        } else {
-            startSlideBack();
+    // Qt 5 touch events work on Wayland/X11 touchscreens without requiring
+    // the system to convert each touch into a synthetic mouse drag.
+    bool event(QEvent *e) override {
+        switch (e->type()) {
+        case QEvent::TouchBegin: {
+            auto *touch = static_cast<QTouchEvent *>(e);
+            if (activeTouchId == -1 && !touch->touchPoints().isEmpty()) {
+                const auto &point = touch->touchPoints().first();
+                activeTouchId = point.id();
+                beginSlide(point.pos().y());
+            }
+            e->accept();
+            return true;
+        }
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd: {
+            auto *touch = static_cast<QTouchEvent *>(e);
+            bool released = (e->type() == QEvent::TouchEnd);
+            for (const auto &point : touch->touchPoints()) {
+                if (point.id() != activeTouchId)
+                    continue;
+                moveSlide(point.pos().y());
+                if (point.state() & Qt::TouchPointReleased)
+                    released = true;
+                break;
+            }
+            if (released && activeTouchId != -1) {
+                activeTouchId = -1;
+                finishSlide();
+            }
+            e->accept();
+            return true;
+        }
+        case QEvent::TouchCancel:
+            activeTouchId = -1;
+            if (sliding) {
+                sliding = false;
+                startSlideBack();
+            }
+            e->accept();
+            return true;
+        default:
+            return QWidget::event(e);
         }
     }
 
@@ -302,11 +332,42 @@ private:
     int sliderOffset;
     bool sliding;
     bool slidingBack;
-    QPoint lastPos;
+    qreal swipeStartY = 0.0;
+    qreal swipeStartOffset = 0.0;
+    int activeTouchId = -1;
     QTimer *slideBackTimer;
     QTimer *grabTimer;
 
     qreal scaleFactor = 1.0; // devicePixelRatio()
+
+    void beginSlide(qreal y) {
+        sliding = true;
+        slidingBack = false;
+        slideBackTimer->stop();
+        swipeStartY = y;
+        swipeStartOffset = sliderOffset;
+    }
+
+    void moveSlide(qreal y) {
+        if (!sliding)
+            return;
+        // Keep the padlock tracking the drag; the wallpaper and the rest
+        // of the lockscreen remain fixed, just as with the original slider.
+        const qreal distance = swipeStartOffset + y - swipeStartY;
+        sliderOffset = qRound(qBound(-height() * 0.3, distance, 0.0));
+        update();
+    }
+
+    void finishSlide() {
+        if (!sliding)
+            return;
+        sliding = false;
+        // Preserve the original distance threshold and auth behaviour.
+        if (-sliderOffset > height() * 0.2)
+            triggerUnlock();
+        else
+            startSlideBack();
+    }
 
     void loadWallpaper() {
         // Shared wallpaper configuration used by osm-paper and
