@@ -244,7 +244,7 @@ sudo apt install -y \
     xprintidle libx11-dev libxtst-dev ntfs-3g aria2 x11-apps zip iio-sensor-proxy wmctrl \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift tlp fonts-ubuntu \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests bluez \
-    podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 \
+    podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 libxi-dev \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
 
 
@@ -1357,7 +1357,7 @@ cd "$ALT_ROOT/Alternix/apps/osm-widgets" || { echo "ERROR: apps/osm-widgets fold
 
 sudo mkdir -p /usr/local/lib/alternix/widgets
 
-g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext
+g++ -fPIC osm-widgets.cpp -o osm-widgets -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext -lXi
 sudo install -m 755 osm-widgets /usr/local/bin/
 
 echo "• Building osm-widgets-settings..."
