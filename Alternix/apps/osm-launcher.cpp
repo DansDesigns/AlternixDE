@@ -1293,8 +1293,10 @@ int main(int argc, char **argv) {
             return;
         }
         const int index = pendingIcons.at(nextPendingIcon++);
-        if (index >= 0 && index < tiles.size())
-            tiles.at(index)->loadIcon();
+        if (index >= 0 && index < tiles.size()) {
+            if (AppTile *tile = tiles.at(index))
+                tile->loadIcon();
+        }
         if (nextPendingIcon >= pendingIcons.size()) {
             iconTimer->stop();
             pendingIcons.clear();
