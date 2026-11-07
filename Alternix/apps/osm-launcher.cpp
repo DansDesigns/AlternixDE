@@ -35,6 +35,12 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QByteArray>
+#include <QDataStream>
+#include <QSaveFile>
+#include <QSet>
+#include <QElapsedTimer>
+#include <QDateTime>
+#include <algorithm>
 #include <unistd.h>
 
 // Shared cascade timings: opening now matches the previous closing speed,
@@ -539,25 +545,166 @@ static QStringList standardDesktopDirs() {
     return dirs;
 }
 
-static QList<AppEntry> loadDesktopEntries() {
+// Save parsed desktop entries between launcher invocations. QSettings has to
+// open and parse every .desktop file; that was part of the startup delay even
+// when no applications had changed. A small on-disk cache avoids parsing on
+// ordinary launches, while checking modification time and size of every
+// previously discovered desktop file AND directory detects edits, additions,
+// removals, and newly-created subdirectories. The cache is only an index of
+// unprivileged .desktop metadata; execution still goes through the existing
+// application launch and PolicyKit paths.
+struct DesktopCacheStamp {
+    QString path;
+    qint64 modifiedMs = -1;
+    qint64 size = -1;
+    bool directory = false;
+};
+
+static DesktopCacheStamp desktopStamp(const QString &path, bool directory) {
+    DesktopCacheStamp stamp;
+    stamp.path = path;
+    stamp.directory = directory;
+    const QFileInfo info(path);
+    if (!info.exists() || (directory ? !info.isDir() : !info.isFile()))
+        return stamp;
+    stamp.modifiedMs = info.lastModified().toMSecsSinceEpoch();
+    stamp.size = directory ? 0 : info.size();
+    return stamp;
+}
+
+static bool desktopStampMatches(const DesktopCacheStamp &expected) {
+    const DesktopCacheStamp actual = desktopStamp(expected.path,
+                                                   expected.directory);
+    return actual.modifiedMs == expected.modifiedMs &&
+           actual.size == expected.size;
+}
+
+static QVector<DesktopCacheStamp> desktopDirectoryStamps() {
+    QSet<QString> directories;
+    for (const QString &root : standardDesktopDirs()) {
+        directories.insert(QDir::cleanPath(root)); // also remember absent dirs
+        if (!QDir(root).exists()) continue;
+        QDirIterator it(root, QDir::Dirs | QDir::NoDotAndDotDot,
+                        QDirIterator::Subdirectories);
+        while (it.hasNext()) directories.insert(QDir::cleanPath(it.next()));
+    }
+    QStringList paths;
+    for (const QString &path : directories) paths.append(path);
+    paths.sort();
+    QVector<DesktopCacheStamp> stamps;
+    stamps.reserve(paths.size());
+    for (const QString &path : paths) stamps.append(desktopStamp(path, true));
+    return stamps;
+}
+
+static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
     QList<AppEntry> apps;
     for (const QString &dir : standardDesktopDirs()) {
-        QDirIterator it(dir, QStringList() << "*.desktop", QDir::Files, QDirIterator::Subdirectories);
+        QDirIterator it(dir, QStringList() << "*.desktop", QDir::Files,
+                        QDirIterator::Subdirectories);
         while (it.hasNext()) {
-            QString path = it.next();
-            QSettings s(path, QSettings::IniFormat);
-            s.beginGroup("Desktop Entry");
-            QString name = s.value("Name").toString();
-            QString exec = s.value("Exec").toString();
-            QString icon = s.value("Icon").toString();
-            QString nodisplay = s.value("NoDisplay", "false").toString().toLower();
-            s.endGroup();
-            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true") continue;
+            const QString path = it.next();
+            // Cache the signature of even hidden/invalid entries. Changes to
+            // NoDisplay, Name or Exec must invalidate the index as well.
+            files.append(desktopStamp(path, false));
+            QSettings settings(path, QSettings::IniFormat);
+            settings.beginGroup("Desktop Entry");
+            const QString name = settings.value("Name").toString();
+            const QString exec = settings.value("Exec").toString();
+            const QString icon = settings.value("Icon").toString();
+            const QString nodisplay = settings.value("NoDisplay", "false")
+                                          .toString().toLower();
+            settings.endGroup();
+            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true")
+                continue;
             apps.append({name, cleanExec(exec), icon});
         }
     }
-    std::sort(apps.begin(), apps.end(),
-              [](const AppEntry &a, const AppEntry &b){ return a.name.toLower() < b.name.toLower(); });
+    std::sort(apps.begin(), apps.end(), [](const AppEntry &a, const AppEntry &b) {
+        return a.name.toLower() < b.name.toLower();
+    });
+    return apps;
+}
+
+static constexpr quint32 launcherCacheMagic = 0x4f534d4c; // 'OSML'
+static constexpr quint32 launcherCacheVersion = 1;
+
+static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
+    QFile cache(cachePath);
+    if (!cache.open(QIODevice::ReadOnly)) return false;
+    QDataStream stream(&cache);
+    stream.setVersion(QDataStream::Qt_5_6);
+    quint32 magic = 0, version = 0, directories = 0, files = 0, appCount = 0;
+    stream >> magic >> version >> directories >> files >> appCount;
+    if (stream.status() != QDataStream::Ok || magic != launcherCacheMagic ||
+        version != launcherCacheVersion || directories > 10000 ||
+        files > 50000 || appCount > 50000)
+        return false;
+
+    // Read the entire index before validating: malformed/partial cache files
+    // should simply cause a fresh scan instead of displaying a partial list.
+    QVector<DesktopCacheStamp> stamps;
+    stamps.reserve(int(directories + files));
+    for (quint32 i = 0; i < directories + files; ++i) {
+        DesktopCacheStamp stamp;
+        stream >> stamp.path >> stamp.modifiedMs >> stamp.size >> stamp.directory;
+        if (stream.status() != QDataStream::Ok || stamp.path.isEmpty() ||
+            stamp.directory != (i < directories)) return false;
+        stamps.append(stamp);
+    }
+    QList<AppEntry> cachedApps;
+    for (quint32 i = 0; i < appCount; ++i) {
+        AppEntry entry;
+        stream >> entry.name >> entry.exec >> entry.icon;
+        if (stream.status() != QDataStream::Ok) return false;
+        cachedApps.append(entry);
+    }
+    if (stream.status() != QDataStream::Ok) return false;
+
+    for (const DesktopCacheStamp &stamp : stamps)
+        if (!desktopStampMatches(stamp)) return false;
+
+    apps = cachedApps;
+    return true;
+}
+
+static void writeDesktopCache(const QString &cachePath,
+                              const QList<AppEntry> &apps,
+                              const QVector<DesktopCacheStamp> &directories,
+                              const QVector<DesktopCacheStamp> &files) {
+    QSaveFile cache(cachePath);
+    if (!cache.open(QIODevice::WriteOnly)) return;
+    cache.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    QDataStream stream(&cache);
+    stream.setVersion(QDataStream::Qt_5_6);
+    stream << launcherCacheMagic << launcherCacheVersion
+           << quint32(directories.size()) << quint32(files.size())
+           << quint32(apps.size());
+    for (const DesktopCacheStamp &stamp : directories)
+        stream << stamp.path << stamp.modifiedMs << stamp.size << stamp.directory;
+    for (const DesktopCacheStamp &stamp : files)
+        stream << stamp.path << stamp.modifiedMs << stamp.size << stamp.directory;
+    for (const AppEntry &entry : apps)
+        stream << entry.name << entry.exec << entry.icon;
+    if (stream.status() == QDataStream::Ok) cache.commit();
+    else cache.cancelWriting();
+}
+
+static QList<AppEntry> loadDesktopEntries(const QString &cachePath,
+                                           bool *cacheHit,
+                                           QVector<DesktopCacheStamp> *pendingFiles) {
+    QList<AppEntry> apps;
+    if (readDesktopCache(cachePath, apps)) {
+        if (cacheHit) *cacheHit = true;
+        return apps;
+    }
+    if (cacheHit) *cacheHit = false;
+    // On a cache miss only do the required desktop-entry scan before showing
+    // the window. Directory enumeration and cache writing happen after the
+    // first frame, not on the critical path to the opening animation.
+    QVector<DesktopCacheStamp> files;
+    apps = scanDesktopEntries(files);
+    if (pendingFiles) *pendingFiles = files;
     return apps;
 }
 
@@ -969,6 +1116,9 @@ protected:
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
+    QElapsedTimer startupClock;
+    startupClock.start();
+    const bool profileStartup = qEnvironmentVariableIsSet("OSM_LAUNCHER_PROFILE");
 
     // ───────── Read font size from UI settings
     {
@@ -997,7 +1147,14 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    QList<AppEntry> apps = loadDesktopEntries();
+    bool usedAppCache = false;
+    const QString appsCachePath = cacheDir.absoluteFilePath("osm-launcher-apps-v1.cache");
+    QVector<DesktopCacheStamp> pendingCacheFiles;
+    QList<AppEntry> apps = loadDesktopEntries(appsCachePath, &usedAppCache,
+                                               &pendingCacheFiles);
+    if (profileStartup)
+        qInfo() << "osm-launcher startup: desktop entries loaded in"
+                << startupClock.elapsed() << "ms (cache hit:" << usedAppCache << ")";
 
     LauncherWindow window;        // ← WINDOW TYPE WITH BUILT-IN FADE
     window.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
@@ -1085,9 +1242,23 @@ int main(int argc, char **argv) {
     KeyFilter *kf = new KeyFilter();
     window.installEventFilter(kf);
 
-    // Best-effort only: don't block ordinary apps if PolicyKit is not installed.
-    if (polkitPamUsesAlternix() && !polkitAgentRunning())
-        startPolkitAgent();
+    if (!usedAppCache) {
+        // Cache work is done after the launcher has appeared. Even the first
+        // run won't wait for the extra directory scan and atomic disk write.
+        QTimer::singleShot(450, &window,
+                           [appsCachePath, apps, pendingCacheFiles]() {
+            writeDesktopCache(appsCachePath, apps, desktopDirectoryStamps(),
+                              pendingCacheFiles);
+        });
+    }
+
+    // Do not walk /proc or spawn PolicyKit agents before the first frame.
+    // Application clicks still perform their own synchronous authentication
+    // checks, so this deferred best-effort startup cannot bypass permission.
+    QTimer::singleShot(650, &window, []() {
+        if (polkitPamUsesAlternix() && !polkitAgentRunning())
+            startPolkitAgent();
+    });
 
     // Suppress the first fullscreen paint until the row effects are installed;
     // otherwise the entire launcher can flash for one frame before cascading.
@@ -1105,12 +1276,10 @@ int main(int argc, char **argv) {
 
     // ──────────────────────────────  Lazy icon loader
     QTimer *iconTimer = new QTimer(&window);
-    // Preload just the first visible row before it fades in. Later icons still
-    // load lazily, but more quickly while the visible rows are cascading.
-    const int initialIcons = qMin(cols, tiles.size());
-    for (int i = 0; i < initialIcons; ++i) tiles[i]->loadIcon();
+    // Never decode theme icons synchronously before the event loop has shown
+    // the fullscreen launcher. Populate them in small timed batches instead.
     iconTimer->setInterval(8);
-    int current = initialIcons;
+    int current = 0;
     const int visibleIconLimit = qMin(tiles.size(),
         (qMax(1, scroll->viewport()->height() / 160) + 2) * cols);
 
@@ -1128,6 +1297,9 @@ int main(int argc, char **argv) {
 
     window.setIconLoader(iconTimer);
     iconTimer->start();
+    if (profileStartup)
+        qInfo() << "osm-launcher startup: fullscreen requested in"
+                << startupClock.elapsed() << "ms";
 
     return a.exec();
 }
