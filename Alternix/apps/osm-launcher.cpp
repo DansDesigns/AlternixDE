@@ -39,11 +39,13 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QElapsedTimer>
+#include <QSpacerItem>
 #include <QDateTime>
 #include <algorithm>
 #include <functional>
 #include <utility>
 #include <unistd.h>
+#include <sys/stat.h>
 
 // Shared cascade timings: opening now matches the previous closing speed,
 // then BOTH directions have been accelerated 2x. Keep the stages synchronized
@@ -111,6 +113,10 @@ class LauncherWindow : public QWidget {
     // Load icons in exactly the order rows enter the opening cascade, not
     // in .desktop alphabetical order (which used to go top to bottom).
     std::function<void(int)> requestRowIcons;
+    // Only cards in/near the viewport are materialised at startup. The
+    // remaining grid cells reserve their geometry without expensive QWidget,
+    // stylesheet and graphics-effect construction.
+    std::function<void()> populateVisibleRows;
     // Retain the live layout targets so every close action, including a
     // pull-down gesture, can reverse the currently visible opening cascade.
     QPointer<QScrollArea> animationScroll;
@@ -129,14 +135,41 @@ class LauncherWindow : public QWidget {
     };
     QVector<RowReveal> rowReveals;
     QVector<QPointer<QVariantAnimation>> scrollRevealAnimations;
+    QElapsedTimer *startupProfiler = nullptr;
+    bool firstPaintLogged = false;
 
 public:
     using QWidget::QWidget;
 
     bool isTransitioning() const { return opening || dismissing; }
+    void setStartupProfiler(QElapsedTimer *timer) { startupProfiler = timer; }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
     void setRowIconLoader(std::function<void(int)> callback) {
         requestRowIcons = std::move(callback);
+    }
+    void setVisibleRowPopulator(std::function<void()> callback) {
+        populateVisibleRows = std::move(callback);
+    }
+
+    // Newly materialised tiles join the original cascade without ever showing
+    // a fully opaque frame before their row's opening stage has run.
+    void registerTile(int index, QWidget *tile) {
+        if (index < 0 || index >= animationTiles.size() || !tile) return;
+        animationTiles[index] = tile;
+        const int row = index / animationColumns;
+        if (row < 0 || row >= rowReveals.size()) return;
+        RowReveal &state = rowReveals[row];
+        if (state.completed) return;
+        auto *cardEffect = new LauncherRevealEffect(0.30, tile);
+        cardEffect->setProgress(state.started ? 1.0 : 0.0);
+        tile->setGraphicsEffect(cardEffect);
+        state.cards.append(cardEffect);
+        for (QLabel *label : tile->findChildren<QLabel*>()) {
+            auto *contentEffect = new LauncherRevealEffect(0.85, label);
+            contentEffect->setProgress(state.started ? 1.0 : 0.0);
+            label->setGraphicsEffect(contentEffect);
+            state.contents.append(contentEffect);
+        }
     }
 
     // Identify rows intersecting the viewport, including partially visible
@@ -202,7 +235,11 @@ public:
     // from bottom to top. Effects were already installed before first paint,
     // so none can suddenly appear fully opaque when the scrollbar moves.
     void revealVisiblePendingRows() {
-        if (isTransitioning() || !animationScroll) return;
+        if (!animationScroll || dismissing) return;
+        // Populate before inspecting visibleRows(), otherwise the empty
+        // placeholders make newly scrolled-to rows look permanently invisible.
+        if (populateVisibleRows) populateVisibleRows();
+        if (isTransitioning()) return;
         const QVector<QVector<QWidget*>> rows = visibleRows();
         QVector<int> pending;
         for (int row = rows.size() - 1; row >= 0; --row)
@@ -268,16 +305,7 @@ public:
                           animationColumns);
         for (int index = 0; index < animationTiles.size(); ++index) {
             QWidget *tile = animationTiles.at(index);
-            if (!tile) continue;
-            RowReveal &row = rowReveals[index / animationColumns];
-            auto *cardEffect = new LauncherRevealEffect(0.30, tile);
-            tile->setGraphicsEffect(cardEffect);
-            row.cards.append(cardEffect);
-            for (QLabel *label : tile->findChildren<QLabel*>()) {
-                auto *contentEffect = new LauncherRevealEffect(0.85, label);
-                label->setGraphicsEffect(contentEffect);
-                row.contents.append(contentEffect);
-            }
+            if (tile) registerTile(index, tile);
         }
 
         // The close button is always last, after the whole visible cascade.
@@ -307,6 +335,10 @@ public:
         if (!opening || !animationScroll) return;
         if (layout()) layout()->activate();
         QWidget *content = animationScroll->widget();
+        if (content && content->layout()) content->layout()->activate();
+        // Now that Qtile's real fullscreen geometry is available, materialise
+        // the actually visible rows before selecting the bottommost row.
+        if (populateVisibleRows) populateVisibleRows();
         if (content && content->layout()) content->layout()->activate();
 
         // Some X11/Qtile layouts need an extra frame to apply fullscreen size.
@@ -501,6 +533,11 @@ public:
 
 protected:
     void paintEvent(QPaintEvent *) override {
+        if (startupProfiler && !firstPaintLogged) {
+            firstPaintLogged = true;
+            qInfo() << "osm-launcher startup: first paint after"
+                    << startupProfiler->elapsed() << "ms";
+        }
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
@@ -585,10 +622,23 @@ static DesktopCacheStamp desktopStamp(const QString &path, bool directory) {
 }
 
 static bool desktopStampMatches(const DesktopCacheStamp &expected) {
-    const DesktopCacheStamp actual = desktopStamp(expected.path,
-                                                   expected.directory);
-    return actual.modifiedMs == expected.modifiedMs &&
-           actual.size == expected.size;
+    // Fast warm-cache validation: one stat() per file/directory rather than
+    // repeatedly constructing QFileInfo/QDateTime objects on the UI thread.
+    // This keeps the same exact size + mtime invalidation semantics.
+    const QByteArray path = QFile::encodeName(expected.path);
+    struct stat info {};
+    if (::stat(path.constData(), &info) != 0)
+        return expected.modifiedMs == -1 && expected.size == -1;
+    if (expected.directory ? !S_ISDIR(info.st_mode) : !S_ISREG(info.st_mode))
+        return false;
+#if defined(__linux__)
+    const qint64 modifiedMs = qint64(info.st_mtim.tv_sec) * 1000 +
+                              qint64(info.st_mtim.tv_nsec) / 1000000;
+#else
+    const qint64 modifiedMs = qint64(info.st_mtime) * 1000;
+#endif
+    return expected.modifiedMs == modifiedMs &&
+           expected.size == (expected.directory ? 0 : qint64(info.st_size));
 }
 
 static QVector<DesktopCacheStamp> desktopDirectoryStamps() {
@@ -1169,6 +1219,7 @@ int main(int argc, char **argv) {
                 << startupClock.elapsed() << "ms (cache hit:" << usedAppCache << ")";
 
     LauncherWindow window;        // ← WINDOW TYPE WITH BUILT-IN FADE
+    if (profileStartup) window.setStartupProfiler(&startupClock);
     window.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     window.setAttribute(Qt::WA_TranslucentBackground, true);
     window.setAutoFillBackground(false);
@@ -1199,19 +1250,40 @@ int main(int argc, char **argv) {
     int cols = 4;
     int idx = 0;
 
-    QVector<AppTile*> tiles;
-    tiles.reserve(apps.size());
-
-    // Create all tiles with lightweight placeholders only
-    for (const AppEntry &e : apps) {
-        AppTile *tile = new AppTile(e, container);
-        grid->addWidget(tile, idx / cols, idx % cols);
-        tiles.append(tile);
-        ++idx;
+    // QGridLayout still owns the full, correctly sized scrollable list, but
+    // offscreen cells initially use QSpacerItem rather than hundreds of frames,
+    // labels and hover styles. Only a screenful (plus a safety margin) has to
+    // be created before the first fullscreen frame.
+    QVector<AppTile*> tiles(apps.size(), nullptr);
+    QVector<QSpacerItem*> placeholders(apps.size(), nullptr);
+    const int rowHeight = qMax(160, 88 + a.fontMetrics().height() * 3);
+    const int initialRows = qMax(4, (QApplication::primaryScreen()->size().height()
+                                      + rowHeight + 11) / (rowHeight + 12) + 2);
+    const int initialCount = qMin(apps.size(), initialRows * cols);
+    for (int i = 0; i < apps.size(); ++i) {
+        if (i < initialCount) {
+            AppTile *tile = new AppTile(apps.at(i), container);
+            tile->setMinimumHeight(rowHeight);
+            tiles[i] = tile;
+            grid->addWidget(tile, i / cols, i % cols);
+        } else {
+            QSpacerItem *placeholder = new QSpacerItem(150, rowHeight,
+                QSizePolicy::Expanding, QSizePolicy::Fixed);
+            placeholders[i] = placeholder;
+            grid->addItem(placeholder, i / cols, i % cols);
+        }
     }
 
+    // Reserve the original extra scroll space as a dedicated trailing row
+    // instead of stretching only the eagerly created cards. This keeps the
+    // geometry of placeholder rows stable when they are materialised.
+    grid->setRowMinimumHeight((apps.size() + cols - 1) / cols, 200);
     container->setLayout(grid);
     container->adjustSize();
+    if (profileStartup)
+        qInfo() << "osm-launcher startup: initial visible card widgets built in"
+                << startupClock.elapsed() << "ms (created" << initialCount
+                << "of" << apps.size() << "cards)";
 
     int screenWidth = QApplication::primaryScreen()->size().width();
 
@@ -1223,7 +1295,7 @@ int main(int argc, char **argv) {
 
     scroll->setFixedWidth(contentWidth);
     container->setMinimumWidth(contentWidth);
-    container->setMinimumHeight(container->sizeHint().height() + 200);
+    container->setMinimumHeight(container->sizeHint().height());
 
     scroll->setWidget(container);
 
@@ -1325,6 +1397,43 @@ int main(int argc, char **argv) {
     tileWidgets.reserve(tiles.size());
     for (AppTile *tile : tiles) tileWidgets.append(tile);
     window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
+
+    bool populatingRows = false;
+    window.setVisibleRowPopulator([&]() {
+        if (populatingRows || !scroll->widget() || !grid) return;
+        populatingRows = true;
+        // A row is created at once to keep every card on that row synchronised.
+        // cellRect() uses real layout geometry, including non-default font size
+        // and viewport scroll offsets. The extra row prevents blank edges during
+        // kinetic scrolling, while offscreen rows stay cheap spacers.
+        if (container->layout()) container->layout()->activate();
+        const QPoint topLeft = scroll->viewport()->mapTo(container, QPoint(0, 0));
+        const QRect visible(topLeft, scroll->viewport()->size());
+        const int margin = rowHeight + grid->verticalSpacing();
+        const int rowCount = (tiles.size() + cols - 1) / cols;
+        for (int row = 0; row < rowCount; ++row) {
+            const QRect cell = grid->cellRect(row, 0);
+            if (!cell.isValid() || cell.bottom() < visible.top() - margin ||
+                cell.top() > visible.bottom() + margin) continue;
+            for (int column = 0; column < cols; ++column) {
+                const int index = row * cols + column;
+                if (index >= tiles.size() || tiles[index]) continue;
+                QSpacerItem *placeholder = placeholders[index];
+                if (placeholder) {
+                    grid->removeItem(placeholder);
+                    delete placeholder;
+                    placeholders[index] = nullptr;
+                }
+                AppTile *tile = new AppTile(apps.at(index), container);
+                tile->setMinimumHeight(rowHeight);
+                tiles[index] = tile;
+                grid->addWidget(tile, row, column);
+                window.registerTile(index, tile);
+            }
+        }
+        if (container->layout()) container->layout()->activate();
+        populatingRows = false;
+    });
     window.setUpdatesEnabled(true);
 
     // Observe touches and mouse drags anywhere in the scrollable app list.
