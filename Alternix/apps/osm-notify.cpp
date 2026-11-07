@@ -8,6 +8,7 @@
 #include <QScreen>
 #include <QTimer>
 #include <QLockFile>
+#include <QDebug>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <csignal>
@@ -1517,7 +1518,13 @@ static void requestNotifyShow(int) { g_notifyShowRequested = 1; }
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
 
-    const bool showRequested = a.arguments().contains("--show");
+    // Normal invocations (from launchers, keyboard shortcuts or osm-widgets)
+    // should always SHOW the panel, including when the daemon is already alive.
+    // Only the explicit --daemon/--background form starts it hidden at login.
+    const QStringList arguments = a.arguments();
+    const bool startHidden = arguments.contains("--daemon") ||
+                             arguments.contains("--background") ||
+                             arguments.contains("--start-hidden");
     const QString lockDir = QDir::homePath() + "/.cache/Alternix";
     QDir().mkpath(lockDir);
     const QString display = QString::fromLocal8Bit(qgetenv("DISPLAY"));
@@ -1528,11 +1535,21 @@ int main(int argc, char **argv) {
                            QString::fromLatin1(displayKey.constData()) + ".lock");
     instanceLock.setStaleLockTime(0);
     if (!instanceLock.tryLock(0)) {
-        if (showRequested) {
+        if (instanceLock.error() != QLockFile::LockFailedError) {
+            qWarning() << "osm-notify: cannot acquire instance lock:"
+                       << instanceLock.error();
+            return 1;
+        }
+        // Previously only --show signalled an existing instance, so every
+        // legacy launch command just exited without opening the panel.
+        if (!startHidden) {
             qint64 pid = 0;
             QString hostname, appname;
-            if (instanceLock.getLockInfo(&pid, &hostname, &appname) && pid > 1)
-                ::kill(static_cast<pid_t>(pid), SIGUSR1);
+            if (!instanceLock.getLockInfo(&pid, &hostname, &appname) || pid <= 1 ||
+                ::kill(static_cast<pid_t>(pid), SIGUSR1) != 0) {
+                qWarning() << "osm-notify: could not activate running instance";
+                return 1;
+            }
         }
         return 0;
     }
@@ -1544,11 +1561,12 @@ int main(int argc, char **argv) {
     QObject::connect(&showSignalPoll, &QTimer::timeout, &overlay, [&overlay]() {
         if (g_notifyShowRequested) {
             g_notifyShowRequested = 0;
-            overlay.openPanel();
+            if (!overlay.closing)
+                overlay.openPanel();
         }
     });
     showSignalPoll.start();
-    if (showRequested)
+    if (!startHidden)
         QTimer::singleShot(0, &overlay, [&overlay]() { overlay.openPanel(); });
 
     QRect g = QApplication::primaryScreen()->geometry();
