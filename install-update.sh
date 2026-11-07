@@ -787,6 +787,10 @@ Keywords=kernel;linux;mainline;liquorix;xanmod;grub;
 EOF
 chmod +x "$HOME/.local/share/applications/osm-kernels.desktop"
 
+echo "• Building osm-lockscreen..."
+g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 osm-lockscreen /usr/local/bin/
+
 echo "• Building osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
