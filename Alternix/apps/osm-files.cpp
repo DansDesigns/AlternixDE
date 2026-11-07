@@ -212,6 +212,7 @@ public:
         settings = new QSettings(QDir::homePath() + "/.config/Alternix/osm-files.conf",
                                  QSettings::IniFormat);
         themeIsLight() = settings->value("ui/lightMode", false).toBool();
+        gridMode = settings->value("ui/gridMode", false).toBool();
 
         setStyleSheet(themed("background:#282828; color:white;"));
 
@@ -271,9 +272,9 @@ public:
             "QPushButton:hover { background:#7a7a7a; }"
             "QPushButton:pressed { background:#5a5a5a; }";
 
-        // Start in list mode styles
-        currentNormalStyle = listNormalStyle;
-        currentSelectedStyle = listSelectedStyle;
+        // Restore the last chosen layout before the initial directory is built.
+        currentNormalStyle = gridMode ? gridNormalStyle : listNormalStyle;
+        currentSelectedStyle = gridMode ? gridSelectedStyle : listSelectedStyle;
 
         QVBoxLayout *root = new QVBoxLayout(this);
         root->setContentsMargins(20,20,20,20);
@@ -361,9 +362,10 @@ public:
         pathRow->addWidget(pathBtn, 1);
 
         // View mode toggle
-        viewToggleBtn = new QPushButton("☴");
+        viewToggleBtn = new QPushButton(gridMode ? "☷" : "☴");
         viewToggleBtn->setFixedSize(50, 50);
         viewToggleBtn->setCheckable(true);
+        viewToggleBtn->setChecked(gridMode);
         viewToggleBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:15px; }"
             "QPushButton:hover { background:#666; }"
@@ -618,6 +620,10 @@ public:
             viewToggleBtn->setText(checked ? "☷" : "☴");
             currentNormalStyle  = gridMode ? gridNormalStyle  : listNormalStyle;
             currentSelectedStyle = gridMode ? gridSelectedStyle : listSelectedStyle;
+            if (settings) {
+                settings->setValue("ui/gridMode", gridMode);
+                settings->sync();
+            }
             listDirectory(currentPath);
         });
 
