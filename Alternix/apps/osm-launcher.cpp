@@ -41,6 +41,8 @@
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <algorithm>
+#include <functional>
+#include <utility>
 #include <unistd.h>
 
 // Shared cascade timings: opening now matches the previous closing speed,
@@ -106,6 +108,9 @@ class LauncherWindow : public QWidget {
     qreal backdropOpacity = 1.0;
     bool dismissing = false;
     QPointer<QTimer> iconLoader;
+    // Load icons in exactly the order rows enter the opening cascade, not
+    // in .desktop alphabetical order (which used to go top to bottom).
+    std::function<void(int)> requestRowIcons;
     // Retain the live layout targets so every close action, including a
     // pull-down gesture, can reverse the currently visible opening cascade.
     QPointer<QScrollArea> animationScroll;
@@ -130,6 +135,9 @@ public:
 
     bool isTransitioning() const { return opening || dismissing; }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
+    void setRowIconLoader(std::function<void(int)> callback) {
+        requestRowIcons = std::move(callback);
+    }
 
     // Identify rows intersecting the viewport, including partially visible
     // rows. All rows are pre-initialised separately; this method only chooses
@@ -161,6 +169,10 @@ public:
         RowReveal &state = rowReveals[row];
         if (state.started) return;
         state.started = true;
+        // Called bottom-to-top by the same loops that schedule the card fades.
+        // Icons are decoded by the lazy timer while the row's card/background
+        // stages are animating, so the icon/label stage has actual pixmaps.
+        if (requestRowIcons) requestRowIcons(row);
         for (const auto &effect : state.cards)
             if (effect) steps.append(LauncherRevealStep(effect, startMs, cardMs));
         for (const auto &effect : state.contents)
@@ -1260,6 +1272,51 @@ int main(int argc, char **argv) {
             startPolkitAgent();
     });
 
+    // ──────────────────────────────  Lazy icons, scheduled by the row cascade
+    // The opening animation already discovers the real bottommost visible row
+    // AFTER Qtile has settled fullscreen geometry. Reuse its chosen row order
+    // rather than guessing how many rows are visible or loading index 0 first.
+    // Each row is decoded in its own left-to-right tile order, with the lowest
+    // visible row first. Scrolling later requests any newly visible rows.
+    QTimer *iconTimer = new QTimer(&window);
+    iconTimer->setInterval(8);
+    QVector<int> pendingIcons;
+    QVector<bool> iconRequested(tiles.size(), false);
+    int nextPendingIcon = 0;
+
+    QObject::connect(iconTimer, &QTimer::timeout, &window,
+                     [&tiles, iconTimer, &pendingIcons, &nextPendingIcon]() {
+        if (nextPendingIcon >= pendingIcons.size()) {
+            iconTimer->stop();
+            pendingIcons.clear();
+            nextPendingIcon = 0;
+            return;
+        }
+        const int index = pendingIcons.at(nextPendingIcon++);
+        if (index >= 0 && index < tiles.size())
+            tiles.at(index)->loadIcon();
+        if (nextPendingIcon >= pendingIcons.size()) {
+            iconTimer->stop();
+            pendingIcons.clear();
+            nextPendingIcon = 0;
+        }
+    });
+
+    window.setIconLoader(iconTimer);
+    window.setRowIconLoader([&tiles, &pendingIcons, &iconRequested,
+                             &nextPendingIcon, iconTimer, cols](int row) {
+        const int first = row * cols;
+        const int last = qMin(first + cols, tiles.size());
+        for (int index = first; index < last; ++index) {
+            if (!iconRequested[index]) {
+                iconRequested[index] = true;
+                pendingIcons.append(index);
+            }
+        }
+        if (nextPendingIcon < pendingIcons.size() && !iconTimer->isActive())
+            iconTimer->start();
+    });
+
     // Suppress the first fullscreen paint until the row effects are installed;
     // otherwise the entire launcher can flash for one frame before cascading.
     window.setUpdatesEnabled(false);
@@ -1273,30 +1330,6 @@ int main(int argc, char **argv) {
     // Observe touches and mouse drags anywhere in the scrollable app list.
     PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
     a.installEventFilter(pullFilter);
-
-    // ──────────────────────────────  Lazy icon loader
-    QTimer *iconTimer = new QTimer(&window);
-    // Never decode theme icons synchronously before the event loop has shown
-    // the fullscreen launcher. Populate them in small timed batches instead.
-    iconTimer->setInterval(8);
-    int current = 0;
-    const int visibleIconLimit = qMin(tiles.size(),
-        (qMax(1, scroll->viewport()->height() / 160) + 2) * cols);
-
-    QObject::connect(iconTimer, &QTimer::timeout, &window,
-                     [iconTimer, &tiles, &current, visibleIconLimit]() mutable {
-        if (current >= tiles.size()) {
-            iconTimer->stop();
-            return;
-        }
-        tiles[current]->loadIcon();
-        ++current;
-        if (current >= visibleIconLimit && iconTimer->interval() != 30)
-            iconTimer->setInterval(30);
-    });
-
-    window.setIconLoader(iconTimer);
-    iconTimer->start();
     if (profileStartup)
         qInfo() << "osm-launcher startup: fullscreen requested in"
                 << startupClock.elapsed() << "ms";
