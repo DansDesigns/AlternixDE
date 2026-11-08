@@ -53,6 +53,12 @@
 #include <QCryptographicHash>
 #include <QSaveFile>
 #include <QProgressDialog>
+#include <QTemporaryFile>
+#include <QTemporaryDir>
+#include <QCloseEvent>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <sys/syscall.h>
 #include <algorithm>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -61,6 +67,456 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <stdio.h>
+
+// Transfer through temporary files on the destination filesystem.  This deliberately
+// does not use KDE/KIO or QFile::rename's cross-volume copy-and-delete fallback.
+// A source is never removed until every destination byte has been verified.
+class SafeTransferJob : public QThread {
+public:
+    struct Item { QString source, destination; };
+    struct Entry {
+        enum Kind { Directory, Regular, Symlink } kind;
+        QString source, relative;
+        qint64 size = 0;
+        QDateTime modified;
+        QByteArray linkTarget;
+    };
+    struct Root {
+        Item item;
+        QVector<Entry> entries;
+        qint64 bytes = 0;
+        bool directory = false;
+    };
+
+    QVector<Item> requested;
+    bool moving = false;
+    QString operation;
+    QStringList errors;
+    QStringList successfulSources;
+    std::function<void(qint64, qint64, const QString &)> onProgress;
+
+    SafeTransferJob(const QVector<Item> &items, bool moveFiles, QObject *parent = nullptr)
+        : QThread(parent), requested(items), moving(moveFiles),
+          operation(moveFiles ? "Moving files…" : "Copying files…") {}
+
+protected:
+    static QString sysError(int code) {
+        return QString::fromLocal8Bit(::strerror(code));
+    }
+
+    static bool existsIncludingSymlink(const QString &path) {
+        const QByteArray local = QFile::encodeName(path);
+        struct stat st;
+        return ::lstat(local.constData(), &st) == 0;
+    }
+
+    // Linux renameat2 with RENAME_NOREPLACE, to avoid clobbering a destination
+    // created between name selection and the final rename. On older kernels or
+    // filesystems, use a checked, ordinary rename as a compatibility fallback.
+    static bool renameWithoutReplacing(const QString &from, const QString &to, int &error) {
+        const QByteArray a = QFile::encodeName(from);
+        const QByteArray b = QFile::encodeName(to);
+#ifdef SYS_renameat2
+        if (::syscall(SYS_renameat2, AT_FDCWD, a.constData(), AT_FDCWD,
+                      b.constData(), 1 /* RENAME_NOREPLACE */) == 0)
+            return true;
+        error = errno;
+        if (error != ENOSYS && error != EINVAL && error != EOPNOTSUPP)
+            return false;
+#endif
+        if (existsIncludingSymlink(to)) { error = EEXIST; return false; }
+        if (::rename(a.constData(), b.constData()) == 0) return true;
+        error = errno;
+        return false;
+    }
+
+    static bool isInsideDirectory(const QString &parent, const QString &candidate) {
+        const QString p = QDir::cleanPath(parent);
+        const QString c = QDir::cleanPath(candidate);
+        return c == p || c.startsWith(p == "/" ? "/" : p + "/");
+    }
+
+    bool makePlan(const QString &source, const QString &relative, Root &root,
+                  QString &error, int depth = 0) {
+        if (isInterruptionRequested()) { error = "Transfer interrupted."; return false; }
+        if (depth > 256) { error = "Folder nesting is too deep: " + source; return false; }
+        const QFileInfo fi(source);
+        Entry entry;
+        entry.source = source;
+        entry.relative = relative;
+        entry.modified = fi.lastModified();
+
+        // Symlinks must be handled before isDir(), otherwise a directory link
+        // could recurse forever and a link to an external file be dereferenced.
+        if (fi.isSymLink()) {
+            const QByteArray name = QFile::encodeName(source);
+            QByteArray buf(4096, '\0');
+            const ssize_t count = ::readlink(name.constData(), buf.data(), size_t(buf.size()));
+            if (count < 0 || count == buf.size()) {
+                error = "Cannot read symbolic link: " + source + " (" + sysError(errno) + ")";
+                return false;
+            }
+            entry.kind = Entry::Symlink;
+            entry.linkTarget = buf.left(int(count));
+            root.entries.append(entry);
+        } else if (fi.isDir()) {
+            if (!fi.isReadable()) { error = "Cannot read folder: " + source; return false; }
+            entry.kind = Entry::Directory;
+            root.entries.append(entry);
+            // Unlike QDir::entryInfoList(), opendir/readdir lets us detect a
+            // remote directory listing that stopped with EIO. Never treat an
+            // interrupted NAS scan as an empty folder, especially on moves.
+            const QByteArray native = QFile::encodeName(source);
+            DIR *handle = ::opendir(native.constData());
+            if (!handle) {
+                error = "Cannot open folder " + source + ": " + sysError(errno);
+                return false;
+            }
+            QStringList children;
+            errno = 0;
+            while (struct dirent *de = ::readdir(handle)) {
+                const QByteArray name(de->d_name);
+                if (name != "." && name != "..") children.append(QFile::decodeName(name));
+                errno = 0;
+            }
+            const int listError = errno;
+            ::closedir(handle);
+            if (listError != 0) {
+                error = "Interrupted folder listing " + source + ": " + sysError(listError);
+                return false;
+            }
+            children.sort(Qt::CaseSensitive);
+            for (const QString &name : children) {
+                const QString childRelative = relative.isEmpty() ? name : relative + "/" + name;
+                if (!makePlan(QDir(source).filePath(name), childRelative, root, error, depth + 1))
+                    return false;
+            }
+        } else if (fi.isFile()) {
+            entry.kind = Entry::Regular;
+            entry.size = fi.size();
+            if (entry.size < 0 || !fi.isReadable()) {
+                error = "Cannot read file: " + source;
+                return false;
+            }
+            root.bytes += entry.size;
+            root.entries.append(entry);
+        } else {
+            error = "Missing or unsupported source file: " + source;
+            return false;
+        }
+        return true;
+    }
+
+    void progress(qint64 done, qint64 total, const QString &phase, bool force = false) {
+        if (!force && progressClock.isValid() && progressClock.elapsed() < 65) return;
+        progressClock.restart();
+        // The QThread object belongs to the GUI thread. This queued invocation
+        // cannot touch Qt widgets from the worker thread.
+        QMetaObject::invokeMethod(this, [this, done, total, phase]() {
+            if (onProgress) onProgress(done, total, phase);
+        }, Qt::QueuedConnection);
+    }
+
+    static bool sha256OfFile(const QString &path, QByteArray &digest, QString &error,
+                             qint64 expected, const QThread *thread) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            error = "Cannot verify " + path + ": " + file.errorString();
+            return false;
+        }
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        qint64 readBytes = 0;
+        while (true) {
+            if (thread->isInterruptionRequested()) { error = "Transfer interrupted."; return false; }
+            const QByteArray chunk = file.read(1024 * 1024);
+            if (chunk.isEmpty()) {
+                if (file.error() != QFileDevice::NoError) {
+                    error = "Error verifying " + path + ": " + file.errorString();
+                    return false;
+                }
+                break;
+            }
+            hash.addData(chunk);
+            readBytes += chunk.size();
+        }
+        if (readBytes != expected) {
+            error = QString("Size mismatch verifying %1 (expected %2 bytes, received %3).")
+                        .arg(path).arg(expected).arg(readBytes);
+            return false;
+        }
+        digest = hash.result();
+        return true;
+    }
+
+    bool copyFileVerified(const Entry &entry, const QString &destination,
+                          qint64 &itemDone, qint64 globalDone, qint64 total,
+                          QString &error) {
+        QFile source(entry.source);
+        if (!source.open(QIODevice::ReadOnly)) {
+            error = "Cannot open source " + entry.source + ": " + source.errorString();
+            return false;
+        }
+        QTemporaryFile temporary(QFileInfo(destination).dir().absoluteFilePath(
+            ".osm-files-XXXXXX"));
+        temporary.setAutoRemove(true);
+        if (!temporary.open()) {
+            error = "Cannot create a temporary file beside " + destination + ": "
+                    + temporary.errorString();
+            return false;
+        }
+        QCryptographicHash sourceHash(QCryptographicHash::Sha256);
+        qint64 copied = 0;
+        while (true) {
+            if (isInterruptionRequested()) { error = "Transfer interrupted."; return false; }
+            const QByteArray block = source.read(1024 * 1024);
+            if (block.isEmpty()) {
+                if (source.error() != QFileDevice::NoError) {
+                    error = "Error reading " + entry.source + ": " + source.errorString();
+                    return false;
+                }
+                break;
+            }
+            qint64 offset = 0;
+            while (offset < block.size()) {
+                const qint64 written = temporary.write(block.constData() + offset,
+                                                       block.size() - offset);
+                if (written <= 0) {
+                    error = "Error writing to " + destination + ": " + temporary.errorString();
+                    return false;
+                }
+                offset += written;
+            }
+            sourceHash.addData(block);
+            copied += block.size();
+            itemDone += block.size();
+            progress(globalDone + itemDone, total, operation);
+        }
+        if (copied != entry.size) {
+            error = QString("Source size changed while copying %1 (%2 / %3 bytes).")
+                        .arg(entry.source).arg(copied).arg(entry.size);
+            return false;
+        }
+        const QFileInfo currentSource(entry.source);
+        if (currentSource.size() != entry.size ||
+            currentSource.lastModified() != entry.modified) {
+            error = "Source changed while it was being copied: " + entry.source;
+            return false;
+        }
+        if (!temporary.flush()) {
+            error = "Cannot flush destination " + destination + ": " + temporary.errorString();
+            return false;
+        }
+        // Flush the destination before acknowledging success, especially for USB
+        // disks and GVfs/FUSE network mounts. An error never causes source deletion.
+        if (::fsync(temporary.handle()) != 0) {
+            error = "Cannot synchronise destination " + destination + ": " + sysError(errno);
+            return false;
+        }
+        temporary.close();
+        if (temporary.error() != QFileDevice::NoError) {
+            error = "Error closing destination " + destination + ": " + temporary.errorString();
+            return false;
+        }
+        progress(globalDone + itemDone, total, "Verifying copied files…", true);
+        QByteArray actualHash;
+        if (!sha256OfFile(temporary.fileName(), actualHash, error, copied, this)) return false;
+        if (actualHash != sourceHash.result()) {
+            error = "SHA-256 checksum mismatch writing " + destination
+                  + ". The incomplete destination has been discarded; the source is untouched.";
+            return false;
+        }
+        if (existsIncludingSymlink(destination)) {
+            error = "Destination appeared during copy; refusing to replace it: " + destination;
+            return false;
+        }
+        // The temporary file is in the destination folder, so publication is a
+        // same-filesystem rename. No Qt cross-device rename/copy fallback occurs.
+        int code = 0;
+        if (!renameWithoutReplacing(temporary.fileName(), destination, code)) {
+            error = "Cannot finish destination " + destination + ": " + sysError(code);
+            return false;
+        }
+        temporary.setAutoRemove(false); // renamed into final destination
+        // Permission preservation is best-effort: FAT/exFAT and SMB can reject
+        // chmod despite a successful and verified copy.
+        QFile::setPermissions(destination, QFileInfo(entry.source).permissions());
+        return true;
+    }
+
+    static bool restoreDirectoryAttributes(const Root &root, const QString &stage) {
+        for (int i = root.entries.size() - 1; i >= 0; --i) {
+            const Entry &e = root.entries.at(i);
+            if (e.kind != Entry::Directory) continue;
+            const QString target = e.relative.isEmpty() ? stage : stage + "/" + e.relative;
+            QFile::setPermissions(target, QFileInfo(e.source).permissions());
+        }
+        return true;
+    }
+
+    bool copyRoot(const Root &root, qint64 &itemDone, qint64 globalDone,
+                  qint64 total, QString &error) {
+        const QString parent = QFileInfo(root.item.destination).dir().absolutePath();
+        if (!QDir(parent).exists()) {
+            error = "Destination folder is missing: " + parent;
+            return false;
+        }
+        if (root.directory) {
+            QTemporaryDir stage(QDir(parent).absoluteFilePath(".osm-files-XXXXXX"));
+            if (!stage.isValid()) {
+                error = "Cannot create a temporary folder inside " + parent;
+                return false;
+            }
+            for (const Entry &e : root.entries) {
+                if (isInterruptionRequested()) { error = "Transfer interrupted."; return false; }
+                const QString dest = e.relative.isEmpty() ? stage.path()
+                                                             : stage.path() + "/" + e.relative;
+                if (e.kind == Entry::Directory) {
+                    if (!QDir().mkpath(dest)) {
+                        error = "Cannot create folder: " + dest;
+                        return false;
+                    }
+                } else if (e.kind == Entry::Symlink) {
+                    if (::symlink(e.linkTarget.constData(),
+                                  QFile::encodeName(dest).constData()) != 0) {
+                        error = "Cannot copy symbolic link " + e.source + ": " + sysError(errno);
+                        return false;
+                    }
+                } else if (!copyFileVerified(e, dest, itemDone, globalDone, total, error)) {
+                    return false;
+                }
+            }
+            restoreDirectoryAttributes(root, stage.path());
+            if (existsIncludingSymlink(root.item.destination)) {
+                error = "Destination already exists: " + root.item.destination;
+                return false;
+            }
+            int code = 0;
+            if (!renameWithoutReplacing(stage.path(), root.item.destination, code)) {
+                error = "Cannot finish copied folder " + root.item.destination
+                      + ": " + sysError(code);
+                return false;
+            }
+            stage.setAutoRemove(false); // stage folder is now the completed destination
+            return true;
+        }
+        const Entry &e = root.entries.first();
+        if (e.kind == Entry::Symlink) {
+            if (existsIncludingSymlink(root.item.destination)) {
+                error = "Destination already exists: " + root.item.destination;
+                return false;
+            }
+            if (::symlink(e.linkTarget.constData(),
+                          QFile::encodeName(root.item.destination).constData()) != 0) {
+                error = "Cannot copy symbolic link " + e.source + ": " + sysError(errno);
+                return false;
+            }
+            return true;
+        }
+        return copyFileVerified(e, root.item.destination, itemDone, globalDone, total, error);
+    }
+
+    // Check that none of the source files changed during the transfer. Then
+    // remove from the bottom of the tree upwards, only after the destination
+    // has been completely published and verified.
+    bool removeVerifiedSource(const Root &root, QString &error) {
+        for (const Entry &e : root.entries) {
+            const QFileInfo fi(e.source);
+            if ((e.kind == Entry::Directory && !fi.isDir()) ||
+                (e.kind == Entry::Symlink && !fi.isSymLink()) ||
+                (e.kind == Entry::Regular &&
+                    (!fi.isFile() || fi.size() != e.size ||
+                     fi.lastModified() != e.modified))) {
+                error = "Source changed before move could finish; keeping it: " + e.source;
+                return false;
+            }
+        }
+        for (int i = root.entries.size() - 1; i >= 0; --i) {
+            const Entry &e = root.entries.at(i);
+            bool removed = false;
+            if (e.kind == Entry::Directory)
+                removed = QDir().rmdir(e.source);
+            else
+                removed = QFile::remove(e.source);
+            if (!removed) {
+                error = "Destination copy is complete, but the original could not be removed: "
+                        + e.source + ". Both copies may remain; check before retrying.";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    QElapsedTimer progressClock;
+
+    void run() override {
+        QVector<Root> roots;
+        qint64 allBytes = 0;
+        for (const Item &item : requested) {
+            if (isInterruptionRequested()) break;
+            Root root;
+            root.item = item;
+            QString error;
+            const QFileInfo fi(item.source);
+            const QString sourceAbsolute = QDir::cleanPath(fi.absoluteFilePath());
+            const QString destAbsolute = QDir::cleanPath(QFileInfo(item.destination).absoluteFilePath());
+            const QString sourceCanonical = fi.canonicalFilePath();
+            const QString destinationParentCanonical = QFileInfo(item.destination).dir().canonicalPath();
+            if (sourceAbsolute == destAbsolute ||
+                (fi.isDir() &&
+                 (isInsideDirectory(sourceAbsolute, destAbsolute) ||
+                  (!sourceCanonical.isEmpty() && !destinationParentCanonical.isEmpty() &&
+                   isInsideDirectory(sourceCanonical, destinationParentCanonical))))) {
+                error = "Cannot copy a folder into itself or overwrite its source: " + item.source;
+            } else if (existsIncludingSymlink(destAbsolute)) {
+                error = "Destination already exists: " + destAbsolute;
+            } else if (!makePlan(item.source, QString(), root, error)) {
+                // The planner produces a specific error, and no file has been touched.
+            } else {
+                root.directory = fi.isDir() && !fi.isSymLink();
+                roots.append(root);
+                allBytes += root.bytes;
+            }
+            if (!error.isEmpty()) errors.append(error);
+            progress(0, allBytes, "Scanning files…");
+        }
+        progress(0, allBytes, operation, true);
+        qint64 completedBytes = 0;
+        for (const Root &root : roots) {
+            if (isInterruptionRequested()) { errors.append("Transfer interrupted."); break; }
+            QString error;
+            bool published = false;
+            bool renamed = false;
+            if (moving) {
+                int code = 0;
+                renamed = renameWithoutReplacing(root.item.source, root.item.destination, code);
+                if (renamed) published = true;
+                else if (code == EEXIST) {
+                    errors.append("Destination already exists: " + root.item.destination);
+                    continue;
+                }
+                // Other rename failures (including EXDEV and FUSE unsupported)
+                // are retried with a verified copy, never QFile::rename fallback.
+            }
+            qint64 itemDone = 0;
+            if (!published) {
+                published = copyRoot(root, itemDone, completedBytes, allBytes, error);
+            }
+            if (!published) {
+                errors.append(error.isEmpty() ? "Failed to copy " + root.item.source : error);
+                continue;
+            }
+            completedBytes += root.bytes;
+            progress(completedBytes, allBytes, operation, true);
+            if (moving && !renamed && !removeVerifiedSource(root, error)) {
+                errors.append(error + "\nVerified destination: " + root.item.destination);
+                continue;
+            }
+            successfulSources.append(root.item.source);
+        }
+        progress(completedBytes, allBytes, operation, true);
+    }
+};
 
 class FileBrowser : public QWidget {
 public:
@@ -608,6 +1064,11 @@ public:
             QDir dir(currentPath);
             QString parent = dir.absolutePath();
             if (parent == "/" || parent == dir.rootPath()) {
+                if (activeTransfer || extractionProcess) {
+                    QMessageBox::information(this, "File operation",
+                        "Finish the current file operation before closing osm-files.");
+                    return;
+                }
                 qApp->quit();
                 return;
             }
@@ -674,7 +1135,26 @@ public:
         listDirectory(currentPath);
     }
 
+    ~FileBrowser() override {
+        // Also handles an application-wide quit() which skips closeEvent().
+        // Interrupted staged copies are cleaned up; original files remain.
+        if (activeTransfer && activeTransfer->isRunning()) {
+            activeTransfer->requestInterruption();
+            activeTransfer->wait();
+        }
+    }
+
 protected:
+    void closeEvent(QCloseEvent *event) override {
+        if (activeTransfer || extractionProcess) {
+            QMessageBox::information(this, "File operation",
+                "A file operation is still running. Finish it before closing osm-files.");
+            event->ignore();
+            return;
+        }
+        QWidget::closeEvent(event);
+    }
+
     bool event(QEvent *e) override {
         if (e->type() == QEvent::ToolTip)
             return true;
@@ -802,6 +1282,7 @@ private:
     QString currentSelectedStyle;
     QString pathBtnNormalStyle;
     QElapsedTimer planThrottle;
+    SafeTransferJob *activeTransfer = nullptr;
     QProcess *extractionProcess = nullptr;
     QByteArray extractionProgressBuffer;
 
@@ -1406,7 +1887,7 @@ private:
         if (!dir.exists()) return;
 
         currentPath = dir.absolutePath();
-        pathBtn->setText(currentPath);
+        if (!activeTransfer && !extractionProcess) pathBtn->setText(currentPath);
         rebuildPathMenu();
 
         clearList();
@@ -1543,7 +2024,17 @@ private:
         bool hasClip = !clipboardPaths.isEmpty();
         bool singleFileSel = selectedSingleIsFile();
 
-        pasteBtn->setEnabled(hasClip);
+        const bool busy = activeTransfer || extractionProcess;
+        pasteBtn->setEnabled(hasClip && !busy);
+        if (busy) {
+            copyBtn->setEnabled(false);
+            cutBtn->setEnabled(false);
+            updateDeleteButton(false);
+            renameBtn->setEnabled(false);
+            moveBtn->setEnabled(false);
+            extractBtn->setEnabled(false);
+            return;
+        }
 
         bool canExtract = false;
         if (singleFileSel) {
@@ -1572,7 +2063,7 @@ private:
         propsBtn->setEnabled(hasSel);
         unselectBtn->setEnabled(true);
         openWithBtn->setEnabled(singleFileSel);
-        extractBtn->setEnabled(canExtract && !extractionProcess);
+        extractBtn->setEnabled(canExtract);
     }
 
     QStringList selectedPathList() const {
@@ -1587,24 +2078,6 @@ private:
         pathBtn->setText(QString("%1  (scanning… %2 items)").arg(label).arg(count));
         QCoreApplication::processEvents();
         planThrottle.restart();
-    }
-
-    // Build an ordered list of copy steps (dirs created before their contents,
-    // so each step can run independently and still produce a valid tree).
-    void planCopy(const QString &src, const QString &dst,
-                  QVector<std::function<void()>> &steps, const QString &label) {
-        QFileInfo s(src);
-        if (s.isDir()) {
-            steps.append([dst]() { QDir().mkpath(dst); });
-            planTick(label, steps.size());
-            QDir d(src);
-            QFileInfoList list = d.entryInfoList(QDir::NoDotAndDotDot|QDir::AllEntries);
-            for (const QFileInfo &f : list)
-                planCopy(f.absoluteFilePath(), dst + "/" + f.fileName(), steps, label);
-        } else {
-            steps.append([src, dst]() { QFile::copy(src, dst); });
-            planTick(label, steps.size());
-        }
     }
 
     // Build a post-order list of delete steps (children removed before the
@@ -1636,10 +2109,25 @@ private:
 
     // Turns the address bar into a fill gauge: a gradient split at `frac`
     // sweeps across it left-to-right, with a live label + percentage.
-    void setPathBarProgress(double frac, const QString &label) {
+    static QString readableSize(qint64 bytes) {
+        if (bytes < 1024) return QString::number(bytes) + " B";
+        static const char *suffixes[] = {"KiB", "MiB", "GiB", "TiB", "PiB"};
+        double amount = double(bytes);
+        int scale = -1;
+        do { amount /= 1024.0; ++scale; }
+        while (amount >= 1024.0 && scale < 4);
+        return QLocale().toString(amount, 'f', 1) + " " + suffixes[scale];
+    }
+
+    void setPathBarProgress(double frac, const QString &label,
+                            qint64 doneBytes = -1, qint64 totalBytes = -1) {
         frac = qBound(0.0, frac, 1.0);
         QString stop = QString::number(frac, 'f', 4);
-        pathBtn->setText(QString("%1  (%2%)").arg(label).arg(int(frac * 100)));
+        QString caption = QString("%1  (%2%)").arg(label).arg(int(frac * 100));
+        if (doneBytes >= 0 && totalBytes >= 0)
+            caption += QString("  %1 / %2")
+                           .arg(readableSize(doneBytes), readableSize(totalBytes));
+        pathBtn->setText(caption);
         pathBtn->setStyleSheet(themed(QString(
             "QPushButton { "
             "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
@@ -1699,54 +2187,73 @@ private:
         updateActionButtons();
     }
 
-    void pasteClipboard() {
-        if (clipboardPaths.isEmpty()) return;
-
-        QDir d(currentPath);
-        if (!d.exists()) return;
-
-        // Resolve every destination name up front so collisions are settled
-        // before any work starts (renaming mid-operation would shift names).
-        struct PasteItem { QString src, dst; };
-        QVector<PasteItem> items;
-        for (const QString &src : clipboardPaths) {
-            QFileInfo info(src);
-            QString base = info.fileName();
-            QString dst = d.absoluteFilePath(base);
-
-            int i = 1;
-            while (QFileInfo::exists(dst)) {
-                dst = d.absoluteFilePath(base + "_" + QString::number(i));
-                ++i;
+    // Transfer jobs run on a background thread, and report only from the GUI
+    // thread. We always refresh the folder, whether the transfer passed or failed.
+    void startTransfer(const QVector<SafeTransferJob::Item> &items,
+                       bool moving, bool fromClipboard = false) {
+        if (items.isEmpty() || activeTransfer || extractionProcess) return;
+        SafeTransferJob *job = new SafeTransferJob(items, moving, this);
+        activeTransfer = job;
+        const QString label = job->operation;
+        job->onProgress = [this, job](qint64 done, qint64 total, const QString &phase) {
+            if (activeTransfer != job) return;
+            const double fraction = total > 0 ? double(done) / double(total) : 0.0;
+            setPathBarProgress(fraction, phase, done, total);
+        };
+        connect(job, &QThread::finished, this, [this, job, moving, fromClipboard]() {
+            if (activeTransfer != job) { job->deleteLater(); return; }
+            if (fromClipboard && moving) {
+                for (const QString &src : job->successfulSources)
+                    clipboardPaths.removeAll(src);
+                if (clipboardPaths.isEmpty()) clipboardCutMode = false;
             }
-            items.append({src, dst});
-        }
-
-        bool cutMode = clipboardCutMode;
-        QString label = cutMode ? "Moving files…" : "Copying files…";
-
+            activeTransfer = nullptr;
+            resetPathBar();
+            listDirectory(currentPath);
+            clearSelection(true);
+            updateActionButtons();
+            if (!job->errors.isEmpty()) {
+                QMessageBox::warning(this, moving ? "Move files" : "Copy files",
+                    QString("%1 of %2 item(s) finished. Source files are removed "
+                            "only after their destination copies are verified. "
+                            "Review incomplete moves before retrying.\n\n%3")
+                        .arg(job->successfulSources.size()).arg(job->requested.size())
+                        .arg(job->errors.join("\n\n")));
+            }
+            job->deleteLater();
+        });
         beginPathBarBusy(label);
-
-        QVector<std::function<void()>> steps;
-        for (const PasteItem &it : items) {
-            if (cutMode) {
-                QString src = it.src, dst = it.dst;
-                steps.append([src, dst]() { QFile::rename(src, dst); });
-            } else {
-                planCopy(it.src, it.dst, steps, label);
-            }
-        }
-
-        runWithProgress(label, steps);
-
-        if (cutMode) {
-            clipboardPaths.clear();
-            clipboardCutMode = false;
-        }
-
-        listDirectory(currentPath);
-        clearSelection(true);
         updateActionButtons();
+        job->start();
+    }
+
+    static QString availableDestination(const QDir &directory, const QString &name,
+                                        QSet<QString> &reserved) {
+        QString target = directory.absoluteFilePath(name);
+        int n = 1;
+        // lstat detects broken symlinks as occupied too.
+        auto occupied = [](const QString &path) {
+            struct stat st;
+            const QByteArray p = QFile::encodeName(path);
+            return ::lstat(p.constData(), &st) == 0;
+        };
+        while (occupied(target) || reserved.contains(target))
+            target = directory.absoluteFilePath(name + "_" + QString::number(n++));
+        reserved.insert(target);
+        return target;
+    }
+
+    void pasteClipboard() {
+        if (clipboardPaths.isEmpty() || activeTransfer || extractionProcess) return;
+        const QDir destination(currentPath);
+        if (!destination.exists()) return;
+        QSet<QString> reserved;
+        QVector<SafeTransferJob::Item> items;
+        for (const QString &src : clipboardPaths) {
+            items.append({src, availableDestination(destination,
+                                      QFileInfo(src).fileName(), reserved)});
+        }
+        startTransfer(items, clipboardCutMode, true);
     }
 
     void renameSelection() {
@@ -1768,35 +2275,27 @@ private:
     }
 
     void moveSelection() {
-        if (selectedPaths.isEmpty()) return;
-
+        if (selectedPaths.isEmpty() || activeTransfer || extractionProcess) return;
         bool ok = false;
-        QString dest = QInputDialog::getText(
-            this,"Move","Destination:",QLineEdit::Normal,
-            currentPath,&ok
-        );
-        if (!ok || dest.trimmed().isEmpty()) return;
-
-        QDir d(dest.trimmed());
-        if (!d.exists()) return;
-
-        beginPathBarBusy("Moving files…");
-
-        QVector<std::function<void()>> steps;
-        for (const QString &src : selectedPathList()) {
-            QFileInfo info(src);
-            QString dstPath = d.absoluteFilePath(info.fileName());
-            steps.append([src, dstPath]() { QFile::rename(src, dstPath); });
+        const QString destination = QInputDialog::getText(
+            this, "Move", "Destination:", QLineEdit::Normal, currentPath, &ok);
+        if (!ok || destination.trimmed().isEmpty()) return;
+        QDir directory(destination.trimmed());
+        if (!directory.exists()) {
+            QMessageBox::warning(this, "Move files", "Destination folder does not exist.");
+            return;
         }
-
-        runWithProgress("Moving files…", steps);
-
-        listDirectory(currentPath);
-        clearSelection(true);
-        updateActionButtons();
+        QSet<QString> reserved;
+        QVector<SafeTransferJob::Item> items;
+        for (const QString &src : selectedPathList()) {
+            items.append({src, availableDestination(directory,
+                                      QFileInfo(src).fileName(), reserved)});
+        }
+        startTransfer(items, true);
     }
 
     void deleteSelection() {
+        if (activeTransfer || extractionProcess) return;
         QStringList sel = selectedPathList();
         if (sel.isEmpty()) return;
 
@@ -1961,6 +2460,8 @@ def output_file(path):
 
 work_total = 1
 work_done = 0
+byte_total = 0
+byte_done = 0
 last_progress = -1
 last_report = 0.0
 
@@ -1970,7 +2471,7 @@ def report(force=False):
     fraction = min(10000, (work_done * 10000) // work_total)
     now = time.monotonic()
     if force or (fraction != last_progress and now - last_report >= 0.04):
-        print('PROGRESS ' + str(fraction), flush=True)
+        print('PROGRESS ' + str(fraction) + ' ' + str(byte_done) + ' ' + str(byte_total), flush=True)
         last_progress = fraction
         last_report = now
 
@@ -1982,7 +2483,7 @@ def tick(value):
 
 
 def copy_stream(src, dest, file_size):
-    global work_done
+    global work_done, byte_done
     bytes_read = 0
     with output_file(dest) as dst:
         while True:
@@ -1992,6 +2493,7 @@ def copy_stream(src, dest, file_size):
             dst.write(block)
             bytes_read += len(block)
             work_done += len(block)
+            byte_done += len(block)
             report()
     if bytes_read != file_size:
         raise IOError('Archive entry is truncated: ' + dest)
@@ -2010,12 +2512,15 @@ def symlink_at(path, target):
 
 
 def zip_extract():
-    global work_total
+    global work_total, byte_total
     with zipfile.ZipFile(archive) as zf:
         entries = zf.infolist()
         for info in entries:
             destination(info.filename)
         work_total = max(1, sum(max(1, info.file_size) for info in entries))
+        byte_total = sum(info.file_size for info in entries
+                         if not info.is_dir() and
+                         stat.S_IFMT(info.external_attr >> 16) != stat.S_IFLNK)
         report(True)
         for info in entries:
             path = destination(info.filename)
@@ -2044,7 +2549,7 @@ def zip_extract():
 
 
 def tar_extract():
-    global work_total
+    global work_total, byte_total
     with tarfile.open(archive, 'r:*') as tf:
         entries = tf.getmembers()
         for member in entries:
@@ -2055,6 +2560,7 @@ def tar_extract():
             if member.islnk():
                 inside(destination(member.linkname))
         work_total = max(1, sum(max(1, m.size if m.isfile() else 1) for m in entries))
+        byte_total = sum(m.size for m in entries if m.isfile())
         report(True)
         directory_modes = []
         hard_links = []
@@ -2127,7 +2633,7 @@ except Exception as exc:
     }
 
     void extractSelection() {
-        if (extractionProcess || selectedPaths.size() != 1) return;
+        if (extractionProcess || activeTransfer || selectedPaths.size() != 1) return;
 
         const QString path = *selectedPaths.begin();
         const QFileInfo info(path);
@@ -2178,8 +2684,16 @@ except Exception as exc:
                 extractionProgressBuffer.remove(0, newline + 1);
                 if (!line.startsWith("PROGRESS ")) continue;
                 bool ok = false;
-                const int units = line.mid(9).toInt(&ok);
-                if (ok) setPathBarProgress(qBound(0, units, 10000) / 10000.0, label);
+                const QList<QByteArray> fields = line.mid(9).split(' ');
+                if (fields.size() < 3) continue;
+                const int units = fields.at(0).toInt(&ok);
+                if (!ok) continue;
+                bool validDone = false, validTotal = false;
+                const qint64 done = fields.at(1).toLongLong(&validDone);
+                const qint64 total = fields.at(2).toLongLong(&validTotal);
+                if (validDone && validTotal)
+                    setPathBarProgress(qBound(0, units, 10000) / 10000.0,
+                                       label, done, total);
             }
         });
 
@@ -2198,6 +2712,7 @@ except Exception as exc:
                 QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System).isEmpty();
             if (!success && empty) QDir().rmdir(outDir);
             listDirectory(currentPath);
+            updateActionButtons();
             if (!success) {
                 QString message = "Could not extract " + fileName + ".\n\n" +
                     (error.trimmed().isEmpty() ? "The extraction process failed." : error.trimmed());
@@ -2225,6 +2740,7 @@ except Exception as exc:
 
         extractBtn->setEnabled(false);
         beginPathBarBusy(label);
+        updateActionButtons();
         process->start(python, QStringList()
             << "-u" << "-c" << archiveExtractorScript()
             << info.absoluteFilePath() << outDir << kind);
