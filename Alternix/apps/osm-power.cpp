@@ -14,6 +14,7 @@
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QProcess>
+#include <QMessageBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -343,6 +344,9 @@ public:
           ramGraph(nullptr),
           netGraph(nullptr),
           gpuGraph(nullptr),
+          sleepProcess(nullptr),
+          sleepAuthenticated(false),
+          sleepLockStarted(false),
           lastCpuTotal(0),
           lastCpuIdle(0),
           lastRx(0),
@@ -560,6 +564,14 @@ private:
     GraphWidget *netGraph;
     GraphWidget *gpuGraph;
 
+    // Keep the process and its authentication/lock handshake alive until the
+    // privileged suspend request has either succeeded or reported a failure.
+    QProcess *sleepProcess;
+    QByteArray sleepOutput;
+    QString sleepErrors;
+    bool sleepAuthenticated;
+    bool sleepLockStarted;
+
     GpuSource gpuSrc;
     quint64 lastCpuTotal;
     quint64 lastCpuIdle;
@@ -694,21 +706,161 @@ private slots:
         close();
     }
 
+    static bool hasAlternixSudoPam() {
+        // Current AlternixOS installs the pattern/PIN UI as sudo's PAM auth
+        // handler. Running osm-lock --auth first and then sudo -n fails with
+        // this configuration: -n refuses the very authentication sudo needs.
+        QFile pam("/etc/pam.d/sudo");
+        return pam.open(QIODevice::ReadOnly | QIODevice::Text) &&
+               pam.readAll().contains("alternix-auth");
+    }
+
+    static void writeSleepFailure(const QString &detail) {
+        const QString dir = QDir::homePath() + "/.cache";
+        if (!QDir().mkpath(dir)) return;
+        QFile log(dir + "/osm-power-sleep.log");
+        if (!log.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+            return;
+        log.write(QDateTime::currentDateTime().toString(Qt::ISODate).toUtf8());
+        log.write("  Sleep was not started:\n");
+        log.write(detail.toUtf8());
+        log.write("\n");
+    }
+
+    void sleepFailedBeforeLock(const QString &detail) {
+        showFullScreen();
+        raise();
+        activateWindow();
+        QMessageBox::warning(this, "Sleep could not start", detail);
+    }
+
     void doSleep() {
-        // One PIN/pattern confirmation BEFORE sleep, just like osm-sudo
-        // does for Reboot and Power Off. Do not request authentication again
-        // to run pm-suspend, and do not bypass authentication with NOPASSWD.
-        //
-        // Lock the session before suspending. pm-suspend bypasses elogind,
-        // so Qtile's resume hook cannot be relied on to lock after wake.
-        // The lockscreen remains in place for a normal unlock on resume.
-        const bool started = QProcess::startDetached("sh", QStringList() << "-c"
-            << "osm-lock --auth || exit 1; "
-               "osm-lockd >/dev/null 2>&1 & "
-               "sleep 1; "
-               "exec sudo -n pm-suspend");
-        if (started)
-            close();
+        if (sleepProcess) return;
+
+        // Authentication happens ONCE, before the lockscreen is opened.
+        // The current sudo PAM policy itself displays the Alternix pattern/PIN
+        // prompt; the old osm-sudo wrapper would duplicate that prompt and
+        // then use sudo -n (which is denied by the new PAM policy).
+        // Older installations without Alternix PAM retain osm-sudo handling.
+        const bool pamAuth = hasAlternixSudoPam();
+        const QString program = pamAuth ? QStringLiteral("/usr/bin/sudo")
+                                        : QStringLiteral("osm-sudo");
+
+        // A small handshake avoids starting the lockscreen while the graphical
+        // PAM prompt is still open. Only after sudo/osm-sudo has obtained root
+        // access does the shell signal this GUI to start osm-lockd AS THE
+        // DESKTOP USER; then the GUI permits the root shell to suspend.
+        // Do not use sudo -n, NOPASSWD, pkexec or a second auth prompt here.
+        const QString command =
+            "PATH=/usr/sbin:/usr/bin:/sbin:/bin; "
+            "printf '%s\\n' 'ALTERNIX_SLEEP_AUTHORIZED_7f5c'; "
+            "IFS= read -r action || exit 125; "
+            "[ \"$action\" = SUSPEND ] || exit 126; "
+            // elogind's loginctl works on SysVinit and runs all its suspend
+            // hooks. Use pm-utils only when there is no usable login manager.
+            "if command -v loginctl >/dev/null 2>&1 && "
+            "loginctl list-sessions >/dev/null 2>&1; then "
+            "exec loginctl suspend; "
+            "fi; "
+            "if command -v pm-suspend >/dev/null 2>&1; then "
+            "exec pm-suspend; "
+            "fi; "
+            "echo 'No functioning elogind loginctl or pm-suspend found' >&2; "
+            "exit 127";
+
+        QStringList args;
+        if (pamAuth)
+            args << "-k";  // Require one fresh PIN/pattern, not a cached login.
+        args << "/bin/sh" << "-c" << command;
+
+        sleepOutput.clear();
+        sleepErrors.clear();
+        sleepAuthenticated = false;
+        sleepLockStarted = false;
+        sleepProcess = new QProcess(this);
+        QProcess *proc = sleepProcess;
+
+        connect(proc, &QProcess::readyReadStandardError, this, [this, proc]() {
+            if (proc == sleepProcess)
+                sleepErrors += QString::fromLocal8Bit(proc->readAllStandardError());
+        });
+        connect(proc, &QProcess::readyReadStandardOutput, this, [this, proc]() {
+            if (proc != sleepProcess) return;
+            const QByteArray chunk = proc->readAllStandardOutput();
+            if (sleepAuthenticated) return;
+            sleepOutput += chunk;
+            if (!sleepOutput.contains("ALTERNIX_SLEEP_AUTHORIZED_7f5c\n")) {
+                if (sleepOutput.size() > 8192) sleepOutput = sleepOutput.right(256);
+                return;
+            }
+
+            sleepAuthenticated = true;
+            // Do not start osm-lockd under sudo/root: its display and lock
+            // belong to the currently authenticated desktop user's X session.
+            if (!QProcess::startDetached("osm-lockd", QStringList())) {
+                proc->write("ABORT\n");
+                proc->closeWriteChannel();
+                sleepErrors += "Could not launch osm-lockd in the desktop session.\n";
+                return;
+            }
+            sleepLockStarted = true;
+            // The menu is already hidden. Give the actual lockscreen time to
+            // cover the desktop before permitting the system to suspend.
+            QTimer::singleShot(1200, this, [this, proc]() {
+                if (proc != sleepProcess || proc->state() != QProcess::Running)
+                    return;
+                proc->write("SUSPEND\n");
+                proc->closeWriteChannel();
+            });
+        });
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, proc](int code, QProcess::ExitStatus status) {
+            if (proc != sleepProcess) return;
+            sleepErrors += QString::fromLocal8Bit(proc->readAllStandardError());
+            const bool hadLock = sleepLockStarted;
+            const bool ok = (code == 0 && status == QProcess::NormalExit &&
+                             sleepAuthenticated && hadLock);
+            QString detail = sleepErrors.trimmed();
+            if (detail.isEmpty()) detail = QString("Suspend command exited with code %1.").arg(code);
+            sleepProcess = nullptr;
+            proc->deleteLater();
+            if (ok) {
+                close();
+            } else {
+                writeSleepFailure(detail);
+                if (hadLock) {
+                    // Never dismiss an active security lockscreen from here.
+                    // The log is available after unlocking; a notification may
+                    // also be delivered when the desktop becomes accessible.
+                    QProcess::startDetached("notify-send", QStringList()
+                        << "Alternix Sleep failed" << detail.left(300));
+                    close();
+                } else {
+                    sleepFailedBeforeLock(detail);
+                }
+            }
+        });
+        connect(proc, &QProcess::errorOccurred, this,
+                [this, proc](QProcess::ProcessError error) {
+            if (proc != sleepProcess || error != QProcess::FailedToStart) return;
+            const QString detail = "Cannot start " + proc->program() + ": " + proc->errorString();
+            sleepProcess = nullptr;
+            proc->deleteLater();
+            writeSleepFailure(detail);
+            sleepFailedBeforeLock(detail);
+        });
+
+        // The fullscreen power menu must not cover the graphical PIN/pattern
+        // challenge. Keep it alive to receive the auth-success handshake.
+        hide();
+        proc->start(program, args);
+        // In case an authentication backend hangs, do not leave a permanently
+        // invisible power menu/process holding a root-command handshake open.
+        QTimer::singleShot(120000, this, [this, proc]() {
+            if (proc != sleepProcess || sleepAuthenticated) return;
+            sleepErrors += "Authentication timed out before suspend.\n";
+            proc->kill();
+        });
     }
 
     void doReboot() {
