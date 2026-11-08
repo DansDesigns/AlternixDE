@@ -5,4 +5,16 @@ if [ "$#" -eq 0 ]; then
     echo "osm-sudo: no command supplied" >&2
     exit 2
 fi
+# The D1H system controller uses --fresh-auth for each separately approved,
+# allowlisted privileged action. Force a new PAM pattern/PIN challenge even
+# if an earlier sudo request left an authentication timestamp cached.
+# Other AlternixOS applications retain the original osm-sudo semantics.
+if [ "$1" = "--fresh-auth" ]; then
+    shift
+    if [ "$#" -eq 0 ]; then
+        echo "osm-sudo: --fresh-auth requires a command" >&2
+        exit 2
+    fi
+    exec /usr/bin/sudo -k -- "$@"
+fi
 exec /usr/bin/sudo -- "$@"
