@@ -756,16 +756,38 @@ private slots:
             "printf '%s\\n' 'ALTERNIX_SLEEP_AUTHORIZED_7f5c'; "
             "IFS= read -r action || exit 125; "
             "[ \"$action\" = SUSPEND ] || exit 126; "
-            // elogind's loginctl works on SysVinit and runs all its suspend
-            // hooks. Use pm-utils only when there is no usable login manager.
-            "if command -v loginctl >/dev/null 2>&1 && "
-            "loginctl list-sessions >/dev/null 2>&1; then "
-            "exec loginctl suspend; "
+            // Older Alternix installers/updaters wrote AllowSuspend=no.
+            // Fix only that named Alternix-owned legacy override, and only
+            // after the existing one-time PIN/pattern sudo authorisation.
+            // This restores user-initiated Sleep while HandlePowerKey=ignore,
+            // HandleLidSwitch=ignore etc. still prevent automatic sleep.
+            "legacy=/etc/elogind/sleep.conf.d/alternix-no-sleep.conf; "
+            "if [ -f \"$legacy\" ] && [ ! -L \"$legacy\" ] && "
+            "grep -Eq '^[[:space:]]*AllowSuspend[[:space:]]*=[[:space:]]*no[[:space:]]*$' \"$legacy\"; then "
+            "if ! sed -i -E 's/^[[:space:]]*AllowSuspend[[:space:]]*=[[:space:]]*no[[:space:]]*$/AllowSuspend=yes/' \"$legacy\"; then "
+            "echo 'Unable to correct Alternix legacy suspend setting' >&2; exit 1; "
+            "fi; "
+            "echo 'Enabled suspend in the legacy Alternix elogind configuration' >&2; "
+            "if command -v loginctl >/dev/null 2>&1; then "
+            "loginctl reload >/dev/null 2>&1 || echo 'elogind reload failed; attempting suspend anyway' >&2; "
+            "fi; "
+            "fi; "
+            // Prefer the elogind path: it runs registered suspend/resume
+            // hooks. If that command fails, an installed pm-utils backend
+            // can still attempt a hardware suspend on Devuan/SysVinit.
+            "if command -v loginctl >/dev/null 2>&1; then "
+            "if loginctl suspend; then exit 0; fi; "
+            "echo 'elogind refused or could not initiate suspend' >&2; "
             "fi; "
             "if command -v pm-suspend >/dev/null 2>&1; then "
-            "exec pm-suspend; "
+            "if pm-suspend; then exit 0; fi; "
+            "echo 'pm-suspend could not suspend the device' >&2; "
             "fi; "
-            "echo 'No functioning elogind loginctl or pm-suspend found' >&2; "
+            "if [ -r /sys/power/state ]; then "
+            "echo 'Kernel-supported sleep states:' >&2; "
+            "cat /sys/power/state >&2; "
+            "fi; "
+            "echo 'No available suspend method succeeded. Check elogind configuration, kernel and firmware.' >&2; "
             "exit 127";
 
         QStringList args;
