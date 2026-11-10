@@ -2123,7 +2123,19 @@ private:
                             qint64 doneBytes = -1, qint64 totalBytes = -1) {
         frac = qBound(0.0, frac, 1.0);
         QString stop = QString::number(frac, 'f', 4);
-        QString caption = QString("%1  (%2%)").arg(label).arg(int(frac * 100));
+        // Keep the progress numbers in a fixed column while the transfer
+        // changes phase (Copying/Moving -> Verifying). Padding alone does not
+        // align proportional fonts, so use fixed-width lettering while busy.
+        QString phase = label;
+        if (label == QStringLiteral("Copying files…") ||
+            label == QStringLiteral("Moving files…") ||
+            label == QStringLiteral("Verifying copied files…") ||
+            label == QStringLiteral("Scanning files…")) {
+            phase = phase.leftJustified(
+                QStringLiteral("Verifying copied files…").size() + 2, QChar(' '));
+        }
+        const QString percent = QString::number(int(frac * 100)).rightJustified(3, QChar(' '));
+        QString caption = QString("%1  (%2%)").arg(phase, percent);
         if (doneBytes >= 0 && totalBytes >= 0)
             caption += QString("  %1 / %2")
                            .arg(readableSize(doneBytes), readableSize(totalBytes));
@@ -2132,7 +2144,8 @@ private:
             "QPushButton { "
             "background: qlineargradient(x1:0, y1:0, x2:1, y2:0, "
             "stop:0 #2a82da, stop:%1 #2a82da, stop:%1 #333333, stop:1 #333333); "
-            "color:white; border-radius:8px; padding:10px; font-size:15px; text-align:left; }"
+            "color:white; border-radius:8px; padding:10px; font-size:15px; "
+            "font-family:'DejaVu Sans Mono',monospace; text-align:left; }"
         ).arg(stop)));
     }
 
