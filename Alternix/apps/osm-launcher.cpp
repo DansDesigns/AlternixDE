@@ -656,6 +656,25 @@ static QVector<DesktopCacheStamp> desktopDirectoryStamps() {
     return stamps;
 }
 
+// Picom is a background compositor, not an application to launch from the grid.
+// Match its desktop-file ID, displayed name or executable (including paths and
+// common wrappers such as "env picom") without affecting unrelated entries.
+static bool isPicomDesktopEntry(const QString &path, const QString &name,
+                                const QString &exec) {
+    if (QFileInfo(path).fileName().compare(QStringLiteral("picom.desktop"),
+                                          Qt::CaseInsensitive) == 0 ||
+        name.trimmed().compare(QStringLiteral("picom"), Qt::CaseInsensitive) == 0)
+        return true;
+
+    const QStringList args = QProcess::splitCommand(exec);
+    for (const QString &arg : args) {
+        if (QFileInfo(arg).fileName().compare(QStringLiteral("picom"),
+                                              Qt::CaseInsensitive) == 0)
+            return true;
+    }
+    return false;
+}
+
 static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
     QList<AppEntry> apps;
     for (const QString &dir : standardDesktopDirs()) {
@@ -674,7 +693,8 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
             const QString nodisplay = settings.value("NoDisplay", "false")
                                           .toString().toLower();
             settings.endGroup();
-            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true")
+            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true" ||
+                isPicomDesktopEntry(path, name, exec))
                 continue;
             apps.append({name, cleanExec(exec), icon});
         }
@@ -686,7 +706,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
 }
 
 static constexpr quint32 launcherCacheMagic = 0x4f534d4c; // 'OSML'
-static constexpr quint32 launcherCacheVersion = 1;
+static constexpr quint32 launcherCacheVersion = 2; // Rebuild old caches containing Picom
 
 static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
     QFile cache(cachePath);
