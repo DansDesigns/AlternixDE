@@ -656,25 +656,6 @@ static QVector<DesktopCacheStamp> desktopDirectoryStamps() {
     return stamps;
 }
 
-// Picom is a background compositor, not an application to launch from the grid.
-// Match its desktop-file ID, displayed name or executable (including paths and
-// common wrappers such as "env picom") without affecting unrelated entries.
-static bool isPicomDesktopEntry(const QString &path, const QString &name,
-                                const QString &exec) {
-    if (QFileInfo(path).fileName().compare(QStringLiteral("picom.desktop"),
-                                          Qt::CaseInsensitive) == 0 ||
-        name.trimmed().compare(QStringLiteral("picom"), Qt::CaseInsensitive) == 0)
-        return true;
-
-    const QStringList args = QProcess::splitCommand(exec);
-    for (const QString &arg : args) {
-        if (QFileInfo(arg).fileName().compare(QStringLiteral("picom"),
-                                              Qt::CaseInsensitive) == 0)
-            return true;
-    }
-    return false;
-}
-
 static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
     QList<AppEntry> apps;
     for (const QString &dir : standardDesktopDirs()) {
@@ -693,8 +674,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
             const QString nodisplay = settings.value("NoDisplay", "false")
                                           .toString().toLower();
             settings.endGroup();
-            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true" ||
-                isPicomDesktopEntry(path, name, exec))
+            if (name.isEmpty() || exec.isEmpty() || nodisplay == "true")
                 continue;
             apps.append({name, cleanExec(exec), icon});
         }
@@ -706,7 +686,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
 }
 
 static constexpr quint32 launcherCacheMagic = 0x4f534d4c; // 'OSML'
-static constexpr quint32 launcherCacheVersion = 2; // Rebuild old caches containing Picom
+static constexpr quint32 launcherCacheVersion = 1;
 
 static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
     QFile cache(cachePath);
@@ -1237,6 +1217,14 @@ int main(int argc, char **argv) {
 
     LauncherWindow window;        // ← WINDOW TYPE WITH BUILT-IN FADE
     window.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // This fullscreen launcher is an overlay, not a regular application window.
+    // Qtile's X11 TaskList displays normal windows (even when minimised), so
+    // an ordinary launcher window can leave a stale "V osm-launcher" entry when
+    // a newly launched application takes focus. Advertise the utility WM type
+    // BEFORE showFullScreen()/native window creation, so Qtile never lists it.
+    // Unlike Qt::Tool, this retains the existing fullscreen/focus window flags.
+    // Qt5 sets _NET_WM_WINDOW_TYPE_UTILITY on X11; no new libraries are needed.
+    window.setAttribute(Qt::WA_X11NetWmWindowTypeUtility, true);
     window.setAttribute(Qt::WA_TranslucentBackground, true);
     window.setAutoFillBackground(false);
     window.setStyleSheet("background:transparent;");
