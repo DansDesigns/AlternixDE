@@ -256,7 +256,7 @@ def autostart():
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-powerd'])
-    subprocess.Popen(['osm-notify --daemon'])
+    subprocess.Popen(['osm-notify'])
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['touchegg'])
