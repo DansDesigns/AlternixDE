@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QCoreApplication>
 #include <QWidget>
 #include <QScrollArea>
 #include <QGridLayout>
@@ -102,6 +103,10 @@ struct LauncherRevealStep {
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
     bool opening = false;
+    // Keep hold of the opening timer so a click can safely interrupt it.
+    // Otherwise dismissWithAnimation() refused to close while opening was true,
+    // leaving osm-launcher registered in Qtile after launching an application.
+    QPointer<QVariantAnimation> openingAnimation;
     // Independent alpha for the two background layers. The top/bottom edge
     // gradients appear first; the translucent fullscreen shade comes next.
     qreal gradientOpacity = 1.0;
@@ -386,8 +391,10 @@ public:
                         (elapsed - step.startMs) / step.durationMs));
             }
         });
+        openingAnimation = animation;
         connect(animation, &QVariantAnimation::finished, this,
                 [this, initialRows]() {
+            openingAnimation = nullptr;
             for (int row : initialRows) finishRowReveal(row);
             if (animationCloseButton)
                 animationCloseButton->setGraphicsEffect(nullptr);
@@ -404,7 +411,27 @@ public:
     // icon/label -> its card -> next row DOWN -> backdrop -> edge gradients.
     // The fullscreen window and grid never resize, preserving Qtile behaviour.
     void dismissWithAnimation() {
-        if (isTransitioning()) return;
+        if (dismissing) return;
+        if (opening) {
+            // Do not silently discard a close request during the opening
+            // cascade. A fast tap on an app used to launch it but leave this
+            // window alive in Qtile's task list. Stop the opening animation,
+            // make the visible row effects fully resolved, and start the normal
+            // top-to-bottom closing cascade instead.
+            opening = false;
+            if (openingAnimation) {
+                openingAnimation->stop();
+                openingAnimation->deleteLater();
+                openingAnimation = nullptr;
+            }
+            const auto rows = visibleRows();
+            for (int row = 0; row < rows.size(); ++row)
+                if (!rows.at(row).isEmpty()) finishRowReveal(row);
+            if (animationCloseButton)
+                animationCloseButton->setGraphicsEffect(nullptr);
+            gradientOpacity = 1.0;
+            backdropOpacity = 1.0;
+        }
         dismissing = true;
         // Stop any on-scroll reveal before installing the reverse-close effects.
         for (const auto &animation : scrollRevealAnimations) {
@@ -497,6 +524,26 @@ public:
         connect(animation, &QVariantAnimation::finished, this,
                 [this]() { close(); });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    // The launched application has its own process. Always retire our own
+    // X11 window and event loop after its closing cascade, even if an
+    // interrupted opening/queued animation ever prevents the normal finished
+    // callback from firing. The safeguard never truncates a normal cascade.
+    void dismissAfterApplicationLaunch() {
+        int visibleRowCount = 0;
+        const auto rows = visibleRows();
+        for (const auto &row : rows)
+            if (!row.isEmpty()) ++visibleRowCount;
+        const int closeBudgetMs = LauncherTiming::buttonMs +
+            visibleRowCount * (LauncherTiming::contentMs +
+                               LauncherTiming::cardMs + LauncherTiming::rowPauseMs) +
+            LauncherTiming::backdropMs + LauncherTiming::gradientMs + 150;
+        dismissWithAnimation();
+        QTimer::singleShot(closeBudgetMs, this, [this]() {
+            if (isVisible()) close();
+            QCoreApplication::quit();
+        });
     }
 
 protected:
@@ -962,7 +1009,7 @@ protected:
                     }
                     if (launchDesktopCommand(command)) {
                         if (auto *launcher = dynamic_cast<LauncherWindow*>(launcherWindow.data()))
-                            launcher->dismissWithAnimation();
+                            launcher->dismissAfterApplicationLaunch();
                         else if (launcherWindow) launcherWindow->close();
                     } else {
                         qWarning() << "osm-launcher: failed to launch" << command;
@@ -975,7 +1022,7 @@ protected:
             }
             if (launchDesktopCommand(command)) {
                 if (auto *launcher = dynamic_cast<LauncherWindow*>(window()))
-                    launcher->dismissWithAnimation();
+                    launcher->dismissAfterApplicationLaunch();
                 else if (QWidget *w = window()) w->close();
             } else {
                 qWarning() << "osm-launcher: failed to start desktop command:" << command;
