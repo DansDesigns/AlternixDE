@@ -669,6 +669,7 @@ public:
                                  QSettings::IniFormat);
         themeIsLight() = settings->value("ui/lightMode", false).toBool();
         gridMode = settings->value("ui/gridMode", false).toBool();
+        installAlternixFileDefaults();
 
         setStyleSheet(themed("background:#282828; color:white;"));
 
@@ -2842,6 +2843,57 @@ except Exception as exc:
 
     // ================= DEFAULT APPLICATIONS =================
 
+    // Set the Alternix desktop's initial picture/text associations in the
+    // existing per-extension Defaults system. Do it only once per user, so
+    // changing or removing a default later is respected across restarts.
+    // This one-time update intentionally replaces older defaults for these
+    // file types (including previous osm-viewer picture associations).
+    void installAlternixFileDefaults() {
+        if (!settings || settings->value("ui/alternixImageTextDefaultsV1", false).toBool())
+            return;
+
+        const QStringList pictureExtensions = {
+            "png", "jpg", "jpeg", "bmp", "gif", "webp", "svg",
+            "tif", "tiff", "ico", "ppm", "pgm", "pbm", "xpm"
+        };
+        const QStringList textExtensions = {
+            "txt", "text", "log", "md", "markdown", "rst", "adoc",
+            "csv", "tsv", "c", "h", "cpp", "hpp", "cc", "hh",
+            "cxx", "hxx", "py", "pyw", "sh", "bash", "zsh", "fish",
+            "bat", "cmd", "ps1", "ini", "conf", "cfg", "config",
+            "json", "jsonl", "yaml", "yml", "xml", "toml",
+            "desktop", "service", "socket", "target", "timer", "mount",
+            "qml", "js", "jsx", "ts", "tsx", "css", "scss", "less",
+            "html", "htm", "lua", "rs", "go", "java", "kt",
+            "swift", "php", "rb", "pl", "sql", "cmake", "gradle",
+            "patch", "diff", "properties", "env", "gitignore", "gitconfig"
+        };
+
+        settings->beginGroup("DefaultApps");
+        for (const QString &ext : pictureExtensions)
+            settings->setValue(ext, "osm-draw %f");
+        for (const QString &ext : textExtensions)
+            settings->setValue(ext, "osm-viewer %f");
+        settings->endGroup();
+
+        settings->beginGroup("DefaultAppNames");
+        for (const QString &ext : pictureExtensions)
+            settings->setValue(ext, "osm-draw");
+        for (const QString &ext : textExtensions)
+            settings->setValue(ext, "osm-viewer");
+        settings->endGroup();
+
+        settings->beginGroup("DefaultAppTerminal");
+        for (const QString &ext : pictureExtensions)
+            settings->setValue(ext, false);
+        for (const QString &ext : textExtensions)
+            settings->setValue(ext, false);
+        settings->endGroup();
+
+        settings->setValue("ui/alternixImageTextDefaultsV1", true);
+        settings->sync();
+    }
+
     // Extension key used for remembering default applications ("txt", "png").
     // Files with no extension get an empty key and are never remembered.
     static QString extensionKeyFor(const QString &filePath) {
@@ -3052,6 +3104,17 @@ except Exception as exc:
         const QString tmpl = defaultExecFor(ext);
 
         if (!tmpl.isEmpty()) {
+            // Launch native Alternix handlers without a shell so paths with
+            // spaces or metacharacters are passed as a single literal argument.
+            if (!defaultTerminalFor(ext) &&
+                (tmpl == "osm-draw %f" || tmpl == "osm-viewer %f")) {
+                const QString program = tmpl.startsWith("osm-draw")
+                    ? QStringLiteral("osm-draw") : QStringLiteral("osm-viewer");
+                if (!QProcess::startDetached(program, QStringList() << filePath))
+                    QMessageBox::warning(this, "Open file",
+                        "Could not launch " + program + ". Check that it is installed.");
+                return;
+            }
             QString runTemplate = tmpl;
             if (runTemplate == "%f" || runTemplate == "APPIMAGE_EXTRACT_AND_RUN=1 %f") {
                 const QString direct = directRunTemplate(filePath);
@@ -3061,6 +3124,22 @@ except Exception as exc:
             launchCommand(buildExecCommand(runTemplate, filePath),
                           defaultTerminalFor(ext));
             return;
+        }
+
+        // Plain-text files without a usable extension (README, Makefile,
+        // .bashrc, etc.) cannot be stored in an extension-based Defaults list.
+        // Recognise their actual text content and open them safely in Viewer.
+        const QFileInfo info(filePath);
+        const QString name = info.fileName();
+        if (ext.isEmpty() || (name.startsWith('.') && !name.mid(1).contains('.'))) {
+            const QString mime = QMimeDatabase().mimeTypeForFile(
+                filePath, QMimeDatabase::MatchContent).name();
+            if (mime.startsWith("text/") || mime == "application/x-shellscript") {
+                if (!QProcess::startDetached("osm-viewer", QStringList() << filePath))
+                    QMessageBox::warning(this, "Open file",
+                        "Could not launch osm-viewer. Check that it is installed.");
+                return;
+            }
         }
 
         if (isRunnableFile(filePath)) { showRunFileDialog(filePath); return; }
