@@ -2843,13 +2843,27 @@ except Exception as exc:
 
     // ================= DEFAULT APPLICATIONS =================
 
-    // Set the Alternix desktop's initial picture/text associations in the
-    // existing per-extension Defaults system. Do it only once per user, so
-    // changing or removing a default later is respected across restarts.
-    // This one-time update intentionally replaces older defaults for these
-    // file types (including previous osm-viewer picture associations).
+    // Seed picture/text defaults once without overriding later user choices.
+    // Shell scripts are intentionally excluded: opening .sh must present the
+    // existing Run / Run in terminal / Open in editor confirmation dialog.
     void installAlternixFileDefaults() {
-        if (!settings || settings->value("ui/alternixImageTextDefaultsV1", false).toBool())
+        if (!settings) return;
+
+        // Earlier releases seeded .sh -> osm-viewer, bypassing the run prompt.
+        // Undo only that exact seeded association once for existing installs;
+        // leave other user-selected .sh handlers untouched. The migration flag
+        // ensures future changes made in OpenWith/Defaults are respected.
+        if (!settings->value("ui/alternixShellPromptRestoredV1", false).toBool()) {
+            if (defaultExecFor("sh") == "osm-viewer %f" &&
+                defaultNameFor("sh") == "osm-viewer" &&
+                !defaultTerminalFor("sh")) {
+                clearDefaultAppFor("sh");
+            }
+            settings->setValue("ui/alternixShellPromptRestoredV1", true);
+            settings->sync();
+        }
+
+        if (settings->value("ui/alternixImageTextDefaultsV1", false).toBool())
             return;
 
         const QStringList pictureExtensions = {
@@ -2859,7 +2873,7 @@ except Exception as exc:
         const QStringList textExtensions = {
             "txt", "text", "log", "md", "markdown", "rst", "adoc",
             "csv", "tsv", "c", "h", "cpp", "hpp", "cc", "hh",
-            "cxx", "hxx", "py", "pyw", "sh", "bash", "zsh", "fish",
+            "cxx", "hxx", "py", "pyw", "bash", "zsh", "fish",
             "bat", "cmd", "ps1", "ini", "conf", "cfg", "config",
             "json", "jsonl", "yaml", "yml", "xml", "toml",
             "desktop", "service", "socket", "target", "timer", "mount",
