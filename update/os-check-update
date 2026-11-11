@@ -135,7 +135,7 @@ alt_finish_update_choice() {
 
     printf '\nClick or tap an option below (or press 1 / 2):\n'
     printf '    \033[1;4;36m[Reboot]\033[0m\n'
-    printf ' '
+    println ' '
     printf '    \033[1;4;36m[Continue to Desktop]\033[0m\n'
 
     if [[ -t 0 && -t 1 && "${TERM:-dumb}" != dumb ]] &&
