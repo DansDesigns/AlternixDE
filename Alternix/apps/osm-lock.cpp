@@ -421,10 +421,62 @@ public:
     }
 
 private:
-    void denyAuthorization() {
+    // Play the chosen authentication result sound without holding up the
+    // 20-second authorization window. "Default" resolves only accepted.* or
+    // denied.* in sounds/ui, so an unrelated UI sound is never substituted.
+    void playLockOutcomeSound(const QString &settingsKey,
+                              const QString &defaultPrefix) {
+        QSettings settings(QDir::homePath() +
+                           "/.config/Alternix/osm-settings.conf",
+                           QSettings::IniFormat);
+        const QString selected = settings.value(settingsKey).toString();
+        const QDir sounds(QDir::homePath() + "/.config/Alternix/sounds/ui");
+        QString path;
+        if (selected.isEmpty()) {
+            const QStringList files = sounds.entryList(
+                QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+            const QStringList formats = {"wav", "ogg", "flac", "mp3", "opus", "m4a", "aac"};
+            for (const QString &ext : formats) {
+                for (const QString &file : files) {
+                    if (file.compare(defaultPrefix + "." + ext, Qt::CaseInsensitive) == 0) {
+                        path = sounds.absoluteFilePath(file);
+                        break;
+                    }
+                }
+                if (!path.isEmpty()) break;
+            }
+        } else if (selected != "." && selected != ".." &&
+                   QFileInfo(selected).fileName() == selected) {
+            path = sounds.absoluteFilePath(selected);
+        }
+        if (path.isEmpty() || !QFileInfo(path).isFile()) return;
+
+        const QString quoted = "'" + QString(path).replace("'", "'\\''") + "'";
+        const QString command = QString(
+            "paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
+            "mpg123 -q %1 2>/dev/null || "
+            "cvlc --play-and-exit --intf dummy %1 2>/dev/null || "
+            "mpv --no-video --really-quiet %1 >/dev/null 2>&1 || "
+            "ffplay -nodisp -autoexit -loglevel quiet %1 >/dev/null 2>&1")
+            .arg(quoted);
+        QProcess::startDetached("sh", QStringList() << "-c" << command);
+    }
+
+    void playAcceptedSound() {
+        playLockOutcomeSound("Sound/LockAcceptedSound", "accepted");
+    }
+
+    void playDeniedSound() {
+        playLockOutcomeSound("Sound/LockDeniedSound", "denied");
+    }
+
+    // A rejected entry already played its denied sound; do not play it
+    // a second time when that same rejection exhausts the PIN attempts.
+    void denyAuthorization(bool playSound = true) {
         if (authorizationDenied) return;
         authorizationDenied = true;
         if (authenticationTimer) authenticationTimer->stop();
+        if (playSound) playDeniedSound();
         qApp->exit(1); // PAM, --auth and osm-lockscreen all treat nonzero as DENIED.
     }
 
@@ -480,7 +532,8 @@ private:
         if (!pamPrompt || payload.size() > 900 || authenticationTimedOut()) return false;
         const QByteArray message = payload + "\n";
         const ssize_t written = ::write(3, message.constData(), size_t(message.size()));
-        if (written != message.size()) { qApp->exit(1); return false; }
+        if (written != message.size()) { denyAuthorization(); return false; }
+        playAcceptedSound();
         qApp->exit(0);
         return true;
     }
@@ -751,13 +804,14 @@ private:
             if (authenticationTimedOut()) return;
             if (valid) {
                 if (pamPrompt) submitPam(candidate);
-                else qApp->quit();
+                else { playAcceptedSound(); qApp->quit(); }
                 return;
             }
+            playDeniedSound();
             pinInput.clear();
             ++pinAttemptCount;
             if (pinAttemptCount >= 2) {
-                denyAuthorization();
+                denyAuthorization(false);
                 return;
             }
             titleLabel->setText("Incorrect PIN - 1 attempt left");
@@ -775,10 +829,11 @@ private:
         if (authenticationTimedOut()) return;
         if (valid) {
             if (pamPrompt) submitPam(candidate);
-            else qApp->quit();
+            else { playAcceptedSound(); qApp->quit(); }
             return;
         }
 
+        playDeniedSound();
         ++attemptCount;
         currentSeq.clear();
         if (attemptCount >= 3) {

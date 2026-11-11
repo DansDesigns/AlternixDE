@@ -432,6 +432,10 @@ public:
         // ── Notification sound ──────────────────────────
         outerLay->addWidget(makeNotificationSoundCard());
 
+        // ── Lock authentication result sounds ───────────
+        outerLay->addWidget(makeLockAcceptedSoundCard());
+        outerLay->addWidget(makeLockDeniedSoundCard());
+
         // ── Shutdown/reboot sound ────────────────────────
         outerLay->addWidget(makeShutdownSoundCard());
 
@@ -648,12 +652,11 @@ private:
         return card;
     }
 
-    // ── Generic sound picker card (Login, Notification and Shutdown) ──
+    // ── Generic sound picker card (Login, Notification, Lock and Shutdown) ──
     // settingsKey: e.g. "Sound/BootSound" or "Sound/NotificationSound"
-    // subDir: "boot" or "notifications" — matches osm-status.cpp's
-    //         resolution of the same settingsKey
-    // defaultPrefix: filename prefix osm-status falls back to when no
-    //                explicit selection is made, e.g. "boot" or "notify"
+    // subDir: "boot", "notifications" or "ui".
+    // defaultPrefix: basename for the automatic choice (e.g. "notify",
+    //                "accepted", "denied" or "shutdown").
     QWidget *makeSoundPickerCard(const QString &title,
                                   const QString &settingsKey,
                                   const QString &subDir,
@@ -694,8 +697,9 @@ private:
             : d.entryList({"*.wav", "*.ogg", "*.flac", "*.mp3"},
                           QDir::Files, QDir::Name);
 
-        combo->addItem(subDir == "ui" ? "Default (automatic)"
-                                      : QString("Default (%1.*)").arg(defaultPrefix),
+        combo->addItem(subDir == "ui" && defaultPrefix == "shutdown"
+                           ? QString("Default (automatic)")
+                           : QString("Default (%1.*)").arg(defaultPrefix),
                        QString());
         for (const QString &f : files)
             combo->addItem(f, f);
@@ -736,7 +740,7 @@ private:
             QString f = combo->currentData().toString();
             QString path;
             if (subDir == "ui") {
-                path = resolveShutdownSoundFile(f);
+                path = resolveUiSoundFile(f, defaultPrefix);
             } else if (f.isEmpty()) {
                 // default: first <prefix>.* in this card's subfolder
                 QDir d(soundsSubDir(subDir));
@@ -771,14 +775,18 @@ private:
         return card;
     }
 
-    // Resolve the same default sound as osm-power: shutdown.* first,
-    // then the first supported audio file in sounds/ui if there is no
-    // shutdown.*. Explicit choices are restricted to that folder.
-    static QString resolveShutdownSoundFile(const QString &selection)
+    // All the UI sound selectors use sounds/ui. The automatic choices for
+    // lock results use accepted.* / denied.* only: never play an unrelated
+    // sound for an authentication result. Shutdown preserves its original
+    // fallback to the first available supported sound in the folder.
+    static QString resolveUiSoundFile(const QString &selection,
+                                      const QString &defaultPrefix)
     {
-        QDir d(soundsSubDir("ui"));
+        const QDir d(soundsSubDir("ui"));
         if (!selection.isEmpty()) {
-            if (QFileInfo(selection).fileName() != selection) return QString();
+            if (selection == "." || selection == ".." ||
+                QFileInfo(selection).fileName() != selection)
+                return QString();
             const QString path = d.absoluteFilePath(selection);
             return QFileInfo(path).isFile() ? path : QString();
         }
@@ -788,11 +796,14 @@ private:
         const QStringList formats = {"wav", "ogg", "flac", "mp3", "opus", "m4a", "aac"};
         for (const QString &ext : formats)
             for (const QString &file : files)
-                if (file.compare("shutdown." + ext, Qt::CaseInsensitive) == 0)
+                if (file.compare(defaultPrefix + "." + ext, Qt::CaseInsensitive) == 0)
                     return d.absoluteFilePath(file);
-        for (const QString &file : files)
-            if (formats.contains(QFileInfo(file).suffix().toLower()))
-                return d.absoluteFilePath(file);
+
+        if (defaultPrefix == "shutdown") {
+            for (const QString &file : files)
+                if (formats.contains(QFileInfo(file).suffix().toLower()))
+                    return d.absoluteFilePath(file);
+        }
         return QString();
     }
 
@@ -818,6 +829,24 @@ private:
             "Notification Sound", "Sound/NotificationSound", "notifications", "notify",
             "Used for notifications that don't set their own sound. "
             "Files are read from ~/.config/Alternix/sounds/notifications/");
+    }
+
+    // ── osm-lock: accepted / denied authentication sounds ──────
+    QWidget *makeLockAcceptedSoundCard()
+    {
+        return makeSoundPickerCard(
+            "Lock Accepted Sound", "Sound/LockAcceptedSound", "ui", "accepted",
+            "Played when osm-lock accepts a pattern or PIN. "
+            "Files are read from ~/.config/Alternix/sounds/ui/.");
+    }
+
+    QWidget *makeLockDeniedSoundCard()
+    {
+        return makeSoundPickerCard(
+            "Lock Denied Sound", "Sound/LockDeniedSound", "ui", "denied",
+            "Played when osm-lock rejects a pattern or PIN, or the "
+            "authentication is cancelled or times out. "
+            "Files are read from ~/.config/Alternix/sounds/ui/.");
     }
 
     // ── Shutdown sound: shared by reboot and power-off ─────────
