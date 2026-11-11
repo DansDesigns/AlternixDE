@@ -65,12 +65,11 @@ if [ ! -s "$ALT_AUDIO_SOURCE" ] || ! bash -n "$ALT_AUDIO_SOURCE"; then
 fi
 
 # Alternix VLC is repository content: require it before any long installation starts.
-# The corresponding folder is provided in AlternixVLC-Installer-Updater.zip.
+# Only native Kvantum styling is supported; the fixed-size .vlt skin is retired.
 ALT_VLC_THEME_SRC="$ALT_ROOT/Alternix/themes/vlc"
 for vlc_asset in \
     "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
-    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
-    "$ALT_VLC_THEME_SRC/Alternix-VLC.vlt"; do
+    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig"; do
     if [ ! -s "$vlc_asset" ]; then
         echo "ERROR: Required Alternix VLC theme asset not found: $vlc_asset" >&2
         echo "Commit Alternix/themes/vlc from the supplied repository assets first." >&2
@@ -99,7 +98,7 @@ Pin: version *
 Pin-Priority: -1
 ALT_NO_XTERM
 
-sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez vlc qt5-style-kvantum vlc-plugin-skins2
+sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez vlc qt5-style-kvantum
 
 # Refresh the signed Devuan package indexes before resolving the newest
 # supported ClamAV build for this machine's architecture (amd64/arm64/etc.).
@@ -211,20 +210,19 @@ if [ -z "$ALT_VLC_HOME" ] || [ "$ALT_VLC_HOME" = /root ] || [ ! -d "$ALT_VLC_HOM
     exit 1
 fi
 # ────────────────────────────────────────────────
-# Alternix VLC — native Qt appearance, single distro VLC launcher.
+# Alternix VLC — standard VLC Qt UI, Qtile-managed native window.
+# Never use the Skins2 .vlt interface for this installation: it produces a
+# fixed-size window with WM size hints, which Qtile handles as floating.
 # ────────────────────────────────────────────────
-echo "[VLC] Installing the AlternixVLC Kvantum theme for native VLC..."
-# Only the Qt interface is activated. Skins2 is an optional inactive theme.
-# VLC's QSettings selects the Kvantum style, so NO user or extra desktop entry
-# is necessary; creating one made osm-launcher show VLC twice.
+echo "[VLC] Installing AlternixVLC Kvantum styling (native Qt interface)..."
 sudo install -d -m 0755 /usr/share/Kvantum/AlternixVLC
 sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
     /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg
 sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
     /usr/share/Kvantum/AlternixVLC/AlternixVLC.kvconfig
 
-# Preserve the alternative native-style source without compiling or activating
-# it: the active Qt style is Kvantum, not a competing custom QStyle plugin.
+# Retain the optional native QStyle sources (do not activate them alongside
+# Kvantum); they are not the old VLC .vlt skin.
 sudo install -d -m 0755 /usr/share/alternix/vlc/qt5-style
 for vlc_style_source in alternixvlcstyle.cpp alternixvlcstyle.json CMakeLists.txt; do
     if [ -f "$ALT_VLC_THEME_SRC/qt5-style/$vlc_style_source" ]; then
@@ -233,16 +231,14 @@ for vlc_style_source in alternixvlcstyle.cpp alternixvlcstyle.json CMakeLists.tx
     fi
 done
 
-sudo install -d -o "$ALT_VLC_USER" -g "$(id -gn "$ALT_VLC_USER")" -m 0755 \
-    "$ALT_VLC_HOME/.local/share/vlc/skins2"
-sudo install -m 0644 -o "$ALT_VLC_USER" -g "$(id -gn "$ALT_VLC_USER")" \
-    "$ALT_VLC_THEME_SRC/Alternix-VLC.vlt" "$ALT_VLC_HOME/.local/share/vlc/skins2/Alternix-VLC.vlt"
-sudo install -D -m 0644 "$ALT_VLC_THEME_SRC/Alternix-VLC.vlt" \
-    /etc/skel/.local/share/vlc/skins2/Alternix-VLC.vlt
+# The preceding integration installed this exact fixed-size legacy skin.
+# It must not remain enabled as a seemingly valid Alternix player option.
+# Remove only our own named skin file; leave other user skins untouched.
+sudo rm -f -- "$ALT_VLC_HOME/.local/share/vlc/skins2/Alternix-VLC.vlt" \
+              "/etc/skel/.local/share/vlc/skins2/Alternix-VLC.vlt"
 
-# Per-app Kvantum mapping and VLC's own Qt-style preference. Do not alter
-# globally selected Kvantum theme, change other app styles, or add launchers.
-# This is embedded directly in the main installer/updater (no repair scripts).
+# Configure the logged-in desktop account and defaults for future users.
+# Do not change the globally selected Kvantum theme or create new launchers.
 sudo python3 - "$ALT_VLC_HOME" "$ALT_VLC_USER" /etc/skel <<'ALT_VLC_CONFIGURATION'
 import os
 import pwd
@@ -251,37 +247,36 @@ import sys
 from pathlib import Path
 
 home = Path(sys.argv[1])
-username = sys.argv[2]
-account = pwd.getpwnam(username)
+account = pwd.getpwnam(sys.argv[2])
 
 
 def save(path, contents, owner):
-    absent = []
+    missing = []
     parent = path.parent
     while not parent.exists():
-        absent.append(parent)
+        missing.append(parent)
         parent = parent.parent
     path.parent.mkdir(parents=True, exist_ok=True)
-    for directory in reversed(absent):
-        if owner:
+    for directory in reversed(missing):
+        if owner is not None:
             os.chown(directory, *owner)
-    if not path.exists() or path.read_text(encoding='utf-8') != contents:
+    if not path.is_file() or path.read_text(encoding='utf-8') != contents:
         path.write_text(contents, encoding='utf-8')
-    if owner:
+    if owner is not None:
         os.chown(path, *owner)
     os.chmod(path, 0o644)
 
 
-def modify_ini(path, target_section, desired, owner):
-    """Replace requested INI keys only; keep all other VLC preferences."""
-    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.exists() else []
+def modify_ini(path, section_name, changes, owner):
+    """Preserve every unrelated preference and replace only requested keys."""
+    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.is_file() else []
     output = []
     active = None
-    section_seen = False
+    found = False
     written = set()
 
-    def finish_section():
-        for key, value in desired.items():
+    def finish():
+        for key, value in changes.items():
             if key not in written:
                 output.append(f'{key}={value}\n')
                 written.add(key)
@@ -289,114 +284,158 @@ def modify_ini(path, target_section, desired, owner):
     for line in lines:
         section = re.match(r'^\s*\[([^]]+)\]', line)
         if section:
-            if active == target_section:
-                finish_section()
+            if active == section_name:
+                finish()
             active = section.group(1).strip()
-            if active == target_section:
-                section_seen = True
+            found |= active == section_name
             output.append(line)
             continue
-        if active == target_section:
-            match = re.match(r'^\s*#?\s*([\w.-]+)\s*=', line)
-            if match and match.group(1) in desired:
-                key = match.group(1)
+        if active == section_name:
+            key_match = re.match(r'^\s*#?\s*([\w.-]+)\s*=', line)
+            if key_match and key_match.group(1) in changes:
+                key = key_match.group(1)
                 if key not in written:
-                    output.append(f'{key}={desired[key]}\n')
+                    output.append(f'{key}={changes[key]}\n')
                     written.add(key)
                 continue
         output.append(line)
-    if active == target_section:
-        finish_section()
-    if not section_seen:
+    if active == section_name:
+        finish()
+    if not found:
         if output and not output[-1].endswith('\n'):
             output[-1] += '\n'
-        output.append(f'\n[{target_section}]\n')
-        finish_section()
+        output.append(f'\n[{section_name}]\n')
+        finish()
     save(path, ''.join(output), owner)
 
 
-def app_theme(path, owner):
-    """Map the VLC executable to AlternixVLC without changing other apps."""
-    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.exists() else []
-    output = []
-    active = None
-    found = False
-    apps_found = False
+def map_application_kvantum(path, owner):
+    """Assign just vlc to AlternixVLC; preserve all other app assignments."""
+    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.is_file() else []
+    result = []
+    section = None
+    seen_section = False
+    wrote = False
     for line in lines:
-        section = re.match(r'^\s*\[([^]]+)\]', line)
-        if section:
-            if active == 'Applications' and not found:
-                output.append('AlternixVLC=vlc\n')
-                found = True
-            active = section.group(1).strip()
-            apps_found |= active == 'Applications'
-            output.append(line)
+        heading = re.match(r'^\s*\[([^]]+)\]', line)
+        if heading:
+            if section == 'Applications' and not wrote:
+                result.append('AlternixVLC=vlc\n')
+                wrote = True
+            section = heading.group(1).strip()
+            seen_section |= section == 'Applications'
+            result.append(line)
             continue
-        match = re.match(r'^(\s*)([A-Za-z0-9_.-]+)(\s*=\s*)([^\r\n]*)(\r?\n?)$', line)
-        if active == 'Applications' and match:
-            lead, theme, sep, apps, ending = match.groups()
-            entries = [s.strip() for s in apps.split(',') if s.strip()]
-            entries = [s for s in entries if s != 'vlc']
-            if theme == 'AlternixVLC':
-                if not found:
-                    entries.append('vlc')
-                    found = True
-                # Skip duplicate AlternixVLC assignments, if present.
-            if entries:
-                output.append(lead + theme + sep + ', '.join(entries) + (ending or '\n'))
+        assignment = re.match(r'^(\s*)([A-Za-z0-9_.-]+)(\s*=\s*)([^\r\n]*)(\r?\n?)$', line)
+        if section == 'Applications' and assignment:
+            lead, theme, sep, apps, ending = assignment.groups()
+            items = [app.strip() for app in apps.split(',') if app.strip() and app.strip() != 'vlc']
+            if theme == 'AlternixVLC' and not wrote:
+                items.append('vlc')
+                wrote = True
+            if items:
+                result.append(lead + theme + sep + ', '.join(items) + (ending or '\n'))
             continue
-        output.append(line)
-    if active == 'Applications' and not found:
-        output.append('AlternixVLC=vlc\n')
-    elif not apps_found:
-        if output and not output[-1].endswith('\n'):
-            output[-1] += '\n'
-        output.extend(['\n[Applications]\n', 'AlternixVLC=vlc\n'])
-    save(path, ''.join(output), owner)
+        result.append(line)
+    if section == 'Applications' and not wrote:
+        result.append('AlternixVLC=vlc\n')
+    elif not seen_section:
+        if result and not result[-1].endswith('\n'):
+            result[-1] += '\n'
+        result.extend(['\n[Applications]\n', 'AlternixVLC=vlc\n'])
+    save(path, ''.join(result), owner)
 
 
-def remove_generated_vlc_launcher(path):
-    """Remove ONLY the duplicate launcher created by the earlier integration.
-
-    The distribution's /usr/share/applications/vlc.desktop is untouched.
-    Custom user launchers which do not match the old-generated signature stay.
-    """
+def remove_prior_duplicate_launcher(path):
+    """Remove only the redundant user launcher generated by v1 integration."""
     if not path.is_file() or path.is_symlink():
         return
-    original = path.read_text(encoding='utf-8')
-    previously_generated = (
-        'QT_STYLE_OVERRIDE=kvantum' in original
-        and '--intf=qt' in original
-        and '--no-qt-video-autoresize' in original
-        and re.search(r'(?m)^\s*\[Desktop Entry\]\s*$', original)
-    )
-    if previously_generated:
+    content = path.read_text(encoding='utf-8')
+    if ('QT_STYLE_OVERRIDE=kvantum' in content and
+            '--intf=qt' in content and
+            '--no-qt-video-autoresize' in content and
+            re.search(r'(?m)^\s*\[Desktop Entry\]\s*$', content)):
         path.unlink()
-        print('Removed prior duplicate Alternix VLC launcher:', path)
+        print('[VLC] Removed previous generated duplicate launcher:', path)
     else:
-        print('Preserving a separately customized VLC launcher:', path)
+        print('[VLC] Kept independently customized user launcher:', path)
 
 
 for target, owner in ((home, (account.pw_uid, account.pw_gid)), (Path(sys.argv[3]), None)):
-    app_theme(target / '.config/Kvantum/kvantum.kvconfig', owner)
+    map_application_kvantum(target / '.config/Kvantum/kvantum.kvconfig', owner)
     modify_ini(target / '.config/vlc/vlcrc', 'core', {'intf': 'qt'}, owner)
-    modify_ini(target / '.config/vlc/vlcrc', 'qt', {'qt-video-autoresize': '0', 'qt-dark-palette': '0'}, owner)
-    # VLC 3.x explicitly loads MainWindow/QtStyle from this QSettings file;
-    # unlike a desktop Exec override this also covers VLC launched from a shell.
+    modify_ini(target / '.config/vlc/vlcrc', 'qt', {
+        'qt-video-autoresize': '0',
+        'qt-dark-palette': '0',
+        'embedded-video': '1',
+        'qt-minimal-view': '0',
+    }, owner)
     modify_ini(target / '.config/vlc/vlc-qt-interface.conf', 'MainWindow', {'QtStyle': 'kvantum'}, owner)
-    remove_generated_vlc_launcher(target / '.local/share/applications/vlc.desktop')
+    remove_prior_duplicate_launcher(target / '.local/share/applications/vlc.desktop')
 
-print('VLC configured to use the AlternixVLC Kvantum style (one distro launcher).')
+
+# Modify the *existing* distribution desktop entry IN PLACE, so no extra VLC
+# appears in osm-launcher. --intf=qt wins over a saved Skins2 preference;
+# this is especially important when VLC previously ran a .vlt skin. Preserve
+# the distro desktop name, menu categories, MIME types and %U arguments.
+launcher = Path('/usr/share/applications/vlc.desktop')
+if launcher.is_file() and not launcher.is_symlink():
+    raw = launcher.read_text(encoding='utf-8')
+    output = []
+    changed_exec = 0
+    for line in raw.splitlines(keepends=True):
+        if not line.startswith('Exec='):
+            output.append(line)
+            continue
+        command = line[len('Exec='):].rstrip('\r\n')
+        # Only change commands which start the system VLC binary.
+        match = re.search(r'(?<!\S)(?:/[^\s]*)?\bvlc(?=\s|$)', command)
+        if match is None:
+            output.append(line)
+            continue
+        command = re.sub(r'(?<!\S)--intf(?:=|\s+)skins2(?=\s|$)', '', command)
+        command = re.sub(r'(?<!\S)--skins2-last(?:=\S+|\s+\S+)', '', command)
+        # The natural user-native interface is enforced for THIS launcher,
+        # not the global /usr/bin/vlc binary or unrelated applications.
+        if not re.search(r'(?<!\S)--intf(?:=|\s+)qt(?=\s|$)', command):
+            command = command[:match.end()] + ' --intf=qt' + command[match.end():]
+        if '--no-qt-video-autoresize' not in command:
+            command = command.replace('--intf=qt', '--intf=qt --no-qt-video-autoresize', 1)
+        output.append('Exec=' + command + '\n')
+        changed_exec += 1
+    if changed_exec:
+        updated = ''.join(output)
+        if updated != raw:
+            backup = Path('/usr/share/alternix/vlc/vlc.desktop.original')
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            if not backup.exists():
+                backup.write_text(raw, encoding='utf-8')
+                backup.chmod(0o644)
+            launcher.write_text(updated, encoding='utf-8')
+            launcher.chmod(0o644)
+        print(f'[VLC] Updated {changed_exec} existing desktop Exec line(s) for native Qt.')
+    else:
+        print('[VLC] WARNING: /usr/share/applications/vlc.desktop has no recognized VLC command.')
+else:
+    print('[VLC] WARNING: distro VLC launcher not present: /usr/share/applications/vlc.desktop')
+
+print('[VLC] Native Qt selected; Qtile controls window size, Kvantum styles widgets.')
 ALT_VLC_CONFIGURATION
 if command -v update-desktop-database >/dev/null 2>&1; then
+    sudo update-desktop-database /usr/share/applications 2>/dev/null || true
     sudo update-desktop-database "$ALT_VLC_HOME/.local/share/applications" 2>/dev/null || true
 fi
-if [ ! -f /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg ] || \
-   [ ! -f "$ALT_VLC_HOME/.config/vlc/vlc-qt-interface.conf" ]; then
-    echo "ERROR: AlternixVLC theme installation verification failed." >&2
+if [ ! -s /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg ] || \
+   [ ! -s "$ALT_VLC_HOME/.config/vlc/vlc-qt-interface.conf" ]; then
+    echo "ERROR: AlternixVLC native Qt theme installation failed verification." >&2
     exit 1
 fi
-echo "[VLC] Native VLC theme configured. Existing VLC windows need restarting."
+# Do not force-close VLC during an installation or updater (unsaved playback
+# state could be lost). Close all running VLC instances after the update.
+if pgrep -u "$ALT_VLC_USER" -x vlc >/dev/null 2>&1; then
+    echo "[VLC] NOTE: VLC is running. Exit all VLC windows/tray instances before reopening it."
+fi
+echo "[VLC] Native Qt/Kvantum theme installed. No fixed-size skins2 player will be started by the standard launcher."
 
 # ------------------------------------------------
 # AlternixOS clock actions: osm-sudo pattern authentication + a fixed helper.
