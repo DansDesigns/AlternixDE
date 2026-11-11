@@ -12,6 +12,11 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QImage>
+#include <QImageReader>
+#include <QMessageBox>
+#include <QFileInfo>
+#include <QTimer>
+#include <QSignalBlocker>
 #include <QStack>
 #include <QResizeEvent>
 #include <QScreen>
@@ -99,6 +104,27 @@ public:
         update();
     }
 
+    // Import a picture onto the canvas at its native pixel dimensions.
+    // A new picture is a new document, not an undoable paint stroke.
+    bool loadImage(const QImage &source) {
+        if (source.isNull())
+            return false;
+        QImage converted = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        if (converted.isNull())
+            return false;
+
+        m_drawing = false;
+        m_showPreview = false;
+        m_panActive = false;
+        m_undoStack.clear();
+        m_redoStack.clear();
+        m_image = converted;
+        m_zoomFactor = 1.0;
+        centerCanvas();
+        update();
+        return true;
+    }
+
     bool savePng(const QString &path) {
         if (path.isEmpty() || m_image.isNull())
             return false;
@@ -113,7 +139,7 @@ public:
     }
 
     void setZoom(double factor) {
-        m_zoomFactor = qBound(0.25, factor, 4.0);
+        m_zoomFactor = qBound(0.05, factor, 4.0);
         update();
     }
 
@@ -133,7 +159,7 @@ public:
         double sy = widgetSize.height() / imgSize.height();
         double factor = qMin(sx, sy);
 
-        factor = qBound(0.25, factor, 4.0);
+        factor = qBound(0.05, factor, 4.0);
         m_zoomFactor = factor;
 
         centerCanvas();
@@ -588,6 +614,11 @@ public:
         btnClear->setFixedHeight(46);
         rightGroup->addWidget(btnClear);
 
+        btnOpen = new QPushButton("📂 Open", this);
+        btnOpen->setStyleSheet(btnStyle);
+        btnOpen->setFixedHeight(46);
+        rightGroup->addWidget(btnOpen);
+
         btnSave = new QPushButton("💾 Save PNG", this);
         btnSave->setStyleSheet(btnStyle);
         btnSave->setFixedHeight(46);
@@ -692,7 +723,7 @@ public:
         zoomLayout->addWidget(zoomLabel);
 
         zoomSlider = new QSlider(Qt::Horizontal, this);
-        zoomSlider->setRange(25, 400);
+        zoomSlider->setRange(5, 400);
         zoomSlider->setValue(100);
         zoomSlider->setFixedHeight(24);
         zoomSlider->setMinimumWidth(260);
@@ -764,13 +795,36 @@ public:
             statusBar()->showMessage("Canvas cleared");
         });
 
+        connect(btnOpen, &QPushButton::clicked, this, [this]() {
+            QStringList patterns;
+            for (const QByteArray &format : QImageReader::supportedImageFormats())
+                patterns.append("*." + QString::fromLatin1(format.constData()));
+            patterns.removeDuplicates();
+            patterns.sort();
+            const QString filter = patterns.isEmpty()
+                ? QStringLiteral("Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All files (*)")
+                : QStringLiteral("Images (%1);;All files (*)").arg(patterns.join(' '));
+            const QString directory = openedImagePath.isEmpty()
+                ? QDir::homePath() : QFileInfo(openedImagePath).absolutePath();
+            const QString path = QFileDialog::getOpenFileName(this, "Open picture", directory, filter);
+            if (!path.isEmpty())
+                openImageFromPath(path);
+        });
+
         connect(btnSave, &QPushButton::clicked, this, [this]() {
             QString path = QFileDialog::getSaveFileName(
-                this, "Save PNG", QDir::homePath() + "/drawing.png",
+                this, "Save PNG",
+                openedImagePath.isEmpty()
+                    ? QDir::homePath() + "/drawing.png"
+                    : QDir(QFileInfo(openedImagePath).absolutePath()).filePath(
+                        QFileInfo(openedImagePath).completeBaseName() + ".png"),
                 "PNG Image (*.png)");
             if (!path.isEmpty()) {
-                if (canvas->savePng(path))
+                if (canvas->savePng(path)) {
+                    openedImagePath = QFileInfo(path).absoluteFilePath();
+                    setWindowTitle("🌅Draw - " + QFileInfo(path).fileName());
                     statusBar()->showMessage("Saved: " + path, 3000);
+                }
                 else
                     statusBar()->showMessage("Failed to save", 3000);
             }
@@ -819,7 +873,7 @@ public:
         connect(btnFit, &QPushButton::clicked, this, [this]() {
             canvas->fitToWidget();
             int v = int(canvas->zoom() * 100.0);
-            v = qBound(25, v, 400);
+            v = qBound(zoomSlider->minimum(), v, zoomSlider->maximum());
             zoomSlider->blockSignals(true);
             zoomSlider->setValue(v);
             zoomSlider->blockSignals(false);
@@ -879,6 +933,49 @@ public:
         canvas->setZoom(1.0);
     }
 
+    // Used both by the Open button and by `osm-draw /path/to/picture`.
+    bool openImageFromPath(const QString &path) {
+        QImageReader reader(path);
+        reader.setAutoTransform(true);  // Honor camera EXIF orientation.
+        const QImage image = reader.read();
+        if (image.isNull() || !canvas->loadImage(image)) {
+            QMessageBox::warning(this, "Open picture",
+                "Could not open the picture:\n" + path + "\n\n" + reader.errorString());
+            return false;
+        }
+
+        openedImagePath = QFileInfo(path).absoluteFilePath();
+        setWindowTitle("🌅Draw - " + QFileInfo(path).fileName());
+
+        // Imported images keep their dimensions, then fit into the visible page.
+        canvas->fitToWidget();
+        const int percent = qBound(zoomSlider->minimum(),
+                                  qRound(canvas->zoom() * 100.0),
+                                  zoomSlider->maximum());
+        {
+            QSignalBlocker block(zoomSlider);
+            zoomSlider->setValue(percent);
+        }
+        zoomValueLabel->setText(QString::number(percent) + "%");
+
+        // A preset should not resize an imported image behind the user's back.
+        int preset = -1;
+        for (int i = 0; i < sizePresetBox->count(); ++i) {
+            if (sizePresetBox->itemData(i).canConvert<QSize>() &&
+                sizePresetBox->itemData(i).toSize() == image.size()) {
+                preset = i;
+                break;
+            }
+        }
+        {
+            QSignalBlocker block(sizePresetBox);
+            sizePresetBox->setCurrentIndex(preset);
+        }
+        statusBar()->showMessage(QString("Opened: %1 (%2 × %3)")
+                                 .arg(path).arg(image.width()).arg(image.height()), 4000);
+        return true;
+    }
+
 protected:
     bool event(QEvent *ev) override {
         if (ev->type() == QEvent::Gesture) {
@@ -898,6 +995,7 @@ private:
     QPushButton *btnFill;
     QPushButton *btnGrab;
     QPushButton *btnClear;
+    QPushButton *btnOpen;
     QPushButton *btnSave;
     QPushButton *btnUndo;
     QPushButton *btnRedo;
@@ -910,6 +1008,7 @@ private:
 
     QSlider *zoomSlider;
     QLabel  *zoomValueLabel;
+    QString openedImagePath;
 
     bool gestureEvent(QGestureEvent *event) {
         if (QGesture *g = event->gesture(Qt::PinchGesture)) {
@@ -918,7 +1017,7 @@ private:
             if (pinch->state() == Qt::GestureUpdated) {
                 qreal factor = pinch->scaleFactor();
                 double currentZoom = canvas->zoom();
-                double newZoom = qBound(0.25, currentZoom * factor, 4.0);
+                double newZoom = qBound(0.05, currentZoom * factor, 4.0);
 
                 if (!qFuzzyCompare(newZoom, currentZoom)) {
                     canvas->setZoom(newZoom);
@@ -963,6 +1062,14 @@ int main(int argc, char *argv[]) {
 
     MainWindow w;
     w.show();
+
+    if (app.arguments().size() > 1) {
+        const QString picturePath = app.arguments().at(1);
+        // Wait until Qt has laid out the canvas before centring/fitting it.
+        QTimer::singleShot(0, &w, [&w, picturePath]() {
+            w.openImageFromPath(picturePath);
+        });
+    }
 
     return app.exec();
 }
