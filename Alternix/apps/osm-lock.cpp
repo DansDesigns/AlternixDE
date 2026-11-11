@@ -38,6 +38,7 @@ test with:
 #include <QWindow>
 #include <QProcess>
 #include <QFileInfo>
+#include <QSettings>
 #include <unistd.h>
 
 struct ShapeItem {
@@ -369,6 +370,40 @@ protected:
     }
 
 public:
+    // Play the currently selected notification sound once when the lock prompt
+    // appears. Read the settings at each launch, so no restart is needed after
+    // changing Settings > UI > Notification Sound. This is non-blocking and
+    // leaves the existing PAM/pattern/PIN authentication flow untouched.
+    void playNotificationSound() {
+        QSettings settings(QDir::homePath() +
+                           "/.config/Alternix/osm-settings.conf",
+                           QSettings::IniFormat);
+        const QString selected = settings.value("Sound/NotificationSound").toString();
+        const QDir sounds(QDir::homePath() + "/.config/Alternix/sounds/notifications");
+        QString path;
+
+        if (selected.isEmpty()) {
+            // Exactly the 'Default (notify.*)' choice in the UI sound picker.
+            const QStringList defaults = sounds.entryList(
+                {"notify.wav", "notify.ogg", "notify.flac", "notify.mp3"},
+                QDir::Files, QDir::Name);
+            if (!defaults.isEmpty()) path = sounds.absoluteFilePath(defaults.first());
+        } else if (QFileInfo(selected).fileName() == selected) {
+            // The picker saves a filename, not a path. Do not allow the INI
+            // setting to request a file outside the notifications folder.
+            path = sounds.absoluteFilePath(selected);
+        }
+        if (path.isEmpty() || !QFileInfo(path).isFile()) return;
+
+        const QString quoted = "'" + QString(path).replace("'", "'\\''") + "'";
+        const QString command = path.endsWith(".mp3", Qt::CaseInsensitive)
+            ? QString("mpg123 -q %1 2>/dev/null || "
+                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(quoted)
+            : QString("paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
+                      "cvlc --play-and-exit --intf dummy %1 2>/dev/null").arg(quoted);
+        QProcess::startDetached("sh", QStringList() << "-c" << command);
+    }
+
     // Called just after the fullscreen window is shown. PAM receives a READY
     // handshake before starting its own independent 20-second watchdog.
     void beginAuthenticationCountdown() {
@@ -790,7 +825,10 @@ int main(int argc, char *argv[]) {
 
     lock.show();
     lock.raise();
-    QTimer::singleShot(0, &lock, [&lock]() { lock.beginAuthenticationCountdown(); });
+    QTimer::singleShot(0, &lock, [&lock]() {
+        lock.beginAuthenticationCountdown();
+        lock.playNotificationSound();
+    });
     return app.exec();
 }
 
