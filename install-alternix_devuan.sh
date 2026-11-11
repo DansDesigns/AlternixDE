@@ -1966,7 +1966,7 @@ clone_for_target https://github.com/DansDesigns/rounded_corners "$THIRD_PARTY_DI
 cd "$THIRD_PARTY_DIR/rounded_corners"
 chmod +x install_corners.sh
 sudo ./install_corners.sh
-echo "[✓] Rounded-Corers Installed..."
+echo "[✓] Rounded-Corners Installed..."
 
 
 # ──────────────────────────────────────────────── 
