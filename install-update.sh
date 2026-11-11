@@ -660,6 +660,26 @@ echo " "
 #    echo "• No installers folder found, skipping."
 #fi
 
+echo "• Updating rounded-corners..."
+# Download a clean copy on each update; no undefined helper or directory variables.
+if ! command -v git >/dev/null 2>&1; then
+    echo "ERROR: git is required to update Rounded Corners." >&2
+    exit 1
+fi
+ROUNDED_CORNERS_TMP="$(mktemp -d)" || {
+    echo "ERROR: Could not create a temporary Rounded Corners download directory." >&2
+    exit 1
+}
+if git clone --depth 1 https://github.com/DansDesigns/rounded_corners.git \
+        "$ROUNDED_CORNERS_TMP/rounded_corners" &&
+   (cd "$ROUNDED_CORNERS_TMP/rounded_corners" && bash ./install_corners.sh); then
+    echo "[✓] Rounded Corners updated."
+else
+    echo "ERROR: Rounded Corners download or installation failed." >&2
+    rm -rf -- "$ROUNDED_CORNERS_TMP"
+    exit 1
+fi
+rm -rf -- "$ROUNDED_CORNERS_TMP"
 
 #echo " "
 #echo "[Config] Installing Extras..."
@@ -934,6 +954,38 @@ EOF
     fi
 fi
 
+# Keep the user's existing wallpapers, updating files from the repository.
+# Run the copy as the desktop user, even if this updater was started as root.
+echo "[Config] Installing Wallpapers..."
+WALL_SRC="$ALT_ROOT/Alternix/wallpapers"
+if [ ! -d "$WALL_SRC" ]; then
+    echo "---------------------------------------"
+    echo "• No wallpapers folder found, skipping."
+    echo "---------------------------------------"
+elif [ -z "${TARGET_HOME:-}" ] || [ ! -d "$TARGET_HOME" ] || \
+     [ "$TARGET_HOME" = /root ] || [ -z "${TARGET_USER:-}" ] || \
+     [ "$TARGET_USER" = root ]; then
+    echo "WARNING: Could not identify a valid desktop user/home for wallpapers; skipping." >&2
+else
+    WALL_DST="$TARGET_HOME/Pictures/wallpapers"
+    if [ "$(id -u)" -eq 0 ]; then
+        # Avoid root-owned files in the user's Pictures directory.
+        if runuser -u "$TARGET_USER" -- mkdir -p "$WALL_DST" &&
+           runuser -u "$TARGET_USER" -- cp -R "$WALL_SRC/." "$WALL_DST/"; then
+            echo "• Wallpapers installed to $WALL_DST"
+        else
+            echo "WARNING: Failed to copy wallpapers to $WALL_DST" >&2
+        fi
+    elif [ "$(id -un)" = "$TARGET_USER" ]; then
+        if mkdir -p "$WALL_DST" && cp -R "$WALL_SRC/." "$WALL_DST/"; then
+            echo "• Wallpapers installed to $WALL_DST"
+        else
+            echo "WARNING: Failed to copy wallpapers to $WALL_DST" >&2
+        fi
+    else
+        echo "WARNING: Wallpaper target user differs from current user; skipping." >&2
+    fi
+fi
 
 
 echo "• Compiling osm-powerd..."
