@@ -609,6 +609,10 @@ echo ""
 echo ""
 # echo "No Apps need updating..."
 
+echo "• Updating Bazaar App Store..."
+flatpak install -y flathub io.github.kolunmi.Bazaar
+
+
 echo "• Creating fetch.desktop launcher..."
 sudo rm /usr/share/applications/fetch.desktop
 sudo tee /usr/share/applications/fetch.desktop >/dev/null <<EOF
