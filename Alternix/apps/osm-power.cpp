@@ -18,6 +18,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
 #include <QVector>
 #include <QDebug>
 
@@ -347,6 +348,8 @@ public:
           sleepProcess(nullptr),
           sleepAuthenticated(false),
           sleepLockStarted(false),
+          powerSoundProcess(nullptr),
+          powerActionPending(false),
           lastCpuTotal(0),
           lastCpuIdle(0),
           lastRx(0),
@@ -571,6 +574,12 @@ private:
     QString sleepErrors;
     bool sleepAuthenticated;
     bool sleepLockStarted;
+
+    // Keep the menu alive while the selected sound finishes, so a rapid
+    // reboot/poweroff cannot cut it short. The existing osm-sudo path and
+    // its pattern/PIN authorisation remain unchanged.
+    QProcess *powerSoundProcess;
+    bool powerActionPending;
 
     GpuSource gpuSrc;
     quint64 lastCpuTotal;
@@ -885,14 +894,100 @@ private slots:
         });
     }
 
-    void doReboot() {
-        QProcess::startDetached("osm-sudo", QStringList() << "reboot");
+    // Sound/ShutdownSound is written by osm-settings > UI. An empty choice
+    // uses shutdown.* from sounds/ui, or its first recognised audio file.
+    static QString shutdownSoundFile() {
+        QSettings config(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
+                         QSettings::IniFormat);
+        const QString selection = config.value("Sound/ShutdownSound").toString();
+        QDir d(QDir::homePath() + "/.config/Alternix/sounds/ui");
+
+        if (!selection.isEmpty()) {
+            if (QFileInfo(selection).fileName() != selection) return QString();
+            const QString path = d.absoluteFilePath(selection);
+            return QFileInfo(path).isFile() ? path : QString();
+        }
+
+        const QStringList files = d.entryList(
+            QDir::Files | QDir::NoDotAndDotDot, QDir::Name);
+        const QStringList formats = {"wav", "ogg", "flac", "mp3", "opus", "m4a", "aac"};
+        for (const QString &ext : formats)
+            for (const QString &file : files)
+                if (file.compare("shutdown." + ext, Qt::CaseInsensitive) == 0)
+                    return d.absoluteFilePath(file);
+        for (const QString &file : files)
+            if (formats.contains(QFileInfo(file).suffix().toLower()))
+                return d.absoluteFilePath(file);
+        return QString();
+    }
+
+    void runPowerAction(const QString &action) {
+        if (powerActionPending) return; // prevent double taps from running twice
+        powerActionPending = true;
+        const QString path = shutdownSoundFile();
+        if (path.isEmpty()) {
+            launchPowerAction(action);
+            return;
+        }
+
+        hide();
+        powerSoundProcess = new QProcess(this);
+        QProcess *proc = powerSoundProcess;
+
+        // Use the user's desktop audio session, never root's. Try installed
+        // players in order and keep the command behind osm-sudo until the
+        // sound has finished. File paths are shell-quoted, not interpolated.
+        QString quoted = "'" + QString(path).replace("'", "'\\''") + "'";
+        const QString command = QString(
+            "paplay %1 2>/dev/null || aplay -q %1 2>/dev/null || "
+            "mpg123 -q %1 2>/dev/null || "
+            "cvlc --play-and-exit --intf dummy %1 2>/dev/null || "
+            "mpv --no-video --really-quiet %1 >/dev/null 2>&1 || "
+            "ffplay -nodisp -autoexit -loglevel quiet %1 >/dev/null 2>&1")
+            .arg(quoted);
+
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, proc, action](int, QProcess::ExitStatus) {
+            if (proc != powerSoundProcess) return;
+            powerSoundProcess = nullptr;
+            proc->deleteLater();
+            launchPowerAction(action);
+        });
+        connect(proc, &QProcess::errorOccurred, this,
+                [this, proc, action](QProcess::ProcessError err) {
+            if (proc != powerSoundProcess || err != QProcess::FailedToStart) return;
+            powerSoundProcess = nullptr;
+            proc->deleteLater();
+            launchPowerAction(action);
+        });
+        proc->start("sh", QStringList() << "-c" << command);
+
+        // Do not let a faulty audio player hold power actions indefinitely.
+        QTimer::singleShot(12000, this, [this, proc]() {
+            if (proc == powerSoundProcess && proc->state() != QProcess::NotRunning)
+                proc->kill(); // finished handler still performs the action
+        });
+    }
+
+    void launchPowerAction(const QString &action) {
+        if (!QProcess::startDetached("osm-sudo", QStringList() << action)) {
+            powerActionPending = false;
+            showFullScreen();
+            raise();
+            activateWindow();
+            QMessageBox::warning(this, "Power action failed",
+                                 "Could not start osm-sudo for " + action + ".");
+            return;
+        }
         close();
     }
 
+    void doReboot() {
+        runPowerAction("reboot");
+    }
+
     void doPowerOff() {
-        QProcess::startDetached("osm-sudo", QStringList() << "poweroff");
-        close();
+        runPowerAction("poweroff");
     }
 
 };
