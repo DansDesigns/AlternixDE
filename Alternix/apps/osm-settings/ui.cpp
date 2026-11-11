@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QPushButton>
 #include <QSlider>
+#include <QWheelEvent>
 #include <QScrollArea>
 #include <QScroller>
 #include <QFrame>
@@ -29,6 +30,25 @@
 #include <QPair>
 #include <QList>
 #include <algorithm>
+
+// Controls in this page must never change selection/value under the mouse
+// wheel: wheel input is reserved for scrolling the surrounding settings page.
+// Ignoring (rather than consuming) the event lets Qt pass it to the parent
+// QScrollArea when a combo box is closed or the pointer is over a slider.
+class NoWheelSlider : public QSlider {
+public:
+    explicit NoWheelSlider(Qt::Orientation orientation, QWidget *parent = nullptr)
+        : QSlider(orientation, parent) {}
+protected:
+    void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+};
+
+class NoWheelComboBox : public QComboBox {
+public:
+    explicit NoWheelComboBox(QWidget *parent = nullptr) : QComboBox(parent) {}
+protected:
+    void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+};
 
 // -----------------------------------------------------
 // Config path (shared with other settings modules)
@@ -523,7 +543,7 @@ private:
         hdr->addWidget(m_launcherFontPreview);
         v->addLayout(hdr);
 
-        m_launcherFontSlider = new QSlider(Qt::Horizontal, card);
+        m_launcherFontSlider = new NoWheelSlider(Qt::Horizontal, card);
         m_launcherFontSlider->setRange(FONT_MIN, FONT_MAX);
         m_launcherFontSlider->setStyleSheet(sliderStyle());
         m_launcherFontSlider->setFixedHeight(40);
@@ -652,7 +672,7 @@ private:
         QHBoxLayout *row = new QHBoxLayout();
         row->setSpacing(16);
 
-        QComboBox *combo = new QComboBox(card);
+        QComboBox *combo = new NoWheelComboBox(card);
         combo->setStyleSheet(comboStyle());
         combo->setFixedHeight(60);
         combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -786,7 +806,7 @@ private:
             "background:#3a3a3a; color:#888888; font-size:22px;"
             " border:1px solid #222222; border-radius:16px;");
 
-        m_cursorCombo = new QComboBox(card);
+        m_cursorCombo = new NoWheelComboBox(card);
         m_cursorCombo->setStyleSheet(comboStyle());
         m_cursorCombo->setFixedHeight(60);
         m_cursorCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -823,7 +843,7 @@ private:
         sizeHdr->addWidget(m_cursorSizeValue);
         lay->addLayout(sizeHdr);
 
-        m_cursorSizeSlider = new QSlider(Qt::Horizontal, card);
+        m_cursorSizeSlider = new NoWheelSlider(Qt::Horizontal, card);
         // The slider runs over ladder indices, not pixels, so the handle
         // can only ever come to rest on a size a theme actually ships.
         m_cursorSizeSlider->setRange(0, CURSOR_SIZE_COUNT - 1);
