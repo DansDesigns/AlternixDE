@@ -430,6 +430,7 @@ for i in groups:
 
 
 layouts = [
+    layout.Max(border_width=0, margin=6),
     Scroller(
         border_width=3,
         border_focus="#2A2C32",
@@ -442,7 +443,6 @@ layouts = [
         unmap_offscreen=True,     # keeps picom off the Atom GPU's back
     ),
     # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
-    layout.Max(border_width=0, margin=6),
     #layout.RatioTile(margin=6),
     layout.MonadWide(border_width=0, margin=6),
     layout.MonadTall(border_width=0, margin=6),
@@ -490,7 +490,7 @@ def _update_topbar_window_buttons(qtile_obj=None):
         return
 
     # At least one window exists in this group => show close button
-    close_button.update("❌")
+    close_button.update(" ❌ ")
 
     # Show floating state for the currently focused window
     w = getattr(q, "current_window", None)
