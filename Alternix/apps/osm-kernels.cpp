@@ -216,6 +216,7 @@ bool validAptField(const QString &value)
 
 struct MLVer {
     QString tag;              // v6.17.2
+    QString archiveDate;      // archive directory last-modified date, when published
     int maj = 0, min = 0, pat = 0, rc = 0;
     QString release() const   // 6.17.2-061702-generic
     {
@@ -280,6 +281,9 @@ private:
     int m_cpuLevel = 0;
     bool m_isPi = false, m_hasGrub = false, m_sbOn = false, m_busy = false, m_mlLoaded = false;
     QMap<QString, QString> m_images;      // installed concrete image pkg -> version
+    QMap<QString, QString> m_installDates; // date of original installation when dpkg logs retain it
+    mutable QSettings m_seenDates{QSettings::IniFormat, QSettings::UserScope,
+                                   QStringLiteral("AlternixOS"), QStringLiteral("osm-kernels")};
     QSet<QString> m_installed;            // fully configured linux-* packages
     QSet<QString> m_present;              // also include unpacked / half-configured packages for removal
     QVector<KPkg> m_apt;
@@ -445,6 +449,53 @@ private:
             : QStringLiteral("Uninstall the selected kernel, its modules and matching headers"));
     }
 
+    // Dates in apt's Packages indexes are not per-package publication dates.
+    // Remember when a package/version was first observed instead of making up a release date.
+    QString firstSeenDate(const QString &key) const
+    {
+        const QString id = QString::fromLatin1(QCryptographicHash::hash(
+            key.toUtf8(), QCryptographicHash::Sha256).toHex());
+        m_seenDates.beginGroup(QStringLiteral("first-seen"));
+        QString date = m_seenDates.value(id).toString();
+        if (!QDate::fromString(date, Qt::ISODate).isValid()) {
+            date = QDate::currentDate().toString(Qt::ISODate);
+            m_seenDates.setValue(id, date);
+        }
+        m_seenDates.endGroup();
+        return date;
+    }
+
+    // dpkg logs retain actual install dates while their rotation history is available.
+    // APT does not expose the original install timestamp via dpkg-query.
+    void loadInstallDates()
+    {
+        m_installDates.clear();
+        static const QRegularExpression installRe(QStringLiteral(
+            "^(\\d{4}-\\d{2}-\\d{2}) \\d{2}:\\d{2}:\\d{2} install "
+            "(linux-image-(?:unsigned-)?[^ :]+)(?::[^ ]+)? "));
+        for (const QString &path : {QStringLiteral("/var/log/dpkg.log.1"),
+                                    QStringLiteral("/var/log/dpkg.log")}) {
+            QFile f(path);
+            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+            while (!f.atEnd()) {
+                const QString line = QString::fromUtf8(f.readLine());
+                const auto m = installRe.match(line);
+                if (!m.hasMatch()) continue;
+                const QString name = m.captured(2), date = m.captured(1);
+                if (!QDate::fromString(date, Qt::ISODate).isValid()) continue;
+                if (!m_installDates.contains(name) || date < m_installDates.value(name))
+                    m_installDates.insert(name, date);
+            }
+        }
+    }
+
+    QString installedDate(const QString &pkg, const QString &version) const
+    {
+        const QString actual = m_installDates.value(pkg);
+        return actual.isEmpty() ? firstSeenDate(QStringLiteral("installed:") + pkg + QLatin1Char('@') + version)
+                                : actual;
+    }
+
     // ================================================================ UI
     QPushButton *btn(const QString &text, std::function<void()> fn, bool action = true)
     {
@@ -476,6 +527,12 @@ private:
         for (int i = 1; i < cols.size(); ++i)
             t->header()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
         t->header()->setStretchLastSection(false);
+        const int dateCol = cols.indexOf(QStringLiteral("Date added"));
+        if (dateCol >= 0) t->headerItem()->setToolTip(dateCol, QStringLiteral(
+            "Installed: date recorded by dpkg, if still in its logs. "
+            "Mainline: date last modified in Ubuntu's archive. "
+            "APT packages and missing history: date first detected by this manager on this device. "
+            "These are not necessarily the upstream kernel release dates."));
         QScroller::grabGesture(t->viewport(), QScroller::LeftMouseButtonGesture);
         return t;
     }
@@ -553,7 +610,7 @@ private:
         root->addLayout(nav);
 
         // ---- pages
-        m_pInst = makePage({"Kernel", "Source", "Status"},
+        m_pInst = makePage({"Kernel", "Source", "Date added", "Status"},
             {grubBtn(btn("Boot by default", [this] { setDefault(); })),
              grubBtn(btn("Newest by default", [this] { resetDefault(); })),
              (m_removeBtn = btn("Uninstall selected", [this] { removeSelected(); })),
@@ -561,25 +618,25 @@ private:
              btn("Refresh", [this] { reloadLocal(); })});
         connect(m_pInst.tree, &QTreeWidget::itemSelectionChanged, this, [this] { updateRemoveButton(); });
         updateRemoveButton();
-        m_pRepo = makePage({"Kernel", "Version", "Suite", "Status"},
+        m_pRepo = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
             {btn("Install", [this] { installApt(m_pRepo); }),
              btn("Update package lists", [this] { aptUpdate(); }),
              btn("Refresh", [this] { reloadLocal(); })});
 
         m_showRc = new QCheckBox(QStringLiteral("Show release candidates"));
         connect(m_showRc, &QCheckBox::toggled, this, [this](bool) { fillMainline(); });
-        m_pMl = makePage({"Version", "Kernel", "Status"},
+        m_pMl = makePage({"Version", "Kernel", "Date added", "Status"},
             {btn("Install", [this] { installMainline(); }),
              btn("Retry headers", [this] { installMainline(true); }),
              btn("Refresh", [this] { loadMainline(); })}, m_showRc);
 
-        m_pLiq = makePage({"Kernel", "Version", "Suite", "Status"},
+        m_pLiq = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
             {btn("Install", [this] { installApt(m_pLiq); }),
              btn("Refresh", [this] { reloadLocal(); })});
         m_pLiq.enableBtn = btn("Enable Liquorix repository", [this] { enableRepo(SrcLiquorix); });
         m_pLiq.w->layout()->addWidget(m_pLiq.enableBtn);
 
-        m_pXan = makePage({"Kernel", "Version", "Suite", "Status"},
+        m_pXan = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
             {btn("Install", [this] { installApt(m_pXan); }),
              btn("Refresh", [this] { reloadLocal(); })});
         m_pXan.enableBtn = btn("Enable XanMod repository", [this] { enableRepo(SrcXanmod); });
@@ -601,7 +658,7 @@ private:
         customLayout->addLayout(customButtons);
         connect(m_customRepos, &QListWidget::itemSelectionChanged, this,
                 [this] { updateCustomRemoveButton(); });
-        m_pCustom = makePage({"Kernel", "Version", "Suite", "Source", "Status"},
+        m_pCustom = makePage({"Kernel", "Version", "Suite", "Source", "Date added", "Status"},
             {btn("Install", [this] { installApt(m_pCustom); }),
              btn("Update package lists", [this] { aptUpdate(); }),
              btn("Refresh", [this] { reloadLocal(); })}, customTop);
@@ -829,6 +886,7 @@ private:
                 m_installed.insert(f.at(0));
                 if (!releaseOf(f.at(0)).isEmpty()) m_images.insert(f.at(0), f.at(1));
             }
+            loadInstallDates();
             loadCustomSources();
             fillCustomRepos();
             refreshHeader();
@@ -911,6 +969,7 @@ private:
                     return c != 0 ? c > 0 : a.name < b.name;
                 });
                 fillApt();
+                if (m_mlLoaded) fillMainline();
             });
         });
     }
@@ -922,6 +981,7 @@ private:
             setBusy(false);
             if (!ok) { fail(QStringLiteral("Could not read ") + kMainlineBase + QStringLiteral(": ") + html); return; }
             static const QRegularExpression re(QStringLiteral("href=\"(v(\\d+)\\.(\\d+)(?:\\.(\\d+))?(?:-rc(\\d+))?)/\""));
+            static const QRegularExpression archiveDateRe(QStringLiteral("</a>\\s+(\\d{4}-\\d{2}-\\d{2})"));
             QSet<QString> seen;
             m_ml.clear();
             auto it = re.globalMatch(html);
@@ -935,6 +995,10 @@ private:
                 v.min = m.captured(3).toInt();
                 v.pat = m.captured(4).toInt();
                 v.rc  = m.captured(5).toInt();
+                // Apache directory listings contain a per-directory last-modified date.
+                const auto date = archiveDateRe.match(html.mid(m.capturedEnd(0), 180));
+                if (date.hasMatch() && QDate::fromString(date.captured(1), Qt::ISODate).isValid())
+                    v.archiveDate = date.captured(1);
                 m_ml << v;
             }
             std::sort(m_ml.begin(), m_ml.end(), [](const MLVer &a, const MLVer &b) { return b < a; });
@@ -977,9 +1041,14 @@ private:
                     sourceLabel = candidate.customName;
                     break;
                 }
-            auto *item = new QTreeWidgetItem({r, sourceLabel, st.join(QStringLiteral(" · "))});
+            const QString pkg = pkgOf.value(r);
+            const QString date = installedDate(pkg, m_images.value(pkg));
+            auto *item = new QTreeWidgetItem({r, sourceLabel, date, st.join(QStringLiteral(" · "))});
             item->setData(0, Qt::UserRole, pkgOf.value(r));
             item->setData(0, Qt::UserRole + 1, r);
+            item->setToolTip(2, m_installDates.contains(pkg)
+                ? QStringLiteral("Original installation date recorded in dpkg logs")
+                : QStringLiteral("First detected by osm-kernels; old dpkg install history is unavailable"));
             m_pInst.tree->addTopLevelItem(item);
         }
         updateRemoveButton();
@@ -991,12 +1060,15 @@ private:
         for (const KPkg &k : m_apt) {
             Page &p = k.src == SrcLiquorix ? m_pLiq : k.src == SrcXanmod ? m_pXan
                       : k.src == SrcCustom ? m_pCustom : m_pRepo;
+            const QString date = firstSeenDate(QStringLiteral("apt:") + k.name + QLatin1Char('@') + k.version);
             auto *item = new QTreeWidgetItem(k.src == SrcCustom
-                ? QStringList{k.release, k.version, k.suite, k.customName, statusFor(k.release)}
-                : QStringList{k.release, k.version, k.suite, statusFor(k.release)});
+                ? QStringList{k.release, k.version, k.suite, k.customName, date, statusFor(k.release)}
+                : QStringList{k.release, k.version, k.suite, date, statusFor(k.release)});
             item->setData(0, Qt::UserRole, k.name);
             item->setData(0, Qt::UserRole + 1, k.release);
             item->setData(0, Qt::UserRole + 2, k.suite);
+            item->setToolTip(k.src == SrcCustom ? 4 : 3,
+                             QStringLiteral("First detected by osm-kernels (APT has no per-package publication date)"));
             p.tree->addTopLevelItem(item);
         }
     }
@@ -1011,9 +1083,14 @@ private:
             if (status.contains(QLatin1String("Installed"))
                 && !m_installed.contains(QStringLiteral("linux-headers-") + v.release()))
                 status += QStringLiteral(" · Headers missing");
-            auto *item = new QTreeWidgetItem({v.tag, v.release(), status});
+            const QString date = v.archiveDate.isEmpty()
+                ? firstSeenDate(QStringLiteral("mainline:") + v.tag) : v.archiveDate;
+            auto *item = new QTreeWidgetItem({v.tag, v.release(), date, status});
             item->setData(0, Qt::UserRole, v.tag);
             item->setData(0, Qt::UserRole + 1, v.release());
+            item->setToolTip(2, v.archiveDate.isEmpty()
+                ? QStringLiteral("First detected by osm-kernels (archive date unavailable)")
+                : QStringLiteral("Ubuntu mainline archive directory last-modified date"));
             m_pMl.tree->addTopLevelItem(item);
             if (++shown >= 120) break;
         }
@@ -1183,19 +1260,21 @@ private:
             return;
         }
         setBusy(true, QStringLiteral("Looking up build files for ") + tag + QStringLiteral("…"));
-        mlTryDirs(tag, {kMainlineBase + tag + QLatin1Char('/') + m_arch + QLatin1Char('/'),
-                        kMainlineBase + tag + QLatin1Char('/')}, headersOnly);
+        mlTryDirs(tag, release, {kMainlineBase + tag + QLatin1Char('/') + m_arch + QLatin1Char('/'),
+                                 kMainlineBase + tag + QLatin1Char('/')}, headersOnly);
     }
 
-    void mlTryDirs(const QString &tag, QStringList dirs, bool headersOnly)
+    void mlTryDirs(const QString &tag, const QString &release, QStringList dirs, bool headersOnly)
     {
         const QString dir = dirs.takeFirst();
-        fetchText(dir, [this, tag, dir, dirs, headersOnly](bool ok, const QString &html) {
+        fetchText(dir, [this, tag, release, dir, dirs, headersOnly](bool ok, const QString &html) {
             const QStringList debs = ok ? parseDebs(html) : QStringList();
             const QString a = QRegularExpression::escape(m_arch);
-            const QString img = pickLast(debs, QStringLiteral("^linux-image-(unsigned-)?[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
+            const QString r = QRegularExpression::escape(release);
+            const QString common = QRegularExpression::escape(release.chopped(8)); // strip -generic
+            const QString img = pickLast(debs, QStringLiteral("^linux-image-(?:unsigned-)?%1_[^_]+_%2\\.deb$").arg(r, a));
             if (img.isEmpty()) {
-                if (!dirs.isEmpty()) { mlTryDirs(tag, dirs, headersOnly); return; }
+                if (!dirs.isEmpty()) { mlTryDirs(tag, release, dirs, headersOnly); return; }
                 setBusy(false);
                 fail(QStringLiteral("No %1 generic kernel build was found for %2. Ubuntu's build for this version may have failed for your architecture.").arg(m_arch, tag));
                 return;
@@ -1203,20 +1282,22 @@ private:
             QStringList requiredFiles;
             if (!headersOnly) {
                 requiredFiles << img;
-                const QString mods = pickLast(debs, QStringLiteral("^linux-modules-[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
+                const QString mods = pickLast(debs, QStringLiteral("^linux-modules-%1_[^_]+_%2\\.deb$").arg(r, a));
                 if (!mods.isEmpty()) requiredFiles << mods;
             }
             QStringList headerFiles;
             const bool wantHeaders = headersOnly || m_headers->isChecked();
             if (wantHeaders) {
-                const QString hAll = pickLast(debs, QStringLiteral("^linux-headers-[^_]+_[^_]+_all\\.deb$"));
-                const QString hGen = pickLast(debs, QStringLiteral("^linux-headers-[^_]+-generic_[^_]+_%1\\.deb$").arg(a));
+                const QString hAll = pickLast(debs, QStringLiteral("^linux-headers-%1_[^_]+_all\\.deb$").arg(common));
+                const QString hGen = pickLast(debs, QStringLiteral("^linux-headers-%1_[^_]+_%2\\.deb$").arg(r, a));
                 // A matching pair is mandatory. An incomplete build is not usable by DKMS.
                 if (!hAll.isEmpty() && !hGen.isEmpty()) headerFiles << hAll << hGen;
-                else if (headersOnly) {
-                    if (!dirs.isEmpty()) { mlTryDirs(tag, dirs, headersOnly); return; }
+                else {
+                    if (!dirs.isEmpty()) { mlTryDirs(tag, release, dirs, headersOnly); return; }
                     setBusy(false);
-                    fail(QStringLiteral("Both header packages for %1 are not available in the mainline archive (%2). Retry with an earlier compatible build.").arg(tag, m_arch));
+                    fail(QStringLiteral("The matching common and generic header packages for %1 (%2) are not both published. "
+                                        "Kernel installation was stopped to avoid an image without the requested DKMS headers.")
+                                        .arg(tag, m_arch));
                     return;
                 }
             }
@@ -1243,11 +1324,13 @@ private:
                     : QStringLiteral("Install mainline %1?\n\nFiles:\n  %2").arg(tag, files.join(QStringLiteral("\n  ")));
                 if (!headersOnly)
                     text += QStringLiteral("\n\nThis kernel is unsigned, uses Ubuntu's configuration and will not receive updates through apt.");
-                if (wantHeaders && headerFiles.isEmpty())
-                    text += QStringLiteral("\n\nWARNING: The archive does not offer a complete header pair. DKMS support will be unavailable.");
                 if (!verified)
                     text += QStringLiteral("\n\nWARNING: SHA-256 checksums are not published for every file, so the download cannot be fully verified.");
                 if (!headersOnly) text += sbWarning();
+                if (tag.startsWith(QLatin1String("v7.")) && wantHeaders)
+                    text += QStringLiteral("\n\nKernel 7.x headers may require a newer compiler for DKMS on Devuan Excalibur. "
+                                           "The manager will not silently add foreign repositories or upgrade system libraries. "
+                                           "If DKMS fails, the log will show the missing compiler/module.");
                 if (!confirm(headersOnly ? QStringLiteral("Retry mainline headers") : QStringLiteral("Install mainline kernel"), text)) return;
                 mlRun(tag, dir, requiredFiles, headerFiles, sha, wantHeaders);
             });
@@ -1269,40 +1352,45 @@ private:
             if (sha.contains(f)) s += QStringLiteral("printf '%s  %s\\n' %1 %2 | sha256sum -c -\n").arg(sq(sha.value(f)), sq(f));
             else s += QStringLiteral("echo 'WARNING: no published checksum for %1; installed unverified'\n").arg(f);
         }
-        if (headerFiles.size() == 2) {
-            // APT solves missing dependencies using only the system's configured repositories.
-            // It must never remove a package merely to satisfy a mainline header build.
-            s += QStringLiteral("echo '==> Installing the common and architecture-specific headers together'\n");
-            const QString a = QStringLiteral("./") + headerFiles.at(0);
-            const QString b = QStringLiteral("./") + headerFiles.at(1);
-            s += QStringLiteral("if apt-get %1 --no-remove install --no-upgrade -y %2 %3; then\n")
-                    .arg(kAptOpts, sq(a), sq(b));
-            s += QStringLiteral("  echo '==> Checking both headers are configured'\n");
-            for (const QString &f : headerFiles) {
-                const QString pkg = f.section(QLatin1Char('_'), 0, 0);
-                s += QStringLiteral("  if ! dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii'; then echo 'WARNING: headers package %2 was not configured; DKMS may fail'; fi\n")
-                    .arg(sq(pkg), pkg);
-            }
-            s += QStringLiteral("else\n");
-            s += QStringLiteral("  echo 'WARNING: mainline headers cannot be installed on this system. Read the APT dependency or DKMS errors above; no existing packages were upgraded to force compatibility.'\n");
-            s += QStringLiteral("  echo '==> Declared header dependencies:'\n");
-            for (const QString &f : headerFiles)
-                s += QStringLiteral("  dpkg-deb -f %1 Depends || true\n").arg(sq(f));
-            s += QStringLiteral("fi\n");
-        } else if (wantHeaders) {
-            s += QStringLiteral("echo 'WARNING: missing common/generic header pair in the mainline archive; DKMS modules cannot be built for this release.'\n");
-        }
+        // Install the image and modules first. Header postinst/DKMS hooks need
+        // /lib/modules/<release> to exist before attempting an external-module build.
         if (!requiredFiles.isEmpty()) {
             QStringList q;
-            for (const QString &f : requiredFiles) q << sq(f);
+            for (const QString &f : requiredFiles) q << sq(QStringLiteral("./") + f);
             s += QStringLiteral("echo '==> Installing kernel image and modules'\n");
-            s += QStringLiteral("if ! dpkg -i %1; then\n  echo '==> Checking whether APT can fix kernel dependencies'\n  apt-get %2 --no-remove install -f -y\nfi\n")
-                    .arg(q.join(QLatin1Char(' ')), kAptOpts);
+            s += QStringLiteral("if ! apt-get %1 --no-remove install -y %2; then\n")
+                    .arg(kAptOpts, q.join(QLatin1Char(' ')));
+            s += QStringLiteral("  echo 'ERROR: kernel image/modules installation failed; check the APT and dpkg output above'\n");
+            s += QStringLiteral("  dpkg --audit || true\n  exit 1\nfi\n");
             for (const QString &f : requiredFiles) {
                 const QString pkg = f.section(QLatin1Char('_'), 0, 0);
-                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: required kernel package %2 is not installed'; exit 1; }\n")
-                    .arg(sq(pkg), pkg);
+                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: required kernel package %2 is not configured'; exit 1; }\n")
+                        .arg(sq(pkg), pkg);
             }
+        }
+        if (headerFiles.size() == 2) {
+            QStringList q;
+            for (const QString &f : headerFiles) q << sq(QStringLiteral("./") + f);
+            s += QStringLiteral("echo '==> Installing matching common and generic headers together'\n");
+            s += QStringLiteral("if ! apt-get %1 --no-remove install -y %2; then\n")
+                    .arg(kAptOpts, q.join(QLatin1Char(' ')));
+            s += QStringLiteral("  echo 'ERROR: mainline headers failed to install or configure; this job is NOT complete'\n");
+            s += QStringLiteral("  echo '==> Header package dependencies:'\n");
+            for (const QString &f : headerFiles)
+                s += QStringLiteral("  dpkg-deb -f %1 Depends || true\n").arg(sq(f));
+            s += QStringLiteral("  echo '==> Compiler/DKMS diagnostics:'\n");
+            s += QStringLiteral("  command -v gcc-15 || echo 'NOTE: gcc-15 is unavailable; newer 7.x DKMS builds may require it'\n");
+            s += QStringLiteral("  dpkg --audit || true\n");
+            s += QStringLiteral("  echo 'ERROR: kernel image may already be installed, but its headers are NOT ready; check the above diagnostics before rebooting'\n");
+            s += QStringLiteral("  exit 1\nfi\n");
+            for (const QString &f : headerFiles) {
+                const QString pkg = f.section(QLatin1Char('_'), 0, 0);
+                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: header package %2 is not fully configured (DKMS/postinst may have failed)'; dpkg --audit || true; exit 1; }\n")
+                        .arg(sq(pkg), pkg);
+            }
+            s += QStringLiteral("echo '==> Verified: both matching header packages are configured'\n");
+        } else if (wantHeaders) {
+            s += QStringLiteral("echo 'ERROR: a complete matching mainline header pair was not found'\nexit 1\n");
         }
         s += QStringLiteral("echo '==> Done. Kernel changes take effect after reboot.'\n");
         runRoot((requiredFiles.isEmpty() ? QStringLiteral("Install headers ") : QStringLiteral("Install mainline ")) + tag,
