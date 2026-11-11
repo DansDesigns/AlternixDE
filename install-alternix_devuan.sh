@@ -245,7 +245,7 @@ sudo apt install -y \
     kalk vlc qt5-style-kvantum thermald network-manager aptitude timeshift tlp fonts-ubuntu \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests bluez \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 libxi-dev \
-    sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev
+    sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev vlc-plugin-skins2
 
 
 
