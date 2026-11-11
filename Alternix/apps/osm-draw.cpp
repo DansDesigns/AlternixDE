@@ -4,6 +4,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QPushButton>
+#include <QButtonGroup>
 #include <QSlider>
 #include <QLabel>
 #include <QStatusBar>
@@ -28,6 +29,50 @@
 #include <QtMath>
 #include <QGestureEvent>
 #include <QPinchGesture>
+
+// ─────────────────────────────────────────────
+// Live brush-size preview
+// ─────────────────────────────────────────────
+class PenSizePreview : public QWidget {
+public:
+    explicit PenSizePreview(QWidget *parent = nullptr)
+        : QWidget(parent), m_penSize(5), m_penColor(Qt::black) {
+        setFixedSize(60, 60);
+        setToolTip("Actual pen diameter at 100% zoom");
+        setAccessibleName("Pen size preview");
+    }
+
+    void setPenSize(int size) {
+        m_penSize = qBound(1, size, 50);
+        update();
+    }
+
+    void setPenColor(const QColor &color) {
+        m_penColor = color;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(QColor("#5c5c5c"), 1));
+        painter.setBrush(QColor("#f0f0f0"));
+        painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 8, 8);
+
+        const qreal diameter = qreal(m_penSize);
+        const QPointF center(width() / 2.0, height() / 2.0);
+        painter.setPen(QPen(QColor("#878787"), 0.7));
+        painter.setBrush(m_penColor);
+        painter.drawEllipse(QRectF(center.x() - diameter / 2.0,
+                                  center.y() - diameter / 2.0,
+                                  diameter, diameter));
+    }
+
+private:
+    int m_penSize;
+    QColor m_penColor;
+};
 
 // ─────────────────────────────────────────────
 // Drawing Canvas
@@ -546,10 +591,20 @@ public:
             "QPushButton { "
             "  background-color:#303030; color:white; font-family:Sans;"
             "  border-radius:6px; border:1px solid #404040; "
-            "  padding:6px 14px; font-size:22px; } "
+            "  padding:0px; font-size:22px; } "
             "QPushButton:hover { background-color:#3a3a3a; } "
             "QPushButton:pressed { background-color:#505050; } "
+            "QPushButton:checked { background-color:#365b78; border:2px solid #89c9f7; color:#ffffff; } "
+            "QPushButton:checked:hover { background-color:#416f90; border:2px solid #a5d8fa; } "
             "QPushButton:disabled { background-color:#1e1e1e; color:#777; }";
+
+        // Icon-only buttons remain discoverable to mouse, touch and accessibility clients.
+        auto styleIconButton = [&btnStyle](QPushButton *button, const QString &name) {
+            button->setStyleSheet(btnStyle);
+            button->setFixedSize(46, 46);
+            button->setToolTip(name);
+            button->setAccessibleName(name);
+        };
 
         // ─────────────────────────────────
         // TOP TOOLBAR
@@ -561,67 +616,64 @@ public:
         QHBoxLayout *leftGroup = new QHBoxLayout();
         leftGroup->setSpacing(6);
 
-        btnPen = new QPushButton("✒ Pen", this);
-        btnPen->setStyleSheet(btnStyle);
-        btnPen->setFixedHeight(46);
+        btnPen = new QPushButton("✒", this);
+        styleIconButton(btnPen, "Pen");
         leftGroup->addWidget(btnPen);
 
-        btnEraser = new QPushButton("🧽 Erase", this);
-        btnEraser->setStyleSheet(btnStyle);
-        btnEraser->setFixedHeight(46);
+        btnEraser = new QPushButton("🧽", this);
+        styleIconButton(btnEraser, "Eraser");
         leftGroup->addWidget(btnEraser);
 
-        btnLine = new QPushButton("📏 Line", this);
-        btnLine->setStyleSheet(btnStyle);
-        btnLine->setFixedHeight(46);
+        btnLine = new QPushButton("📏", this);
+        styleIconButton(btnLine, "Line");
         leftGroup->addWidget(btnLine);
 
-        btnRect = new QPushButton("☐ Rect", this);
-        btnRect->setStyleSheet(btnStyle);
-        btnRect->setFixedHeight(46);
+        btnRect = new QPushButton("☐", this);
+        styleIconButton(btnRect, "Rectangle");
         leftGroup->addWidget(btnRect);
 
-        btnEllipse = new QPushButton("◯ Ellipse", this);
-        btnEllipse->setStyleSheet(btnStyle);
-        btnEllipse->setFixedHeight(46);
+        btnEllipse = new QPushButton("◯", this);
+        styleIconButton(btnEllipse, "Ellipse");
         leftGroup->addWidget(btnEllipse);
 
-        btnFill = new QPushButton("🌢 Fill", this);
-        btnFill->setStyleSheet(btnStyle);
-        btnFill->setFixedHeight(46);
+        btnFill = new QPushButton("🪣", this);
+        styleIconButton(btnFill, "Fill");
         leftGroup->addWidget(btnFill);
 
-        btnGrab = new QPushButton("👋 Grab", this);
-        btnGrab->setStyleSheet(btnStyle);
-        btnGrab->setFixedHeight(46);
+        btnGrab = new QPushButton("👋", this);
+        styleIconButton(btnGrab, "Grab / Pan");
         leftGroup->addWidget(btnGrab);
+
+        // Exclusive checked state keeps exactly one drawing mode highlighted.
+        QButtonGroup *toolButtons = new QButtonGroup(this);
+        toolButtons->setExclusive(true);
+        for (QPushButton *button : {btnPen, btnEraser, btnLine, btnRect,
+                                    btnEllipse, btnFill, btnGrab}) {
+            button->setCheckable(true);
+            toolButtons->addButton(button);
+        }
 
         QHBoxLayout *rightGroup = new QHBoxLayout();
         rightGroup->setSpacing(6);
 
-        btnUndo = new QPushButton("↩ Undo", this);
-        btnUndo->setStyleSheet(btnStyle);
-        btnUndo->setFixedHeight(46);
+        btnUndo = new QPushButton("↩", this);
+        styleIconButton(btnUndo, "Undo");
         rightGroup->addWidget(btnUndo);
 
-        btnRedo = new QPushButton("↪ Redo", this);
-        btnRedo->setStyleSheet(btnStyle);
-        btnRedo->setFixedHeight(46);
+        btnRedo = new QPushButton("↪", this);
+        styleIconButton(btnRedo, "Redo");
         rightGroup->addWidget(btnRedo);
 
-        btnClear = new QPushButton("🗑 Clear", this);
-        btnClear->setStyleSheet(btnStyle);
-        btnClear->setFixedHeight(46);
+        btnClear = new QPushButton("🗑", this);
+        styleIconButton(btnClear, "Clear canvas");
         rightGroup->addWidget(btnClear);
 
-        btnOpen = new QPushButton("📂 Open", this);
-        btnOpen->setStyleSheet(btnStyle);
-        btnOpen->setFixedHeight(46);
+        btnOpen = new QPushButton("📂", this);
+        styleIconButton(btnOpen, "Open picture");
         rightGroup->addWidget(btnOpen);
 
-        btnSave = new QPushButton("💾 Save PNG", this);
-        btnSave->setStyleSheet(btnStyle);
-        btnSave->setFixedHeight(46);
+        btnSave = new QPushButton("💾", this);
+        styleIconButton(btnSave, "Save PNG");
         rightGroup->addWidget(btnSave);
 
         topBar->addLayout(leftGroup);
@@ -645,7 +697,7 @@ public:
         sizeSlider->setRange(1, 50);
         sizeSlider->setValue(5);
         sizeSlider->setFixedHeight(32);
-        sizeSlider->setMinimumWidth(220);
+        sizeSlider->setMinimumWidth(160);
         sizeSlider->setStyleSheet(
             "QSlider::groove:horizontal { height: 12px; background: #505050; border-radius: 6px; }"
             "QSlider::handle:horizontal { width: 32px; height: 32px; "
@@ -655,6 +707,10 @@ public:
             " outline:none; border:0px solid transparent; }"
         );
         controlBar->addWidget(sizeSlider, 1);
+
+        // Show the actual brush diameter, updated as the size changes.
+        penPreview = new PenSizePreview(this);
+        controlBar->addWidget(penPreview);
 
         QLabel *strokeLabel = new QLabel("Stroke:", this);
         strokeLabel->setStyleSheet("color:#f0f0f0; font-size:18px;");
@@ -743,9 +799,11 @@ public:
 
         zoomLayout->addStretch(1);
 
-        btnFit = new QPushButton("Fit", this);
+        btnFit = new QPushButton("⤢", this);
         btnFit->setStyleSheet(btnStyle);
-        btnFit->setFixedHeight(32);
+        btnFit->setFixedSize(40, 32);
+        btnFit->setToolTip("Fit image to window");
+        btnFit->setAccessibleName("Fit image to window");
         zoomLayout->addWidget(btnFit);
 
         mainLayout->addLayout(zoomLayout);
@@ -832,6 +890,7 @@ public:
 
         connect(sizeSlider, &QSlider::valueChanged, this, [this](int v) {
             canvas->setPenSize(v);
+            penPreview->setPenSize(v);
             statusBar()->showMessage(QString("Pen size: %1").arg(v), 1500);
         });
 
@@ -839,6 +898,7 @@ public:
             QColor c = QColorDialog::getColor(Qt::black, this, "Select Stroke Color");
             if (c.isValid()) {
                 canvas->setPenColor(c);
+                penPreview->setPenColor(c);
                 strokeColorBtn->setStyleSheet(colorButtonStyle(c));
             }
         });
@@ -930,6 +990,9 @@ public:
         canvas->setPenColor(Qt::black);
         canvas->setFillColor(Qt::red);
         canvas->setTool(DrawingCanvas::Tool::Pen);
+        btnPen->setChecked(true);
+        penPreview->setPenSize(sizeSlider->value());
+        penPreview->setPenColor(Qt::black);
         canvas->setZoom(1.0);
     }
 
@@ -946,6 +1009,11 @@ public:
 
         openedImagePath = QFileInfo(path).absoluteFilePath();
         setWindowTitle("🌅Draw - " + QFileInfo(path).fileName());
+
+        // Opening an image (toolbar or command-line) always starts in Grab mode,
+        // preventing an accidental stroke while adjusting the view.
+        canvas->setTool(DrawingCanvas::Tool::Grab);
+        btnGrab->setChecked(true);
 
         // Imported images keep their dimensions, then fit into the visible page.
         canvas->fitToWidget();
@@ -1002,6 +1070,7 @@ private:
     QPushButton *btnFit;
 
     QSlider   *sizeSlider;
+    PenSizePreview *penPreview;
     QPushButton *strokeColorBtn;
     QPushButton *fillColorBtn;
     QComboBox *sizePresetBox;
