@@ -26,6 +26,14 @@
 #include <QSettings>
 #include <QFile>
 #include <QScrollBar>
+#include <QThreadPool>
+#include <QRunnable>
+#include <QCryptographicHash>
+#include <QSaveFile>
+#include <QStandardPaths>
+#include <QDateTime>
+#include <functional>
+#include <utility>
 
 static QString osmPaperConfigPath()
 {
@@ -41,6 +49,58 @@ static QString expandWallpaperHome(const QString &rawPath)
     if (path.startsWith("~/")) return QDir::homePath() + path.mid(1);
     return path;
 }
+
+// Decode and cache small thumbnails on worker threads, never on Qt's GUI thread.
+// The cache key includes the image's modification time and size, so edits
+// invalidate stale previews automatically.
+static QImage loadWallpaperThumbnail(const QString &path, const QSize &size)
+{
+    const QFileInfo file(path);
+    if (!file.isFile()) return {};
+
+    const QByteArray identity = file.absoluteFilePath().toUtf8() + '\n'
+        + QByteArray::number(file.size()) + '\n'
+        + QByteArray::number(file.lastModified().toMSecsSinceEpoch()) + '\n'
+        + QByteArray::number(size.width()) + 'x' + QByteArray::number(size.height());
+    const QString key = QString::fromLatin1(
+        QCryptographicHash::hash(identity, QCryptographicHash::Sha1).toHex());
+    const QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+        + QStringLiteral("/thumbnails");
+    const QString cacheFile = cacheDir + QLatin1Char('/') + key + QStringLiteral(".png");
+
+    QImage cached(cacheFile);
+    if (!cached.isNull()) return cached;
+
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QSize decodedSize = reader.size();
+    if (decodedSize.isValid()) {
+        decodedSize.scale(size, Qt::KeepAspectRatio);
+        reader.setScaledSize(decodedSize);
+    }
+    QImage thumbnail = reader.read();
+    if (thumbnail.isNull()) return {};
+    if (thumbnail.size().width() > size.width() || thumbnail.size().height() > size.height())
+        thumbnail = thumbnail.scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+    if (QDir().mkpath(cacheDir)) {
+        QSaveFile output(cacheFile);
+        if (output.open(QIODevice::WriteOnly)) {
+            if (thumbnail.save(&output, "PNG")) output.commit();
+            else output.cancelWriting();
+        }
+    }
+    return thumbnail;
+}
+
+class ThumbnailJob final : public QRunnable
+{
+public:
+    explicit ThumbnailJob(std::function<void()> task) : m_task(std::move(task)) {}
+    void run() override { m_task(); }
+private:
+    std::function<void()> m_task;
+};
 
 class WallpaperBrowser : public QWidget
 {
@@ -169,10 +229,20 @@ public:
         // 210px cards let labels spill over adjacent rows and intercept taps.
         cardSize  = QSize(300, 260);
 
-        // Async thumbnail loader
-        thumbTimer = new QTimer(this);
-        thumbTimer->setInterval(40);
-        connect(thumbTimer, &QTimer::timeout, this, &WallpaperBrowser::loadNextThumbnail);
+        // Never decode full-sized images in the GUI thread. Limit parallel
+        // jobs to prevent thumbnail work starving rendering and touch input.
+        thumbPool.setMaxThreadCount(2);
+        thumbRequestTimer = new QTimer(this);
+        thumbRequestTimer->setSingleShot(true);
+        thumbRequestTimer->setInterval(20);
+        connect(thumbRequestTimer, &QTimer::timeout,
+                this, &WallpaperBrowser::loadVisibleThumbnails);
+        cardBuildTimer = new QTimer(this);
+        cardBuildTimer->setSingleShot(true);
+        connect(cardBuildTimer, &QTimer::timeout,
+                this, &WallpaperBrowser::buildNextCardBatch);
+        connect(scrollArea->verticalScrollBar(), &QScrollBar::valueChanged,
+                this, [this](int) { scheduleVisibleThumbnails(); });
 
         // ─────────── Signals ───────────
 
@@ -227,6 +297,13 @@ public:
         applyLastWallpaperOnStartup();
     }
 
+    ~WallpaperBrowser() override
+    {
+        // Each worker posts its result only while this widget is alive.
+        // At most two image decodes can be running when closing.
+        thumbPool.waitForDone();
+    }
+
 private:
     // ───────────────────── DEFAULT START DIR ─────────────────────
     QString defaultStartDir()
@@ -253,7 +330,9 @@ private:
     QPushButton *centerBtn{};
     QSplitter   *splitter{};
     QVBoxLayout *rootLayout{};
-    QTimer      *thumbTimer{};
+    QTimer      *thumbRequestTimer{};
+    QTimer      *cardBuildTimer{};
+    QThreadPool  thumbPool;
 
     // State
     QStringList imagePaths;
@@ -263,7 +342,10 @@ private:
     QSize       cardSize;
     QVector<QPushButton*> thumbButtons;
     QVector<QLabel*>      thumbImageLabels;
-    int         nextThumbIndex = 0;
+    QVector<quint8> thumbStates;     // 0=not requested; 1=loading; 2=done
+    int         inFlight = 0;
+    int         loadGeneration = 0;     // ignore results from a previous folder
+    int         nextCardIndex = 0;
 
     // Persistence
     QString lastWallpaperPath;
@@ -375,8 +457,13 @@ private:
 
     void clearGrid()
     {
-        thumbTimer->stop();
-        nextThumbIndex = 0;
+        cardBuildTimer->stop();
+        thumbRequestTimer->stop();
+        thumbPool.clear();           // cancel jobs still queued, not running jobs
+        ++loadGeneration;
+        nextCardIndex = 0;
+        inFlight = 0;
+        thumbStates.clear();
         thumbButtons.clear();
         thumbImageLabels.clear();
 
@@ -391,34 +478,24 @@ private:
             }
             delete item;
         }
+        gridWidget->setMinimumHeight(0);
     }
 
     void loadImagesFrom(const QString &dirPath)
     {
-        thumbTimer->stop();
-        nextThumbIndex = 0;
-        thumbButtons.clear();
-        thumbImageLabels.clear();
-
-        QDir dir(dirPath);
-        if (!dir.exists()) {
-            clearGrid();
-            imagePaths.clear();
-            currentImagePath.clear();
-            return;
-        }
-
-        QStringList filters = {"*.png","*.jpg","*.jpeg","*.bmp","*.gif","*.webp"};
-        QFileInfoList files =
-            dir.entryInfoList(filters, QDir::Files, QDir::Name);
-
-        imagePaths.clear();
         clearGrid();
+        imagePaths.clear();
         currentImagePath.clear();
         scrollArea->verticalScrollBar()->setValue(0);
 
-        for (const QFileInfo &fi : files)
-            imagePaths << fi.absoluteFilePath();
+        QDir dir(dirPath);
+        if (!dir.exists()) return;
+
+        const QStringList filters = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.webp"};
+        const QFileInfoList files = dir.entryInfoList(filters, QDir::Files, QDir::Name);
+        imagePaths.reserve(files.size());
+        for (const QFileInfo &file : files)
+            imagePaths << file.absoluteFilePath();
 
         buildPlaceholdersAndStartLoader();
     }
@@ -427,62 +504,60 @@ private:
     {
         if (imagePaths.isEmpty()) return;
 
-        for (int i = 0; i < imagePaths.size(); ++i)
-        {
-            // Card button
-            QPushButton *card = new QPushButton;
+        // The image list is cheap. Construct the actual button widgets in
+        // small chunks so large wallpaper folders cannot block startup.
+        thumbStates.fill(0, imagePaths.size());
+        columns = computeColumns();
+        const int selectedIndex = lastWallpaperPath.isEmpty()
+            ? 0 : imagePaths.indexOf(lastWallpaperPath);
+        if (selectedIndex >= 0) currentImagePath = imagePaths.at(selectedIndex);
+
+        buildNextCardBatch();       // initial visible cards before first paint
+    }
+
+    void buildNextCardBatch()
+    {
+        // First batch covers several rows; subsequent batches yield back
+        // to Qt's event loop so the window remains interactive.
+        const int batchEnd = qMin(nextCardIndex + 24, imagePaths.size());
+        for (int i = nextCardIndex; i < batchEnd; ++i) {
+            auto *card = new QPushButton;
             card->setCheckable(true);
             card->setFocusPolicy(Qt::NoFocus);
-            card->setObjectName("wallpaperCard");
+            card->setObjectName(QStringLiteral("wallpaperCard"));
             card->setToolTip(imagePaths.at(i));
-
             card->setFixedSize(cardSize);
 
-            // Inner layout: thumbnail + filename
-            QVBoxLayout *inner = new QVBoxLayout(card);
+            auto *inner = new QVBoxLayout(card);
             inner->setContentsMargins(12, 12, 12, 12);
             inner->setSpacing(6);
             inner->setAlignment(Qt::AlignCenter);
 
-            // Thumbnail label
-            QLabel *thumbLabel = new QLabel("Loading…", card);
+            auto *thumbLabel = new QLabel(QStringLiteral("Loading…"), card);
             thumbLabel->setAlignment(Qt::AlignCenter);
             thumbLabel->setFixedSize(thumbSize);
-            // Labels are decorative: they must not steal mouse/touch events
-            // from their enclosing button, including while thumbnails fade in.
             thumbLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             inner->addWidget(thumbLabel);
 
-            // Filename label (wrapped, centred)
-            QLabel *nameLabel = new QLabel(QFileInfo(imagePaths[i]).fileName(), card);
+            auto *nameLabel = new QLabel(QFileInfo(imagePaths.at(i)).fileName(), card);
             nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-            nameLabel->setObjectName("wallpaperFilename");
+            nameLabel->setObjectName(QStringLiteral("wallpaperFilename"));
             nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             nameLabel->setWordWrap(true);
-            nameLabel->setFixedHeight(48); // up to two lines, contained within card
+            nameLabel->setFixedHeight(48);
             inner->addWidget(nameLabel);
 
-            // Track thumbnail labels so we can set pixmaps later
             thumbImageLabels.append(thumbLabel);
-
             buttonGroup->addButton(card, i);
             thumbButtons.append(card);
+            gridLayout->addWidget(card, i / columns, i % columns);
+            if (imagePaths.at(i) == currentImagePath)
+                card->setChecked(true);
         }
-
-        // FIX: columns are computed from the available width instead of
-        // being fixed at 2; relayoutGrid() places the cards.
-        columns = computeColumns();
-        relayoutGrid();
-
-        // If the applied wallpaper is in this folder, highlight it. Do not
-        // mislabel the first wallpaper as current when a different folder opens.
-        const int selectedIndex = lastWallpaperPath.isEmpty()
-            ? 0 : imagePaths.indexOf(lastWallpaperPath);
-        if (selectedIndex >= 0)
-            selectWallpaper(selectedIndex);
-
-        nextThumbIndex = 0;
-        thumbTimer->start();
+        nextCardIndex = batchEnd;
+        updateGridGeometry();
+        scheduleVisibleThumbnails();
+        if (nextCardIndex < imagePaths.size()) cardBuildTimer->start(5);
     }
 
     // How many card columns fit in the scroll area's current width.
@@ -505,7 +580,6 @@ private:
     // no card is recreated, so thumbnails and selection are untouched.
     void relayoutGrid()
     {
-        // Detach all items from the layout without deleting the widgets.
         QLayoutItem *item;
         while ((item = gridLayout->takeAt(0)))
             delete item;
@@ -515,21 +589,17 @@ private:
             gridLayout->addWidget(card, row, col);
             if (++col >= columns) { col = 0; ++row; }
         }
+        updateGridGeometry();
+        scheduleVisibleThumbnails();
+    }
 
-        // Fix the grid widget's width to exactly fit the columns so the
-        // scroll area's AlignHCenter keeps it centred.
-        int spacing = gridLayout->horizontalSpacing();
-        int lm = gridLayout->contentsMargins().left();
-        int rm = gridLayout->contentsMargins().right();
-        int contentWidth = columns * cardSize.width()
-                         + (columns - 1) * spacing
-                         + lm + rm;
-
-        gridWidget->setMinimumWidth(contentWidth);
-        gridWidget->setMaximumWidth(contentWidth);
-
-        // Height must be allowed to SHRINK too (fewer rows after widening),
-        // so reset the minimum before re-measuring.
+    void updateGridGeometry()
+    {
+        const int spacing = gridLayout->horizontalSpacing();
+        const QMargins margins = gridLayout->contentsMargins();
+        const int contentWidth = columns * cardSize.width()
+            + (columns - 1) * spacing + margins.left() + margins.right();
+        gridWidget->setFixedWidth(contentWidth);
         gridWidget->setMinimumHeight(0);
         gridLayout->activate();
         gridWidget->adjustSize();
@@ -551,51 +621,67 @@ protected:
     }
 
 private:
-
-    // ───────────────────── Async thumbnail loader ────────────────────
-
-    void loadNextThumbnail()
+    // ───────────────────── Visible-first, background thumbnail loading ─────────
+    void scheduleVisibleThumbnails()
     {
-        if (nextThumbIndex >= imagePaths.size() ||
-            nextThumbIndex >= thumbImageLabels.size()) {
-            thumbTimer->stop();
-            return;
-        }
-
-        QString path = imagePaths.at(nextThumbIndex);
-        QLabel *thumbLabel = thumbImageLabels.at(nextThumbIndex);
-
-        // Decode at approximately the displayed size where supported,
-        // avoiding the long UI stalls caused by full-resolution wallpapers.
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        QSize decodeSize = reader.size();
-        if (decodeSize.isValid()) {
-            decodeSize.scale(thumbSize, Qt::KeepAspectRatio);
-            reader.setScaledSize(decodeSize);
-        }
-        const QImage decoded = reader.read();
-        if (!decoded.isNull()) {
-            QPixmap thumb = QPixmap::fromImage(decoded).scaled(
-                thumbSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-
-            thumbLabel->setText("");
-            thumbLabel->setPixmap(thumb);
-
-            // Keep the pixmap in QLabel's normal widget paint path.
-            // QGraphicsOpacityEffect renders the thumbnail to an off-screen
-            // cache: on Qt5, that cache can remain at the old viewport
-            // position when QScroller scrolls the QScrollArea by blitting.
-            // Removing the effect makes both the card and its image scroll
-            // together, including images visible when the swipe begins.
-            thumbLabel->update();
-        }
-        else {
-            thumbLabel->setText("Error");
-        }
-
-        ++nextThumbIndex;
+        if (thumbRequestTimer && !thumbRequestTimer->isActive())
+            thumbRequestTimer->start();
     }
+
+    void loadVisibleThumbnails()
+    {
+        if (thumbButtons.isEmpty() || inFlight >= 2) return;
+
+        const int rowHeight = cardSize.height() + gridLayout->verticalSpacing();
+        const int scrollY = scrollArea->verticalScrollBar()->value();
+        const int viewportHeight = qMax(1, scrollArea->viewport()->height());
+        const int firstRow = qMax(0, scrollY / rowHeight);
+        const int lastRow = (scrollY + viewportHeight) / rowHeight;
+
+        // Always prioritise what is *currently* visible. Only decode one
+        // row before and two after when spare background capacity remains.
+        auto dispatchRow = [this](int row) {
+            if (row < 0) return;
+            for (int col = 0; col < columns && inFlight < 2; ++col) {
+                const int index = row * columns + col;
+                if (index >= thumbButtons.size()) return;
+                if (thumbStates.at(index) != 0) continue;
+
+                thumbStates[index] = 1;
+                ++inFlight;
+                const int generation = loadGeneration;
+                const QString path = imagePaths.at(index);
+                const QSize size = thumbSize;
+                thumbPool.start(new ThumbnailJob([this, generation, index, path, size]() {
+                    const QImage image = loadWallpaperThumbnail(path, size);
+                    QMetaObject::invokeMethod(this, [this, generation, index, image]() {
+                        // A folder switch may have replaced all the buttons
+                        // while this thumbnail was being decoded.
+                        if (generation != loadGeneration) return;
+                        --inFlight;
+                        if (index >= thumbImageLabels.size()) return;
+                        thumbStates[index] = 2;
+                        QLabel *label = thumbImageLabels.at(index);
+                        if (image.isNull()) label->setText(QStringLiteral("Error"));
+                        else {
+                            label->clear();
+                            label->setPixmap(QPixmap::fromImage(image));
+                        }
+                        // No opacity effect: images remain attached to their
+                        // cards while the viewport scrolls (Qt5 blitting).
+                        scheduleVisibleThumbnails();
+                    }, Qt::QueuedConnection);
+                }));
+            }
+        };
+
+        for (int row = firstRow; row <= lastRow && inFlight < 2; ++row)
+            dispatchRow(row);
+        for (int row = lastRow + 1; row <= lastRow + 2 && inFlight < 2; ++row)
+            dispatchRow(row);
+        if (inFlight < 2) dispatchRow(firstRow - 1);
+    }
+
 };
 
 // Same palette, typography, controls, and selected state as osm-kernels(6).
