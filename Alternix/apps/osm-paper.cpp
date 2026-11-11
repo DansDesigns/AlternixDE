@@ -11,10 +11,10 @@
 #include <QScrollArea>
 #include <QGridLayout>
 #include <QPixmap>
-#include <QScreen>
+#include <QImageReader>
+#include <QImage>
 #include <QButtonGroup>
 #include <QResizeEvent>
-#include <QStyleFactory>
 #include <QProcess>
 #include <QTimer>
 #include <QSplitter>
@@ -27,6 +27,7 @@
 #include <QVector>
 #include <QSettings>
 #include <QFile>
+#include <QScrollBar>
 
 static QString osmPaperConfigPath()
 {
@@ -49,20 +50,27 @@ public:
     explicit WallpaperBrowser(QWidget *parent = nullptr)
         : QWidget(parent)
     {
-        setWindowTitle("🌄Wallpapers");
-
-        // Slightly transparent background + global font (18pt)
-        setStyleSheet("background-color: rgba(40,40,40,200); color:white; font-size:18pt;");
-
-        QFont f = font();
-        f.setPointSize(18);
-        setFont(f);
+        setWindowTitle("Wallpapers");
 
         loadLastWallpaperSettings();
         loadLastFolder();
 
+        // Match the compact header card used by osm-kernels.
+        auto *headerFrame = new QFrame;
+        headerFrame->setObjectName("card");
+        auto *headerLayout = new QVBoxLayout(headerFrame);
+        headerLayout->setContentsMargins(16, 12, 16, 12);
+        headerLayout->setSpacing(4);
+        auto *headerTitle = new QLabel("Wallpapers");
+        headerTitle->setObjectName("big");
+        auto *headerNote = new QLabel("Select a wallpaper, then choose its fill type.");
+        headerNote->setObjectName("small");
+        headerLayout->addWidget(headerTitle);
+        headerLayout->addWidget(headerNote);
+
         // ────────────────────────────── Top bar ──────────────────────────────
         auto *topLayout  = new QHBoxLayout;
+        topLayout->setSpacing(8);
         auto *folderLbl  = new QLabel("Folder:");
         pathEdit         = new QLineEdit;
         auto *browseBtn  = new QPushButton("Browse…");
@@ -73,29 +81,45 @@ public:
 
         // ───────────────── THUMBNAIL GRID (scrollable) ──────────────────
         scrollArea = new QScrollArea;
+        scrollArea->setObjectName("wallpaperScroll");
         scrollArea->setWidgetResizable(false); // needed for QScroller stability
         scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scrollArea->setAlignment(Qt::AlignHCenter | Qt::AlignTop); // center grid widget
 
         gridWidget = new QWidget;
-        // Opaque-ish background to avoid "ghost" artifacts when scrolling
-        gridWidget->setStyleSheet("background-color: rgba(40,40,40,230);");
+        gridWidget->setObjectName("wallpaperGrid");
+        scrollArea->viewport()->setStyleSheet("background: #1d2021;");
         gridLayout = new QGridLayout(gridWidget);
         gridLayout->setContentsMargins(10, 10, 10, 10);
         gridLayout->setHorizontalSpacing(10);
         gridLayout->setVerticalSpacing(10);
         scrollArea->setWidget(gridWidget);
 
-        // Smooth kinetic scrolling
+        // Keep kinetic scrolling for touch swipes. The left-mouse scroller
+        // gesture intercepted ordinary clicks/taps on thumbnail buttons.
         QScroller::grabGesture(scrollArea->viewport(), QScroller::TouchGesture);
-        QScroller::grabGesture(scrollArea->viewport(), QScroller::LeftMouseButtonGesture);
+        auto *scroller = QScroller::scroller(scrollArea->viewport());
+        QScrollerProperties scrollProperties = scroller->scrollerProperties();
+        scrollProperties.setScrollMetric(QScrollerProperties::MousePressEventDelay, 0.0);
+        scroller->setScrollerProperties(scrollProperties);
 
         // ───────────────── BUTTON PANEL (2×2) ─────────────────
         zoomBtn   = new QPushButton("Zoom");
         fitBtn    = new QPushButton("Fit");
         tileBtn   = new QPushButton("Tile");
         centerBtn = new QPushButton("Center");
+
+        // Identical checked-button highlight to osm-kernels' navigation.
+        modeGroup = new QButtonGroup(this);
+        modeGroup->setExclusive(true);
+        for (QPushButton *button : {zoomBtn, fitBtn, tileBtn, centerBtn}) {
+            button->setCheckable(true);
+            button->setMinimumHeight(48);
+            button->setFocusPolicy(Qt::NoFocus);
+            modeGroup->addButton(button);
+        }
+        selectedModeButton(lastMode)->setChecked(true);
 
         auto *btnGrid = new QGridLayout;
         btnGrid->setContentsMargins(6,6,6,6);
@@ -107,6 +131,7 @@ public:
         btnGrid->addWidget(centerBtn, 1,1);
 
         auto *buttonsFrame = new QFrame;
+        buttonsFrame->setObjectName("card");
         buttonsFrame->setLayout(btnGrid);
 
         int buttonHeight = 220;
@@ -131,15 +156,20 @@ public:
 
         // Root layout
         rootLayout = new QVBoxLayout(this);
+        rootLayout->setContentsMargins(14, 14, 14, 14);
+        rootLayout->setSpacing(10);
+        rootLayout->addWidget(headerFrame);
         rootLayout->addLayout(topLayout);
-        rootLayout->addWidget(splitter);
+        rootLayout->addWidget(splitter, 1);
 
         buttonGroup = new QButtonGroup(this);
         buttonGroup->setExclusive(true);
 
         columns   = 2;                  // default until first width-based recompute
-        thumbSize = QSize(260, 180);    // preview size
-        cardSize  = QSize(300, 210);    // card size (bigger so rounded corners show)
+        thumbSize = QSize(260, 174);    // preview size
+        // Must fit thumbnail + 48px filename + spacing + margins; the old
+        // 210px cards let labels spill over adjacent rows and intercept taps.
+        cardSize  = QSize(300, 260);
 
         // Async thumbnail loader
         thumbTimer = new QTimer(this);
@@ -167,10 +197,8 @@ public:
             loadImagesFrom(pathEdit->text());
         });
 
-        connect(buttonGroup, &QButtonGroup::idClicked, this, [this](int id) {
-            if (id >= 0 && id < imagePaths.size())
-                currentImagePath = imagePaths.at(id);
-        });
+        connect(buttonGroup, &QButtonGroup::idClicked, this,
+                [this](int id) { selectWallpaper(id); });
 
         // transparent preview fade
         auto fade = [this]() {
@@ -181,20 +209,16 @@ public:
         };
 
         connect(zoomBtn, &QPushButton::clicked, this, [this, fade]() {
-            applyWallpaper("zoom", "xwallpaper --zoom");
-            fade();
+            if (applyWallpaper("zoom", "xwallpaper --zoom")) fade();
         });
         connect(fitBtn, &QPushButton::clicked, this, [this, fade]() {
-            applyWallpaper("fit", "xwallpaper --stretch");
-            fade();
+            if (applyWallpaper("fit", "xwallpaper --stretch")) fade();
         });
         connect(tileBtn, &QPushButton::clicked, this, [this, fade]() {
-            applyWallpaper("tile", "xwallpaper --tile");
-            fade();
+            if (applyWallpaper("tile", "xwallpaper --tile")) fade();
         });
         connect(centerBtn, &QPushButton::clicked, this, [this, fade]() {
-            applyWallpaper("center", "xwallpaper --center");
-            fade();
+            if (applyWallpaper("center", "xwallpaper --center")) fade();
         });
 
         // Load initial folder
@@ -224,6 +248,7 @@ private:
     QWidget     *gridWidget{};
     QGridLayout *gridLayout{};
     QButtonGroup *buttonGroup{};
+    QButtonGroup *modeGroup{};
     QPushButton *zoomBtn{};
     QPushButton *fitBtn{};
     QPushButton *tileBtn{};
@@ -239,13 +264,30 @@ private:
     QSize       thumbSize;
     QSize       cardSize;
     QVector<QPushButton*> thumbButtons;
-    QVector<QLabel*>      thumbImageLabels;  // NEW: holds thumbnail labels
+    QVector<QLabel*>      thumbImageLabels;
     int         nextThumbIndex = 0;
 
     // Persistence
     QString lastWallpaperPath;
     QString lastMode;
     QString lastFolder;
+
+    // ───────────────────── Selection ───────────────────────
+    QPushButton *selectedModeButton(const QString &mode) const
+    {
+        if (mode == "fit") return fitBtn;
+        if (mode == "tile") return tileBtn;
+        if (mode == "center") return centerBtn;
+        return zoomBtn;
+    }
+
+    void selectWallpaper(int index)
+    {
+        if (index < 0 || index >= imagePaths.size()) return;
+        currentImagePath = imagePaths.at(index);
+        if (auto *button = buttonGroup->button(index))
+            button->setChecked(true);
+    }
 
     // ───────────────────── Persistence ───────────────────────
     void saveLastFolder(const QString &folder)
@@ -275,6 +317,7 @@ private:
 
         lastWallpaperPath = path;
         lastMode = modeName;
+        selectedModeButton(modeName)->setChecked(true);
     }
 
     void loadLastWallpaperSettings()
@@ -312,15 +355,22 @@ private:
         QProcess::startDetached("/bin/sh", {"-c", cmd});
     }
 
-    void applyWallpaper(const QString &modeName,
+    bool applyWallpaper(const QString &modeName,
                         const QString &cmdPrefix)
     {
-        if (currentImagePath.isEmpty()) return;
+        if (currentImagePath.isEmpty()) {
+            selectedModeButton(lastMode)->setChecked(true);
+            return false;
+        }
 
         QString cmd = cmdPrefix + " \"" + currentImagePath + "\"";
-        QProcess::startDetached("/bin/sh", {"-c", cmd});
+        if (!QProcess::startDetached("/bin/sh", {"-c", cmd})) {
+            selectedModeButton(lastMode)->setChecked(true);
+            return false;
+        }
 
         saveLastWallpaper(modeName, currentImagePath);
+        return true;
     }
 
     // ───────────────────── Grid management ───────────────────────────
@@ -337,7 +387,10 @@ private:
 
         QLayoutItem *item;
         while ((item = gridLayout->takeAt(0))) {
-            if (item->widget()) item->widget()->deleteLater();
+            if (item->widget()) {
+                item->widget()->hide();
+                item->widget()->deleteLater();
+            }
             delete item;
         }
     }
@@ -353,6 +406,7 @@ private:
         if (!dir.exists()) {
             clearGrid();
             imagePaths.clear();
+            currentImagePath.clear();
             return;
         }
 
@@ -362,6 +416,8 @@ private:
 
         imagePaths.clear();
         clearGrid();
+        currentImagePath.clear();
+        scrollArea->verticalScrollBar()->setValue(0);
 
         for (const QFileInfo &fi : files)
             imagePaths << fi.absoluteFilePath();
@@ -378,20 +434,9 @@ private:
             // Card button
             QPushButton *card = new QPushButton;
             card->setCheckable(true);
-            card->setFlat(true);
             card->setFocusPolicy(Qt::NoFocus);
-
-            card->setStyleSheet(
-                "QPushButton {"
-                "   background-color: #80708099;"
-                "   border-radius: 20px;"
-                "   border: none;"
-                "}"
-                "QPushButton:checked {"
-                "   background-color: #282828;"
-                "   border: 1px solid white;"
-                "}"
-            );
+            card->setObjectName("wallpaperCard");
+            card->setToolTip(imagePaths.at(i));
 
             card->setFixedSize(cardSize);
 
@@ -405,15 +450,18 @@ private:
             QLabel *thumbLabel = new QLabel("Loading…", card);
             thumbLabel->setAlignment(Qt::AlignCenter);
             thumbLabel->setFixedSize(thumbSize);
-            thumbLabel->setStyleSheet("color:white;");
+            // Labels are decorative: they must not steal mouse/touch events
+            // from their enclosing button, including while thumbnails fade in.
+            thumbLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             inner->addWidget(thumbLabel);
 
             // Filename label (wrapped, centred)
             QLabel *nameLabel = new QLabel(QFileInfo(imagePaths[i]).fileName(), card);
             nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-            nameLabel->setStyleSheet("color:white; font-size:14pt;");
+            nameLabel->setObjectName("wallpaperFilename");
+            nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
             nameLabel->setWordWrap(true);
-            nameLabel->setMinimumHeight(48); // approx 2 lines
+            nameLabel->setFixedHeight(48); // up to two lines, contained within card
             inner->addWidget(nameLabel);
 
             // Track thumbnail labels so we can set pixmaps later
@@ -428,18 +476,12 @@ private:
         columns = computeColumns();
         relayoutGrid();
 
-        // Select last used wallpaper
-        int selectedIndex = 0;
-        if (!lastWallpaperPath.isEmpty()) {
-            int idx = imagePaths.indexOf(lastWallpaperPath);
-            if (idx != -1) selectedIndex = idx;
-        }
-
-        if (!imagePaths.isEmpty()) {
-            if (auto *btn = buttonGroup->button(selectedIndex))
-                btn->setChecked(true);
-            currentImagePath = imagePaths.at(selectedIndex);
-        }
+        // If the applied wallpaper is in this folder, highlight it. Do not
+        // mislabel the first wallpaper as current when a different folder opens.
+        const int selectedIndex = lastWallpaperPath.isEmpty()
+            ? 0 : imagePaths.indexOf(lastWallpaperPath);
+        if (selectedIndex >= 0)
+            selectWallpaper(selectedIndex);
 
         nextThumbIndex = 0;
         thumbTimer->start();
@@ -525,12 +567,19 @@ private:
         QString path = imagePaths.at(nextThumbIndex);
         QLabel *thumbLabel = thumbImageLabels.at(nextThumbIndex);
 
-        QPixmap pix(path);
-        if (!pix.isNull()) {
-            QPixmap thumb = pix.scaled(
-                thumbSize,
-                Qt::KeepAspectRatio,
-                Qt::SmoothTransformation);
+        // Decode at approximately the displayed size where supported,
+        // avoiding the long UI stalls caused by full-resolution wallpapers.
+        QImageReader reader(path);
+        reader.setAutoTransform(true);
+        QSize decodeSize = reader.size();
+        if (decodeSize.isValid()) {
+            decodeSize.scale(thumbSize, Qt::KeepAspectRatio);
+            reader.setScaledSize(decodeSize);
+        }
+        const QImage decoded = reader.read();
+        if (!decoded.isNull()) {
+            QPixmap thumb = QPixmap::fromImage(decoded).scaled(
+                thumbSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
             thumbLabel->setText("");
             thumbLabel->setPixmap(thumb);
@@ -552,13 +601,36 @@ private:
     }
 };
 
+// Same palette, typography, controls, and selected state as osm-kernels(6).
+static const char *kStyle = R"(
+QWidget { background: #282828; color: #ebdbb2; font-family: 'DejaVu Sans'; font-size: 11pt; }
+QFrame#card { background: #32302f; border-radius: 12px; }
+QFrame#card QLabel { background: transparent; }
+QLabel { background: transparent; }
+QLabel#big { font-size: 15pt; font-weight: bold; color: #fbf1c7; }
+QLabel#small { font-size: 9pt; color: #a89984; }
+QPushButton { background: #3c3836; border: 1px solid #504945; border-radius: 8px; padding: 8px 16px; }
+QPushButton:pressed { background: #504945; }
+QPushButton:checked { background: #458588; color: #fbf1c7; border-color: #83a598; }
+QPushButton:disabled { color: #7c6f64; }
+QLineEdit { background: #1d2021; color: #ebdbb2; border: 1px solid #3c3836; border-radius: 8px; padding: 8px; selection-background-color: #458588; }
+QScrollArea#wallpaperScroll { background: #1d2021; border: 1px solid #3c3836; border-radius: 8px; }
+QWidget#wallpaperGrid { background: #1d2021; }
+QPushButton#wallpaperCard { background: #3c3836; border: 1px solid #504945; border-radius: 12px; padding: 0px; }
+QPushButton#wallpaperCard:pressed { background: #504945; }
+QPushButton#wallpaperCard:checked { background: #458588; color: #fbf1c7; border: 1px solid #83a598; }
+QLabel#wallpaperFilename { color: #ebdbb2; background: transparent; font-size: 10pt; }
+QScrollBar:vertical { width: 14px; background: #282828; }
+QScrollBar::handle:vertical { background: #504945; border-radius: 6px; min-height: 40px; }
+)";
+
 int main(int argc, char *argv[])
 {
-    QApplication app(argc, argv);
-
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
-    if (QStyleFactory::keys().contains("kvantum", Qt::CaseInsensitive))
-        QApplication::setStyle(QStyleFactory::create("kvantum"));
+    QApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("osm-paper"));
+    app.setFont(QFont(QStringLiteral("DejaVu Sans"), 11));
+    app.setStyleSheet(QString::fromLatin1(kStyle));
 
     WallpaperBrowser w;
     w.resize(720, 1560);
