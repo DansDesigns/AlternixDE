@@ -22,8 +22,6 @@
 #include <QFrame>
 #include <QScroller>
 #include <QScrollerProperties>
-#include <QGraphicsOpacityEffect>
-#include <QPropertyAnimation>
 #include <QVector>
 #include <QSettings>
 #include <QFile>
@@ -584,14 +582,13 @@ private:
             thumbLabel->setText("");
             thumbLabel->setPixmap(thumb);
 
-            auto *effect = new QGraphicsOpacityEffect(thumbLabel);
-            thumbLabel->setGraphicsEffect(effect);
-
-            auto *anim = new QPropertyAnimation(effect, "opacity", thumbLabel);
-            anim->setDuration(300);
-            anim->setStartValue(0.0);
-            anim->setEndValue(1.0);
-            anim->start(QPropertyAnimation::DeleteWhenStopped);
+            // Keep the pixmap in QLabel's normal widget paint path.
+            // QGraphicsOpacityEffect renders the thumbnail to an off-screen
+            // cache: on Qt5, that cache can remain at the old viewport
+            // position when QScroller scrolls the QScrollArea by blitting.
+            // Removing the effect makes both the card and its image scroll
+            // together, including images visible when the swipe begins.
+            thumbLabel->update();
         }
         else {
             thumbLabel->setText("Error");
