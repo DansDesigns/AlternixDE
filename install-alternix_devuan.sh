@@ -814,9 +814,6 @@ echo "[System] Adding flatpak Components.."
 sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
 echo "[System] Installing Flatpaks..."
-
-
-flatpak install -y flathub io.github.kolunmi.Bazaar
 flatpak install -y flathub com.github.joseexposito.touche
 flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
@@ -824,8 +821,18 @@ flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
 
 # Flatpak Games:
-#flatpak install -y flathub net.retrodeck.retrodeck
+flatpak install -y flathub net.retrodeck.retrodeck
 flatpak install -y flathub net.wz2100.wz2100
+flatpak install -y flathub com.play0ad.zeroad
+
+# Flatpak other:
+flatpak install -y flathub page.codeberg.lo_vely.Nucleus
+flatpak install -y flathub io.github.rinigus.PureMaps
+flatpak install -y flathub space.gaiasky.GaiaSky
+flatpak install -y flathub io.github.leolost2605.emergency-alerts
+flatpak install -y flathub com.pojtinger.felicitas.Sessions
+flatpak install -y flathub no.bragefuglseth.Keypunch
+flatpak install -y flathub de.haeckerfelix.Shortwave
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages
