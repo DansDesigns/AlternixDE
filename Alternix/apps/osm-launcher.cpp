@@ -1,5 +1,4 @@
 #include <QApplication>
-#include <QCoreApplication>
 #include <QWidget>
 #include <QScrollArea>
 #include <QGridLayout>
@@ -41,6 +40,7 @@
 #include <QSet>
 #include <QElapsedTimer>
 #include <QDateTime>
+#include <QUrl>
 #include <algorithm>
 #include <functional>
 #include <utility>
@@ -57,6 +57,111 @@ constexpr int contentMs = 26;   // formerly 52ms on close
 constexpr int rowPauseMs = 2;   // formerly 3ms on close (rounded)
 constexpr int buttonMs = 28;    // formerly 55ms on close
 }
+
+// Resolve Freedesktop Icon= names even on lightweight window managers such as
+// Qtile where Qt's current icon theme may not search AppImageLauncher icons.
+// AppImageLauncher puts integrated application icons under the user's XDG
+// icon theme directories, often with an appimagekit_* basename.  This helper
+// never executes AppImages or scans their binaries to discover icons.
+namespace DesktopIconResolver {
+
+inline QStringList dataDirectories() {
+    QStringList locations;
+    const QString home=QDir::homePath();
+    const QString xdgHome=qEnvironmentVariable("XDG_DATA_HOME",home+"/.local/share");
+    locations << xdgHome << home+"/.local/share" << home;
+    const QStringList shared=qEnvironmentVariable("XDG_DATA_DIRS","/usr/local/share:/usr/share")
+                                  .split(':',Qt::SkipEmptyParts);
+    locations << shared;
+    QStringList unique;
+    QSet<QString> seen;
+    for(const QString &path:locations){
+        const QString normalized=QDir::cleanPath(path);
+        if(!normalized.isEmpty() && !seen.contains(normalized)){
+            unique.append(normalized);
+            seen.insert(normalized);
+        }
+    }
+    return unique;
+}
+
+inline QStringList themeSearchPaths() {
+    QStringList paths=QIcon::themeSearchPaths();
+    // The Qt5 platform theme in Qtile is sometimes empty, so these may not be
+    // included in QIcon::themeSearchPaths by default.
+    for(const QString &dir:dataDirectories()){
+        const QString iconRoot=dir==QDir::homePath() ? dir+"/.icons" : dir+"/icons";
+        if(QDir(iconRoot).exists() && !paths.contains(iconRoot))paths.append(iconRoot);
+    }
+    return paths;
+}
+
+inline void configureThemeSearch() {
+    QIcon::setThemeSearchPaths(themeSearchPaths());
+    if(QIcon::themeName().isEmpty())QIcon::setThemeName("hicolor");
+    QIcon::setFallbackThemeName("hicolor");
+}
+
+inline QIcon resolve(const QString &iconField,int targetSize=48) {
+    const QString value=iconField.trimmed();
+    if(value.isEmpty())return {};
+    QString direct=value;
+    if(value.startsWith("file://",Qt::CaseInsensitive))direct=QUrl(value).toLocalFile();
+    const QFileInfo info(direct);
+    if(info.isFile()){
+        const QIcon fileIcon(direct);
+        if(!fileIcon.isNull() && !fileIcon.pixmap(targetSize,targetSize).isNull())return fileIcon;
+    }
+    QIcon themed=QIcon::fromTheme(value);
+    if(!themed.isNull() && !themed.pixmap(targetSize,targetSize).isNull())return themed;
+
+    // Some AppImage desktop-integration tools register an icon by basename
+    // without making it visible to Qt's theme engine.  Probe common icon
+    // sizes and themed icon directories directly, respecting XDG_DATA_HOME.
+    const QString name=QFileInfo(value).fileName();
+    const QStringList stems=(name.contains('.') &&
+        (name.endsWith(".png",Qt::CaseInsensitive) ||
+         name.endsWith(".svg",Qt::CaseInsensitive) ||
+         name.endsWith(".xpm",Qt::CaseInsensitive)))
+             ? QStringList{name.left(name.lastIndexOf('.'))}
+             : QStringList{name};
+    QStringList themes;
+    if(!QIcon::themeName().isEmpty())themes << QIcon::themeName();
+    themes << "hicolor" << "Adwaita" << "breeze" << "oxygen";
+    themes.removeDuplicates();
+    const QStringList dimensions={
+        "48x48","64x64","32x32","96x96","128x128","256x256",
+        "24x24","22x22","16x16","512x512","scalable","symbolic"};
+    for(const QString &dataRoot:dataDirectories()){
+        const QString iconsRoot= dataRoot==QDir::homePath()
+                                     ? dataRoot+"/.icons" : dataRoot+"/icons";
+        for(const QString &theme:themes){
+            for(const QString &dimension:dimensions){
+                for(const QString &stem:stems){
+                    for(const QString &ext:{"png","svg","xpm"}){
+                        const QString candidate=iconsRoot+"/"+theme+"/"+
+                                                dimension+"/apps/"+stem+"."+ext;
+                        if(!QFileInfo::exists(candidate))continue;
+                        const QIcon found(candidate);
+                        if(!found.isNull() && !found.pixmap(targetSize,targetSize).isNull())return found;
+                    }
+                }
+            }
+        }
+        for(const QString &stem:stems){
+            for(const QString &ext:{"png","svg","xpm"}){
+                const QString candidate=dataRoot+"/pixmaps/"+stem+"."+ext;
+                if(!QFileInfo::exists(candidate))continue;
+                const QIcon found(candidate);
+                if(!found.isNull() && !found.pixmap(targetSize,targetSize).isNull())return found;
+            }
+        }
+    }
+    return {};
+}
+
+} // namespace DesktopIconResolver
+
 
 // ──────────────────────────────  Paint-only scale/fade for the opening cascade.
 // The grid must keep its real geometry while revealing each tile. A graphics
@@ -103,10 +208,6 @@ struct LauncherRevealStep {
 // ──────────────────────────────  Window with built-in top/bottom fade
 class LauncherWindow : public QWidget {
     bool opening = false;
-    // Keep hold of the opening timer so a click can safely interrupt it.
-    // Otherwise dismissWithAnimation() refused to close while opening was true,
-    // leaving osm-launcher registered in Qtile after launching an application.
-    QPointer<QVariantAnimation> openingAnimation;
     // Independent alpha for the two background layers. The top/bottom edge
     // gradients appear first; the translucent fullscreen shade comes next.
     qreal gradientOpacity = 1.0;
@@ -391,10 +492,8 @@ public:
                         (elapsed - step.startMs) / step.durationMs));
             }
         });
-        openingAnimation = animation;
         connect(animation, &QVariantAnimation::finished, this,
                 [this, initialRows]() {
-            openingAnimation = nullptr;
             for (int row : initialRows) finishRowReveal(row);
             if (animationCloseButton)
                 animationCloseButton->setGraphicsEffect(nullptr);
@@ -411,27 +510,7 @@ public:
     // icon/label -> its card -> next row DOWN -> backdrop -> edge gradients.
     // The fullscreen window and grid never resize, preserving Qtile behaviour.
     void dismissWithAnimation() {
-        if (dismissing) return;
-        if (opening) {
-            // Do not silently discard a close request during the opening
-            // cascade. A fast tap on an app used to launch it but leave this
-            // window alive in Qtile's task list. Stop the opening animation,
-            // make the visible row effects fully resolved, and start the normal
-            // top-to-bottom closing cascade instead.
-            opening = false;
-            if (openingAnimation) {
-                openingAnimation->stop();
-                openingAnimation->deleteLater();
-                openingAnimation = nullptr;
-            }
-            const auto rows = visibleRows();
-            for (int row = 0; row < rows.size(); ++row)
-                if (!rows.at(row).isEmpty()) finishRowReveal(row);
-            if (animationCloseButton)
-                animationCloseButton->setGraphicsEffect(nullptr);
-            gradientOpacity = 1.0;
-            backdropOpacity = 1.0;
-        }
+        if (isTransitioning()) return;
         dismissing = true;
         // Stop any on-scroll reveal before installing the reverse-close effects.
         for (const auto &animation : scrollRevealAnimations) {
@@ -524,26 +603,6 @@ public:
         connect(animation, &QVariantAnimation::finished, this,
                 [this]() { close(); });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
-    }
-
-    // The launched application has its own process. Always retire our own
-    // X11 window and event loop after its closing cascade, even if an
-    // interrupted opening/queued animation ever prevents the normal finished
-    // callback from firing. The safeguard never truncates a normal cascade.
-    void dismissAfterApplicationLaunch() {
-        int visibleRowCount = 0;
-        const auto rows = visibleRows();
-        for (const auto &row : rows)
-            if (!row.isEmpty()) ++visibleRowCount;
-        const int closeBudgetMs = LauncherTiming::buttonMs +
-            visibleRowCount * (LauncherTiming::contentMs +
-                               LauncherTiming::cardMs + LauncherTiming::rowPauseMs) +
-            LauncherTiming::backdropMs + LauncherTiming::gradientMs + 150;
-        dismissWithAnimation();
-        QTimer::singleShot(closeBudgetMs, this, [this]() {
-            if (isVisible()) close();
-            QCoreApplication::quit();
-        });
     }
 
 protected:
@@ -939,11 +998,9 @@ public:
         }
 
         QPixmap pix;
-        QIcon ic = QIcon::fromTheme(entry.icon);
-        if (!ic.isNull())
-            pix = ic.pixmap(iconSize, iconSize);
-        if (pix.isNull() && QFileInfo(entry.icon).exists())
-            pix.load(entry.icon);
+        const QIcon icon = DesktopIconResolver::resolve(entry.icon, iconSize);
+        if (!icon.isNull())
+            pix = icon.pixmap(iconSize, iconSize);
 
         if (!pix.isNull()) {
             iconLabel->setText(QString());
@@ -1009,7 +1066,7 @@ protected:
                     }
                     if (launchDesktopCommand(command)) {
                         if (auto *launcher = dynamic_cast<LauncherWindow*>(launcherWindow.data()))
-                            launcher->dismissAfterApplicationLaunch();
+                            launcher->dismissWithAnimation();
                         else if (launcherWindow) launcherWindow->close();
                     } else {
                         qWarning() << "osm-launcher: failed to launch" << command;
@@ -1022,7 +1079,7 @@ protected:
             }
             if (launchDesktopCommand(command)) {
                 if (auto *launcher = dynamic_cast<LauncherWindow*>(window()))
-                    launcher->dismissAfterApplicationLaunch();
+                    launcher->dismissWithAnimation();
                 else if (QWidget *w = window()) w->close();
             } else {
                 qWarning() << "osm-launcher: failed to start desktop command:" << command;
@@ -1175,6 +1232,9 @@ protected:
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
     QApplication a(argc, argv);
+    // Qtile often runs without a platform icon theme. In particular,
+    // AppImageLauncher may install appimagekit_* icons under ~/.local/share.
+    DesktopIconResolver::configureThemeSearch();
     QElapsedTimer startupClock;
     startupClock.start();
     const bool profileStartup = qEnvironmentVariableIsSet("OSM_LAUNCHER_PROFILE");
@@ -1217,14 +1277,6 @@ int main(int argc, char **argv) {
 
     LauncherWindow window;        // ← WINDOW TYPE WITH BUILT-IN FADE
     window.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-    // This fullscreen launcher is an overlay, not a regular application window.
-    // Qtile's X11 TaskList displays normal windows (even when minimised), so
-    // an ordinary launcher window can leave a stale "V osm-launcher" entry when
-    // a newly launched application takes focus. Advertise the utility WM type
-    // BEFORE showFullScreen()/native window creation, so Qtile never lists it.
-    // Unlike Qt::Tool, this retains the existing fullscreen/focus window flags.
-    // Qt5 sets _NET_WM_WINDOW_TYPE_UTILITY on X11; no new libraries are needed.
-    window.setAttribute(Qt::WA_X11NetWmWindowTypeUtility, true);
     window.setAttribute(Qt::WA_TranslucentBackground, true);
     window.setAutoFillBackground(false);
     window.setStyleSheet("background:transparent;");
