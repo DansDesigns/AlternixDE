@@ -701,6 +701,9 @@ private:
                            ? QString("Default (automatic)")
                            : QString("Default (%1.*)").arg(defaultPrefix),
                        QString());
+        // Keep "None" distinct from "Default": an empty selection means
+        // automatic playback, whereas "none" explicitly disables this sound.
+        combo->addItem("None", QStringLiteral("none"));
         for (const QString &f : files)
             combo->addItem(f, f);
 
@@ -719,7 +722,10 @@ private:
             " border:1px solid #222222; border-radius:16px;"
             " font-size:26px; font-weight:bold; }"
             "QPushButton:hover { background:#4a4a4a; }"
-            "QPushButton:pressed { background:#2a2a2a; }");
+            "QPushButton:pressed { background:#2a2a2a; }"
+            "QPushButton:disabled { background:#383838; color:#777777; }");
+        play->setEnabled(combo->currentData().toString().compare(
+            QStringLiteral("none"), Qt::CaseInsensitive) != 0);
 
         row->addWidget(combo, 1);
         row->addWidget(play);
@@ -731,13 +737,19 @@ private:
         lay->addWidget(noteLbl);
 
         connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this, combo, settingsKey](int) {
-                m_settings->setValue(settingsKey, combo->currentData().toString());
+            this, [this, combo, play, settingsKey](int) {
+                const QString selected = combo->currentData().toString();
+                play->setEnabled(selected.compare(QStringLiteral("none"),
+                                                  Qt::CaseInsensitive) != 0);
+                m_settings->setValue(settingsKey, selected);
                 m_settings->sync();
             });
 
         connect(play, &QPushButton::clicked, this, [combo, subDir, defaultPrefix]() {
             QString f = combo->currentData().toString();
+            // No preview when this sound is explicitly disabled.
+            if (f.compare(QStringLiteral("none"), Qt::CaseInsensitive) == 0)
+                return;
             QString path;
             if (subDir == "ui") {
                 path = resolveUiSoundFile(f, defaultPrefix);
@@ -783,6 +795,8 @@ private:
                                       const QString &defaultPrefix)
     {
         const QDir d(soundsSubDir("ui"));
+        if (selection.compare(QStringLiteral("none"), Qt::CaseInsensitive) == 0)
+            return QString();
         if (!selection.isEmpty()) {
             if (selection == "." || selection == ".." ||
                 QFileInfo(selection).fileName() != selection)
