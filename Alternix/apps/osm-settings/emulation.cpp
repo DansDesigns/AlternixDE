@@ -91,15 +91,14 @@ static const char *WAYDROID_SESSION_CHECK =
     "&& echo running || echo stopped";
 
 // -----------------------------------------------------
-// Root privileges for the setup actions.
-// NOPASSWD fast path first, osm-sudo askpass fallback — same pattern as
-// wifi.cpp and startWaydroid(). Prepend this to any script that needs root and
-// prefix the privileged commands with $SUDOX. Deliberately NOT nested inside a
-// second `sh -c` so scripts can use quotes normally.
+// Root privileges for setup actions. Alternix must authorize privileged
+// commands through osm-sudo's pattern/PIN flow, not passwordless sudo.
+// This shell preamble is shared by Wine and Waydroid installation actions.
 // -----------------------------------------------------
 static const char *SUDO_PREAMBLE =
-    "if sudo -n true 2>/dev/null; then SUDOX=\"sudo -n\"; "
-    "else export SUDO_ASKPASS=$(command -v osm-sudo); SUDOX=\"sudo -A\"; fi\n";
+    "if [ \"$(id -u)\" -eq 0 ]; then SUDOX=\"\"; "
+    "elif command -v osm-sudo >/dev/null 2>&1; then SUDOX=\"osm-sudo\"; "
+    "else echo 'ERROR: osm-sudo is not available.' >&2; exit 1; fi\n";
 
 // -----------------------------------------------------
 // Config — ~/.config/Alternix/osm-settings.conf (QSettings INI)
@@ -107,6 +106,18 @@ static const char *SUDO_PREAMBLE =
 //   Emulation/ProtonBuild   = directory name of the selected Proton build
 //   Emulation/WaydroidImage = VANILLA | GAPPS
 // -----------------------------------------------------
+// Open the desktop that owns an emulation environment after an explicit
+// launch from Settings. No group changes are needed during auto-start.
+static void showEmulationDesktop(const QString &group)
+{
+    const QString qtileCmd = QStandardPaths::findExecutable("qtile");
+    if (!qtileCmd.isEmpty()) {
+        QProcess::startDetached(qtileCmd,
+            QStringList() << "cmd-obj" << "-o" << "group" << group
+                          << "-f" << "toscreen");
+    }
+}
+
 static QSettings* cfg()
 {
     static QSettings s(QDir::homePath() + "/.config/Alternix/osm-settings.conf",
@@ -902,6 +913,7 @@ QString EmulationPage::buildWaydroidInfoHtml()
     const QString bstate = binderState();
     QString binder = (bstate == "binderfs") ? QString("binderfs")
                    : (bstate == "legacy")   ? QString("binder, hwbinder, vndbinder")
+                   : (bstate == "anbox")    ? QString("anbox-binder, anbox-hwbinder, anbox-vndbinder")
                                             : QString("missing");
 
     const bool nested = qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY");
@@ -1113,9 +1125,10 @@ void EmulationPage::startWaydroid()
         return;
     }
     QString output;
-    // QProcess does not interpret shell arguments; script paths may contain spaces.
-    const QString cmd = QString("\"%1\" --start").arg(helper);
-    const bool ok = runTask(m_wayStatus, "Starting Waydroid", cmd, output, 130000);
+    // --show requests the Android UI even if a previous session was already
+    // running. Qtile's desktop-2 activation uses idempotent --start instead.
+    const QString cmd = QString("\"%1\" --show").arg(helper);
+    const bool ok = runTask(m_wayStatus, "Starting Waydroid", cmd, output, 240000);
     if (!ok) {
         // Include the real helper log (Waydroid/Weston/DBus/sudo failures).
         const QString logPath = QDir::homePath() + "/.cache/Alternix/waydroid-session.log";
@@ -1125,6 +1138,7 @@ void EmulationPage::startWaydroid()
                 QString::fromLocal8Bit(log.readAll()).right(3000);
     }
     reportTask(m_wayStatus, "Start Waydroid", ok, output);
+    if (ok) showEmulationDesktop("2");
     refreshWaydroid();
     refreshWaydroidPage();
 }
@@ -1365,7 +1379,8 @@ void EmulationPage::configureRunner()
             "\"%2/proton\" run winecfg >/dev/null 2>&1\n"
         ).arg(protonPrefix(), protonDir);
 
-        QProcess::startDetached("/bin/sh", QStringList() << "-c" << cmd);
+        if (QProcess::startDetached("/bin/sh", QStringList() << "-c" << cmd))
+            showEmulationDesktop("3");
         return;
     }
 
@@ -1379,7 +1394,8 @@ void EmulationPage::configureRunner()
         return;
     }
 
-    QProcess::startDetached("/bin/sh", QStringList() << "-c" << "winecfg >/dev/null 2>&1");
+    if (QProcess::startDetached("/bin/sh", QStringList() << "-c" << "winecfg >/dev/null 2>&1"))
+        showEmulationDesktop("3");
 }
 
 // -----------------------------------------------------

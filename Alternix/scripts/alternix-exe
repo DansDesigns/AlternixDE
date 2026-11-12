@@ -2,8 +2,9 @@
 # alternix-exe — run a Windows program with the runner chosen in
 # Settings > Emulation (Emulation/Runner = wine | proton).
 #
-#   alternix-exe                    open Wine's file manager (browse C:)
-#   alternix-exe /path/to/app.exe   run that program
+#   alternix-exe / --desktop         open the dedicated Windows desktop (group 3)
+#   alternix-exe /path/to/app.exe    run that program inside the Windows desktop
+#   alternix-exe /path/app.exe args  pass arguments to that program
 #
 # Reads ~/.config/Alternix/osm-settings.conf, the same QSettings INI that
 # emulation.cpp writes.
@@ -60,9 +61,33 @@ RUNNER=$(_cfg Runner)
 # Unsupported settings saved by older versions automatically fall back to Wine.
 [ "$RUNNER" = "proton" ] || RUNNER="wine"
 
+# Qtile passes the usable group-3 dimensions; standalone invocations can use
+# ALTERNIX_DESKTOP_SIZE=WIDTHxHEIGHT. Keep both Wine and Proton on the SAME
+# named Wine virtual desktop rather than scattering windows across Linux.
+SIZE="${ALTERNIX_DESKTOP_SIZE:-1280x720}"
+case "$SIZE" in
+    *x*) WIDTH=${SIZE%x*}; HEIGHT=${SIZE#*x} ;;
+    *) WIDTH=1280; HEIGHT=720 ;;
+esac
+case "$WIDTH:$HEIGHT" in
+    *[!0-9:]*|:*|*:) WIDTH=1280; HEIGHT=720 ;;
+esac
+[ "$WIDTH" -ge 640 ] 2>/dev/null || WIDTH=1280
+[ "$HEIGHT" -ge 480 ] 2>/dev/null || HEIGHT=720
+VDESKTOP="/desktop=Alternix-Windows,${WIDTH}x${HEIGHT}"
+
+# --desktop can be used by Qtile for its automatic group-3 startup. A plain
+# invocation does exactly the same thing for compatibility with old shortcuts.
+if [ "${1:-}" = '--desktop' ]; then
+    shift
+fi
 TARGET="${1:-}"
-if [ -n "$TARGET" ] && [ ! -f "$TARGET" ]; then
-    _err "Not found: $TARGET"
+if [ -n "$TARGET" ]; then
+    [ -f "$TARGET" ] || _err "Not found: $TARGET"
+    shift
+    TARGET_DIR=$(dirname "$TARGET")
+    TARGET_NAME=$(basename "$TARGET")
+    cd "$TARGET_DIR" 2>/dev/null || _err "Cannot access: $TARGET_DIR"
 fi
 
 if [ "$RUNNER" = "proton" ]; then
@@ -77,18 +102,17 @@ if [ "$RUNNER" = "proton" ]; then
     mkdir -p "$STEAM_COMPAT_DATA_PATH" "$STEAM_COMPAT_CLIENT_INSTALL_PATH" 2>/dev/null || true
 
     if [ -n "$TARGET" ]; then
-        exec "$PDIR/proton" run "$TARGET" >>"$LOG" 2>&1
+        exec "$PDIR/proton" run explorer.exe "$VDESKTOP" "$TARGET_NAME" "$@" >>"$LOG" 2>&1
     fi
-    exec "$PDIR/proton" run explorer.exe >>"$LOG" 2>&1
+    exec "$PDIR/proton" run explorer.exe "$VDESKTOP" >>"$LOG" 2>&1
 fi
 
 command -v wine >/dev/null 2>&1 || \
     _err "Wine is not installed. Use Settings > Emulation > Install / setup."
 
 if [ -n "$TARGET" ]; then
-    cd "$(dirname "$TARGET")" 2>/dev/null || true
-    exec wine "$(basename "$TARGET")" >>"$LOG" 2>&1
+    exec wine explorer "$VDESKTOP" "$TARGET_NAME" "$@" >>"$LOG" 2>&1
 fi
 
-# No argument: Wine's own file manager, so there is something to click.
-exec wine explorer >>"$LOG" 2>&1
+# No argument: a persistent Windows-style desktop, not a native Windows OS.
+exec wine explorer "$VDESKTOP" >>"$LOG" 2>&1

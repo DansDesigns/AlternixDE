@@ -275,27 +275,114 @@ def _scrollbar():
     update_time()
 
 #############################
-## Lazy group activation   ##
+## Three Alternix desktops ##
 #############################
 
-_grp_started = {"2": False, "3": False}
-_prev_group = {"name": None}
+# 1 = native Linux desktop, 2 = Waydroid in nested Weston, 3 = Wine/Proton.
+# Do not freeze Waydroid when leaving group 2. The previous implementation
+# froze it on every exit but only attempted to resume it on the FIRST visit.
+# Keeping the container alive also avoids privileged prompts on navigation.
+_group_launches = {"2": None, "3": None}
+
+
+def _desktop_size():
+    """Usable output dimensions excluding Qtile's top and bottom bars."""
+    screen = qtile.current_screen
+    width = max(640, int(screen.width))
+    reserved = sum(
+        int(edge.size) for edge in (screen.top, screen.bottom)
+        if edge is not None
+    )
+    height = max(480, int(screen.height) - reserved)
+    return f"{width}x{height}"
+
+
+def _start_group_desktop():
+    name = getattr(qtile.current_group, "name", "")
+    if name not in _group_launches:
+        return
+    previous = _group_launches[name]
+    if previous is not None and previous.poll() is None:
+        return  # this activation is still being handled
+    env = os.environ.copy()
+    env["ALTERNIX_DESKTOP_SIZE"] = _desktop_size()
+    try:
+        if name == "2":
+            # Idempotent: the helper will reuse a running Weston and Android
+            # session or recover them if either one has stopped.
+            cmd = ["/usr/local/bin/alternix-waydroid-session", "--start"]
+        else:
+            # If Windows apps are already on desktop 3, do not cover them with
+            # a second virtual desktop. Empty desktop 3 opens the Wine shell.
+            if qtile.groups_map["3"].windows:
+                return
+            cmd = ["/usr/local/bin/alternix-exe", "--desktop"]
+        _group_launches[name] = subprocess.Popen(
+            cmd, env=env, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"Alternix desktop {name}: {exc}")
+
 
 @hook.subscribe.setgroup
 def _activate_group():
-    name = qtile.current_group.name
-    prev = _prev_group["name"]
-    _prev_group["name"] = name
+    _start_group_desktop()
 
-    if prev == "2" and name != "2" and _grp_started["2"]:
-        subprocess.Popen(["/usr/local/bin/alternix-waydroid-session", "--freeze"])
 
-    if name in _grp_started and not _grp_started[name]:
-        _grp_started[name] = True
-        if name == "2":
-            subprocess.Popen(["/usr/local/bin/alternix-waydroid-session"])
-        else:
-            subprocess.Popen(["/usr/local/bin/alternix-exe"])
+@hook.subscribe.startup_complete
+def _activate_initial_group():
+    # Also handle a saved Qtile session which boots directly into 2 or 3.
+    _start_group_desktop()
+
+
+def _wm_classes(client):
+    try:
+        return tuple(str(c).lower() for c in (client.get_wm_class() or ()))
+    except (AttributeError, TypeError, ValueError):
+        return ()
+
+
+def _is_android_window(client):
+    # Weston is the single X11 surface containing the Waydroid GUI.
+    return any(c.startswith("weston") for c in _wm_classes(client))
+
+
+def _is_windows_window(client):
+    classes = _wm_classes(client)
+    if any(c.endswith(".exe") or c.startswith("wine") or
+           c == "alternix-windows" for c in classes):
+        return True
+    if "alternix-windows" in str(getattr(client, "name", "")).lower():
+        return True
+    # Wine/Proton programs have many different WM_CLASS strings. Check the
+    # real Linux process as a fallback instead of pinning just explorer.exe.
+    try:
+        pid = int(client.get_pid())
+        if pid <= 0:
+            return False
+        proc_exe = os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
+            comm = f.read().strip().lower()
+        return (proc_exe.startswith(("wine", "proton")) or
+                comm.endswith(".exe"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+@hook.subscribe.client_new
+def _pin_desktop_windows(client):
+    """Classify new application surfaces before Qtile places them."""
+    try:
+        wm_type = client.get_wm_type()
+    except (AttributeError, TypeError):
+        wm_type = None
+    if wm_type in {"desktop", "dock", "notification", "splash", "tooltip",
+                   "menu", "dropdown_menu", "popup_menu"}:
+        return
+    target = ("2" if _is_android_window(client) else
+              "3" if _is_windows_window(client) else "1")
+    client.togroup(target, switch_group=False)
 
 
 ###################
@@ -400,11 +487,12 @@ for vt in range(1, 8):
     )
 
 groups = [
-    Group("1"),
-    Group("2", layout="max", matches=[Match(wm_class=re.compile(r"^weston"))]),
-    Group("3", layout="max", matches=[
-        Match(wm_class="Wine"),
-        Match(wm_class="explorer.exe"),
+    Group("1", label="Linux"),
+    Group("2", label="Android", layout="max", matches=[
+        Match(func=_is_android_window),
+    ]),
+    Group("3", label="Windows", layout="max", matches=[
+        Match(func=_is_windows_window),
     ]),
 ]
 
@@ -601,9 +689,9 @@ auto_fullscreen = True
 focus_on_window_activation = "smart"
 reconfigure_screens = True
 
-# If things like steam games want to auto-minimize themselves when losing
-# focus, should we respect this or not?
-auto_minimize = True
+# Keep desktop-2 Android and desktop-3 Wine/Proton visible after returning
+# from another group, even if they set minimize-on-focus-loss hints.
+auto_minimize = False
 
 # When using the Wayland backend, this can be used to configure input devices.
 wl_input_rules = None

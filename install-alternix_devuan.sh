@@ -823,6 +823,7 @@ flatpak install -y flathub org.kde.kweather
 flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
+flatpak install -y flathub io.github.leolost2605.emergency-alerts
 
 # Optional Flatpaks are deliberately excluded from the ISO prebuilt preview.
 # Only ask during an interactive installation, never in live-build's chroot.
@@ -892,7 +893,6 @@ fi
 if alt_wants_optional_flatpaks "Extras" "${ALTERNIX_INSTALL_EXTRAS:-}"; then
     flatpak install -y flathub page.codeberg.lo_vely.Nucleus
     flatpak install -y flathub space.gaiasky.GaiaSky
-    flatpak install -y flathub io.github.leolost2605.emergency-alerts
     flatpak install -y flathub no.bragefuglseth.Keypunch
     flatpak install -y flathub de.haeckerfelix.Shortwave
 fi

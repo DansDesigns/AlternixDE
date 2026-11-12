@@ -1,10 +1,9 @@
 #!/bin/sh
-# alternix-waydroid-session — SysVinit-compatible Waydroid lifecycle.
-# Shared by Qtile and Settings > Emulation. No systemctl/systemd dependency.
-#   (no arguments) / --start  start or thaw the container and show Android
-#   --freeze                 freeze container when possible (no login prompt)
-#   --stop                   stop BOTH the session and the container
-# All failures are logged and returned with nonzero exit status.
+# alternix-waydroid-session — persistent Android desktop on Devuan / Qtile X11.
+# --start (default): start/reuse Waydroid, Weston and the Android UI
+# --show:             start/reuse and explicitly ask Android to show its UI
+# --stop:             stop Android and this helper's nested Weston
+# Root actions use osm-sudo (Alternix pattern/PIN), never passwordless sudo.
 
 set -u
 
@@ -12,108 +11,144 @@ LOG="$HOME/.cache/Alternix/waydroid-session.log"
 WLOG="$HOME/.cache/Alternix/weston.log"
 mkdir -p "$(dirname "$LOG")" || exit 1
 
-_log() {
-    printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"
-}
-_fail() {
-    _log "ERROR: $*"
-    printf '%s\n' "Waydroid: $*" >&2
-    return 1
-}
-
-# Waydroid's CLI status reflects the actual container/session, unlike pgrep,
-# which reports a startup process as successful before Android is running.
+_log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+_fail() { _log "ERROR: $*"; printf 'Waydroid: %s\n' "$*" >&2; return 1; }
 _status() { waydroid status 2>/dev/null || true; }
 _container_running() { _status | grep -Eiq '^[[:space:]]*Container:[[:space:]]*RUNNING'; }
-_session_running()   { _status | grep -Eiq '^[[:space:]]*Session:[[:space:]]*RUNNING'; }
+_session_running() { _status | grep -Eiq '^[[:space:]]*Session:[[:space:]]*RUNNING'; }
+_container_frozen() { _status | grep -Eiq '^[[:space:]]*Container:[[:space:]]*FROZEN'; }
 
-# Never use the pattern as though it were a Unix password. sudo -A requires
-# a real SUDO_ASKPASS implementation, which must be configured by Alternix.
-# If this fails, propagate the error instead of pretending it started.
 _root() {
     if [ "$(id -u)" -eq 0 ]; then
         "$@"
-    elif sudo -n true 2>/dev/null; then
-        sudo -n "$@"
-    elif [ "${NO_AUTH_PROMPT:-0}" = 1 ]; then
-        return 1
     elif command -v osm-sudo >/dev/null 2>&1; then
-        SUDO_ASKPASS=$(command -v osm-sudo) sudo -A "$@"
+        osm-sudo "$@"
     else
-        _log "No configured graphical sudo askpass; osm-sudo missing"
-        return 1
+        _fail 'osm-sudo is missing; root actions require Alternix authorization'
     fi
 }
 
-# Use the real elogind runtime directory when valid; fallback is private.
 _rt_setup() {
     RT="${XDG_RUNTIME_DIR:-}"
-    if [ -z "$RT" ] || [ ! -d "$RT" ] || [ "$(stat -c %u "$RT" 2>/dev/null || echo unknown)" != "$(id -u)" ]; then
+    if [ -z "$RT" ] || [ ! -d "$RT" ] ||
+       [ "$(stat -c %u "$RT" 2>/dev/null || echo unknown)" != "$(id -u)" ]; then
         RT="/tmp/alternix-runtime-$(id -u)"
-        if [ -e "$RT" ] && [ "$(stat -c %u "$RT" 2>/dev/null || echo unknown)" != "$(id -u)" ]; then
-            _fail "Runtime path is owned by another account: $RT" || return 1
+        if [ -e "$RT" ] &&
+           [ "$(stat -c %u "$RT" 2>/dev/null || echo unknown)" != "$(id -u)" ]; then
+            _fail "Runtime directory belongs to another user: $RT" || return 1
         fi
         (umask 077; mkdir -p "$RT") || return 1
     fi
     chmod 700 "$RT" || return 1
     export XDG_RUNTIME_DIR="$RT"
+    WSOCK="$RT/waydroid-0"
+    UI_MARKER="$RT/alternix-waydroid-ui-ready"
 }
 
-# Make sure the session bus is inherited. On an X11 session started without
-# dbus-launch, establish a bus for this launcher instead of failing silently.
+# Serialize the Qtile autostart, Settings Start, and Stop actions. In particular
+# do not launch two Westons or two user sessions during the first Android boot.
+_lock() {
+    command -v flock >/dev/null 2>&1 || {
+        _fail 'flock (util-linux) is missing' || return 1
+    }
+    exec 9>"$RT/alternix-waydroid.lock"
+    flock -w 225 9 || { _fail 'Another Waydroid action is still running' || return 1; }
+}
+
+# Qtile should normally export DBUS_SESSION_BUS_ADDRESS. If it did not, use a
+# persistent, private bus (not a fresh dbus-launch for each workspace visit).
 _dbus_setup() {
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$RT/bus" ]; then
-        DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus"
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        if [ -S "$RT/bus" ]; then
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus"
+        else
+            local_bus="$RT/alternix-waydroid-bus"
+            if [ ! -S "$local_bus" ]; then
+                command -v dbus-daemon >/dev/null 2>&1 || {
+                    _fail 'D-Bus daemon is missing. Install dbus and dbus-x11.' || return 1
+                }
+                if ! dbus-daemon --session --address="unix:path=$local_bus" \
+                    --fork --print-address=1 >>"$LOG" 2>&1; then
+                    _fail 'Could not start the persistent user D-Bus session' || return 1
+                fi
+            fi
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$local_bus"
+        fi
         export DBUS_SESSION_BUS_ADDRESS
     fi
-    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-        if ! command -v dbus-launch >/dev/null 2>&1; then
-            _fail "No user D-Bus session. Install dbus-x11 / launch Qtile with dbus-run-session." || return 1
-        fi
-        # dbus-launch output contains only the standard address / PID exports.
-        eval "$(dbus-launch --sh-syntax)" || return 1
-        _log "Started private D-Bus session for Waydroid launcher"
-    fi
     if command -v dbus-send >/dev/null 2>&1; then
-        if ! dbus-send --system --print-reply --dest=org.freedesktop.DBus \
-            / org.freedesktop.DBus.ListNames >/dev/null 2>&1; then
-            _fail "System D-Bus is unavailable. Enable the dbus service under SysVinit." || return 1
-        fi
+        dbus-send --session --print-reply --dest=org.freedesktop.DBus \
+            / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || {
+            _fail 'User D-Bus session is not responding' || return 1
+        }
+        dbus-send --system --print-reply --dest=org.freedesktop.DBus \
+            / org.freedesktop.DBus.ListNames >/dev/null 2>&1 || {
+            _fail 'System D-Bus is not responding (enable the SysV dbus service)' || return 1
+        }
     fi
 }
 
-# Weston should create a private Wayland socket inside X11/Qtile. In a native
-# Wayland session it is not needed.
+_weston_alive() {
+    [ -S "$WSOCK" ] &&
+        pgrep -u "$(id -u)" -f '[w]eston.*--socket=waydroid-0' >/dev/null 2>&1
+}
+
+# Qtile/X11 needs a nested Wayland compositor. Kiosk shell makes Android occupy
+# its output rather than revealing Weston's demo desktop and panel.
 _wayland_setup() {
-    WL="${WAYLAND_DISPLAY:-}"
-    if [ -n "$WL" ]; then
+    NESTED=0
+    RESTART_SESSION=0
+    # The X11 Qtile desktop must use *its own* Weston, even if an unrelated
+    # WAYLAND_DISPLAY variable was inherited from a different session.
+    if [ -z "${DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-x11}" = 'wayland' ]; then
+        WL="${WAYLAND_DISPLAY:-}"
+        [ -n "$WL" ] || { _fail 'No Wayland or X11 display is available'; return 1; }
         case "$WL" in
-            /*) [ -S "$WL" ] || { _fail "Wayland socket is missing: $WL"; return 1; } ;;
-            *)  [ -S "$RT/$WL" ] || { _fail "Wayland socket is missing: $RT/$WL"; return 1; } ;;
+            /*) [ -S "$WL" ] || { _fail "Missing Wayland socket: $WL"; return 1; } ;;
+            *)  [ -S "$RT/$WL" ] || { _fail "Missing Wayland socket: $RT/$WL"; return 1; } ;;
         esac
         return 0
     fi
 
-    [ -n "${DISPLAY:-}" ] || { _fail "No X11 or Wayland display available"; return 1; }
-    command -v weston >/dev/null 2>&1 || { _fail "Weston is missing. Install Weston in Settings > Emulation"; return 1; }
-
-    WL="waydroid-0"
-    if [ ! -S "$RT/$WL" ] || ! pgrep -f '[w]eston.*--socket=waydroid-0' >/dev/null 2>&1; then
-        # Clean only the private socket that this helper manages.
-        rm -f "$RT/$WL" "$RT/$WL.lock"
-        _log "Starting nested Weston on X11 display ${DISPLAY:-}"
+    command -v weston >/dev/null 2>&1 || {
+        _fail 'Weston is missing; install it from Settings > Emulation' || return 1
+    }
+    NESTED=1
+    WL=waydroid-0
+    if ! _weston_alive; then
+        # Remove a stale private socket only if no compositor owns it.
+        rm -f "$WSOCK" "$WSOCK.lock"
+        rm -f "$UI_MARKER" "$RT/alternix-waydroid-weston-stop"
+        RESTART_SESSION=1
+        screen="${ALTERNIX_DESKTOP_SIZE:-1280x720}"
+        case "$screen" in
+            *x*) width=${screen%x*}; height=${screen#*x} ;;
+            *) width=1280; height=720 ;;
+        esac
+        case "$width:$height" in
+            *[!0-9:]*|:*|*:) width=1280; height=720 ;;
+        esac
+        [ "$width" -ge 640 ] 2>/dev/null || width=1280
+        [ "$height" -ge 480 ] 2>/dev/null || height=720
+        _log "Starting Weston X11 kiosk ($width x $height)"
         (
-            weston --socket=waydroid-0 --backend=x11 >"$WLOG" 2>&1 ||
-            weston --socket=waydroid-0 --backend=x11-backend.so >>"$WLOG" 2>&1
-        ) &
+            weston --backend=x11-backend.so --shell=kiosk-shell.so \
+                --socket=waydroid-0 --width="$width" --height="$height" >"$WLOG" 2>&1
+            code=$?
+            if [ "$code" -ne 0 ] && [ ! -e "$RT/alternix-waydroid-weston-stop" ]; then
+                _log "Weston kiosk exited ($code); trying its default shell"
+                weston --backend=x11-backend.so --socket=waydroid-0 \
+                    --width="$width" --height="$height" >>"$WLOG" 2>&1
+            fi
+        ) </dev/null 9>&- &
         i=0
-        while [ "$i" -lt 40 ]; do
-            [ -S "$RT/$WL" ] && break
-            sleep 0.5
+        while [ "$i" -lt 50 ]; do
+            if _weston_alive; then break; fi
+            sleep 0.2
             i=$((i + 1))
         done
-        if [ ! -S "$RT/$WL" ]; then
-            _fail "Weston failed: see $WLOG" || return 1
+        if ! _weston_alive; then
+            _fail "Weston did not open its Wayland socket. See $WLOG" || return 1
         fi
     fi
     export WAYLAND_DISPLAY="$WL"
@@ -121,13 +156,21 @@ _wayland_setup() {
 
 _start_container() {
     _container_running && return 0
-    _log "Starting Waydroid root container"
-    # Long-lived root process; do not wait for it to exit. Capture errors.
-    (_root waydroid container start >>"$LOG" 2>&1 ||
-        _log "ERROR: Waydroid container command exited. Check sudo/Waydroid logs.") &
+    _log 'Starting root Waydroid container'
+    failure="$RT/alternix-waydroid-container-failed"
+    rm -f "$failure"
+    (
+        if ! _root waydroid container start >>"$LOG" 2>&1; then
+            _log 'ERROR: Waydroid container command failed'
+            : >"$failure"
+        fi
+    ) </dev/null 9>&- &
     i=0
     while [ "$i" -lt 90 ]; do
-        _container_running && return 0
+        _container_running && { rm -f "$failure"; return 0; }
+        [ ! -e "$failure" ] || {
+            _fail "Container start failed; see $LOG" || return 1
+        }
         sleep 1
         i=$((i + 1))
     done
@@ -136,75 +179,99 @@ _start_container() {
 
 _start_session() {
     _session_running && return 0
-    _log "Starting Android user session (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)"
-    (waydroid session start >>"$LOG" 2>&1 ||
-        _log "ERROR: Waydroid session start exited unsuccessfully") &
+    _log "Starting Android user session on $WAYLAND_DISPLAY"
+    failure="$RT/alternix-waydroid-session-failed"
+    rm -f "$failure"
+    (
+        if ! waydroid session start >>"$LOG" 2>&1; then
+            _log 'ERROR: Waydroid user session exited unsuccessfully'
+            : >"$failure"
+        fi
+    ) </dev/null 9>&- &
     i=0
     while [ "$i" -lt 90 ]; do
-        _session_running && return 0
+        _session_running && { rm -f "$failure"; return 0; }
+        [ ! -e "$failure" ] || {
+            _fail "User session failed; see $LOG" || return 1
+        }
         sleep 1
         i=$((i + 1))
     done
-    _fail "Android session did not reach RUNNING. Check $LOG and Waydroid status"
+    _fail "Android session did not reach RUNNING. Check $LOG"
 }
 
-case "${1:---start}" in
-    --stop)
-        if ! command -v waydroid >/dev/null 2>&1; then exit 0; fi
-        _rt_setup || exit 1
-        _dbus_setup || exit 1
-        _log "Stopping Waydroid session and container"
-        waydroid session stop >>"$LOG" 2>&1 || true
-        if ! _root waydroid container stop >>"$LOG" 2>&1; then
-            _fail "Could not stop root container (check graphical sudo authorization)" || exit 1
+_show_ui() {
+    # Once started in the current Weston, don't create more Android full-UI
+    # clients on every desktop switch. --show explicitly requests reopening.
+    if [ "$ACTION" != '--show' ] && [ -e "$UI_MARKER" ]; then
+        return 0
+    fi
+    _log 'Opening Waydroid Android full UI'
+    waydroid show-full-ui >>"$LOG" 2>&1 </dev/null 9>&- &
+    ui_pid=$!
+    sleep 2
+    if ! kill -0 "$ui_pid" 2>/dev/null; then
+        wait "$ui_pid"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            _fail "Android UI exited with status $rc; see $LOG" || return 1
         fi
-        # Only the Weston instance belonging to this user/socket.
-        pkill -f '[w]eston.*--socket=waydroid-0' >/dev/null 2>&1 || true
-        exit 0
-        ;;
-    --freeze)
-        command -v waydroid >/dev/null 2>&1 || exit 0
-        _container_running || exit 0
-        NO_AUTH_PROMPT=1
-        export NO_AUTH_PROMPT
-        # A background workspace switch must never trigger a password prompt.
-        if ! _root waydroid container freeze >>"$LOG" 2>&1; then
-            _log "Freeze skipped (no existing root authorization or container not ready)"
-        fi
-        exit 0
-        ;;
-    --start|'') ;;
-    *) _fail "Unknown action: $1"; exit 2 ;;
-esac
+    fi
+    : >"$UI_MARKER"
+}
 
-command -v waydroid >/dev/null 2>&1 || { _fail "Waydroid is not installed"; exit 1; }
-[ -f /var/lib/waydroid/waydroid.cfg ] || { _fail "Android system is not initialised"; exit 1; }
+ACTION="${1:---start}"
+case "$ACTION" in --start|--show|--stop|'') ;; *) _fail "Unknown action: $ACTION"; exit 2 ;; esac
 
-# Do NOT reject startup merely because binder nodes do not exist yet.
-# Waydroid's own privileged container manager probes binder_linux, mounts
-# binderfs and allocates anbox binder nodes as it starts. A preflight check
-# here would incorrectly prevent exactly that setup.
-if [ ! -e /dev/binderfs/binder-control ] && \
-   ! { [ -e /dev/binder ] && [ -e /dev/hwbinder ] && [ -e /dev/vndbinder ]; } && \
-   ! { [ -e /dev/anbox-binder ] && [ -e /dev/anbox-hwbinder ] && [ -e /dev/anbox-vndbinder ]; }; then
-    _log "Binder nodes absent before launch; letting Waydroid probe/create them"
-fi
+command -v waydroid >/dev/null 2>&1 || {
+    if [ "$ACTION" = '--stop' ]; then exit 0; fi
+    _fail 'Waydroid is not installed' || exit 1
+}
 
 _rt_setup || exit 1
+_lock || exit 1
 _dbus_setup || exit 1
+
+if [ "$ACTION" = '--stop' ]; then
+    _log 'Stopping Waydroid and nested Weston'
+    waydroid session stop >>"$LOG" 2>&1 || true
+    if _container_running || _container_frozen; then
+        _root waydroid container stop >>"$LOG" 2>&1 || {
+            _fail 'Could not stop the root container' || exit 1
+        }
+    fi
+    # Do not trigger the Weston fallback when intentionally shutting down.
+    : >"$RT/alternix-waydroid-weston-stop"
+    # Only this user's compositor on our private socket is stopped.
+    pkill -u "$(id -u)" -f '[w]eston.*--socket=waydroid-0' >/dev/null 2>&1 || true
+    rm -f "$UI_MARKER"
+    if ! _weston_alive; then rm -f "$WSOCK" "$WSOCK.lock"; fi
+    exit 0
+fi
+
+[ -f /var/lib/waydroid/waydroid.cfg ] || {
+    _fail 'Android system is not initialized; download it in Settings > Emulation' || exit 1
+}
+
 _wayland_setup || exit 1
 
-# When Qtile auto-freezes Android, unfreeze without mistakenly treating a
-# frozen container as a stopped one.
-if _status | grep -Eiq '^[[:space:]]*Container:[[:space:]]*FROZEN'; then
-    _log "Resuming frozen Waydroid container"
-    if ! _root waydroid container unfreeze >>"$LOG" 2>&1; then
-        _fail "Could not unfreeze container (root authorization required)" || exit 1
-    fi
+if _container_frozen; then
+    _log 'Unfreezing Android left suspended by an older Qtile configuration'
+    _root waydroid container unfreeze >>"$LOG" 2>&1 || {
+        _fail 'Could not unfreeze Waydroid' || exit 1
+    }
 fi
-_start_container || exit 1
-_start_session || exit 1
 
-_log "Android session ready, opening Android UI"
-waydroid show-full-ui >>"$LOG" 2>&1 &
+_start_container || exit 1
+if [ "${RESTART_SESSION:-0}" -eq 1 ] && _session_running; then
+    # A recreated Weston owns a NEW socket. The old Android user session may
+    # still say RUNNING but be attached to the dead compositor.
+    _log 'Rebinding the Android user session to the recreated Weston'
+    waydroid session stop >>"$LOG" 2>&1 || {
+        _fail 'Could not stop the stale Android user session' || exit 1
+    }
+fi
+_start_session || exit 1
+_show_ui || exit 1
+_log 'Android desktop ready'
 exit 0
