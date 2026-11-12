@@ -64,12 +64,16 @@ if [ ! -s "$ALT_AUDIO_SOURCE" ] || ! bash -n "$ALT_AUDIO_SOURCE"; then
     exit 1
 fi
 
-# Alternix VLC is repository content: require it before any long installation starts.
-# Only native Kvantum styling is supported; the fixed-size .vlt skin is retired.
+# Alternix VLC: require the FULL native Qt interface theme before the install.
+# No .vlt files or separate patch/repair commands are used.
 ALT_VLC_THEME_SRC="$ALT_ROOT/Alternix/themes/vlc"
 for vlc_asset in \
     "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
-    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig"; do
+    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
+    "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
+    "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.json" \
+    "$ALT_VLC_THEME_SRC/icons/play_up.png" \
+    "$ALT_VLC_THEME_SRC/icons/pause_up.png"; do
     if [ ! -s "$vlc_asset" ]; then
         echo "ERROR: Required Alternix VLC theme asset not found: $vlc_asset" >&2
         echo "Commit Alternix/themes/vlc from the supplied repository assets first." >&2
@@ -210,26 +214,65 @@ if [ -z "$ALT_VLC_HOME" ] || [ "$ALT_VLC_HOME" = /root ] || [ ! -d "$ALT_VLC_HOM
     exit 1
 fi
 # ────────────────────────────────────────────────
-# Alternix VLC — standard VLC Qt UI, Qtile-managed native window.
-# Never use the Skins2 .vlt interface for this installation: it produces a
-# fixed-size window with WM size hints, which Qtile handles as floating.
+# Alternix VLC — compiled Qt5 theme + responsive player layout INSIDE VLC.
+# VLC itself is still the standard Qt QMainWindow; Qtile owns tile geometry.
+# Build this shipped, complete source directly here (no patch files/scripts).
 # ────────────────────────────────────────────────
-echo "[VLC] Installing AlternixVLC Kvantum styling (native Qt interface)..."
+echo "[VLC] Building and activating Alternix native Qt player theme..."
+sudo apt-get install -y qtbase5-dev qtbase5-dev-tools vlc vlc-plugin-qt qt5-style-kvantum
+
 sudo install -d -m 0755 /usr/share/Kvantum/AlternixVLC
 sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
     /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg
 sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
     /usr/share/Kvantum/AlternixVLC/AlternixVLC.kvconfig
 
-# Retain the optional native QStyle sources (do not activate them alongside
-# Kvantum); they are not the old VLC .vlt skin.
-sudo install -d -m 0755 /usr/share/alternix/vlc/qt5-style
-for vlc_style_source in alternixvlcstyle.cpp alternixvlcstyle.json CMakeLists.txt; do
-    if [ -f "$ALT_VLC_THEME_SRC/qt5-style/$vlc_style_source" ]; then
-        sudo install -m 0644 "$ALT_VLC_THEME_SRC/qt5-style/$vlc_style_source" \
-            "/usr/share/alternix/vlc/qt5-style/$vlc_style_source"
-    fi
+sudo install -d -m 0755 /usr/share/alternix/vlc/icons /usr/share/alternix/vlc/qt5-style
+for vlc_icon in "$ALT_VLC_THEME_SRC"/icons/*.png; do
+    [ -f "$vlc_icon" ] || { echo "ERROR: Alternix VLC icon set is missing." >&2; exit 1; }
+    sudo install -m 0644 "$vlc_icon" /usr/share/alternix/vlc/icons/
 done
+for vlc_style_source in alternixvlcstyle.cpp alternixvlcstyle.json; do
+    sudo install -m 0644 "$ALT_VLC_THEME_SRC/qt5-style/$vlc_style_source" \
+        "/usr/share/alternix/vlc/qt5-style/$vlc_style_source"
+done
+
+ALT_VLC_MOC="$(command -v moc || true)"
+[ -n "$ALT_VLC_MOC" ] || ALT_VLC_MOC=/usr/lib/qt5/bin/moc
+if [ ! -x "$ALT_VLC_MOC" ] || ! command -v qmake >/dev/null 2>&1 || \
+   ! pkg-config --exists Qt5Widgets Qt5Gui Qt5Core; then
+    echo "ERROR: VLC Qt5 theme build tools are unavailable." >&2
+    exit 1
+fi
+ALT_VLC_QT_VERSION="$(qmake -query QT_VERSION 2>/dev/null)"
+case "$ALT_VLC_QT_VERSION" in
+    5.*) ;;
+    *) echo "ERROR: Expected Qt5 qmake, found Qt version: $ALT_VLC_QT_VERSION" >&2; exit 1 ;;
+esac
+ALT_VLC_PLUGIN_ROOT="$(qmake -query QT_INSTALL_PLUGINS 2>/dev/null)"
+if [ -z "$ALT_VLC_PLUGIN_ROOT" ] || [ "$ALT_VLC_PLUGIN_ROOT" = / ]; then
+    echo "ERROR: Cannot determine the Qt5 style plugin directory." >&2
+    exit 1
+fi
+ALT_VLC_BUILD_DIR="$(mktemp -d /tmp/alternix-vlc-native.XXXXXXXX)"
+if ! "$ALT_VLC_MOC" "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
+        -o "$ALT_VLC_BUILD_DIR/alternixvlcstyle.moc" || \
+   ! g++ -std=c++17 -O2 -fPIC -shared \
+        -I "$ALT_VLC_BUILD_DIR" \
+        "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
+        -o "$ALT_VLC_BUILD_DIR/libalternixvlcstyle.so" \
+        $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
+    echo "ERROR: Alternix native VLC Qt theme failed to compile. The previous plugin remains untouched." >&2
+    rm -rf -- "$ALT_VLC_BUILD_DIR"
+    exit 1
+fi
+sudo install -D -m 0644 "$ALT_VLC_BUILD_DIR/libalternixvlcstyle.so" \
+    "$ALT_VLC_PLUGIN_ROOT/styles/libalternixvlcstyle.so"
+rm -rf -- "$ALT_VLC_BUILD_DIR"
+if [ ! -s "$ALT_VLC_PLUGIN_ROOT/styles/libalternixvlcstyle.so" ]; then
+    echo "ERROR: Native Qt theme plugin installation failed." >&2
+    exit 1
+fi
 
 # The preceding integration installed this exact fixed-size legacy skin.
 # It must not remain enabled as a seemingly valid Alternix player option.
@@ -370,7 +413,12 @@ for target, owner in ((home, (account.pw_uid, account.pw_gid)), (Path(sys.argv[3
         'embedded-video': '1',
         'qt-minimal-view': '0',
     }, owner)
-    modify_ini(target / '.config/vlc/vlc-qt-interface.conf', 'MainWindow', {'QtStyle': 'kvantum'}, owner)
+    modify_ini(target / '.config/vlc/vlc-qt-interface.conf', 'MainWindow', {
+        'QtStyle': 'AlternixVLC',
+        'MainToolbar1': '65;2;10;9;19;20;7;36;65',
+        'MainToolbar2': '65;1;22;0;23;12;65',
+        'ToolbarPos': 'false',
+    }, owner)
     remove_prior_duplicate_launcher(target / '.local/share/applications/vlc.desktop')
 
 
@@ -395,12 +443,19 @@ if launcher.is_file() and not launcher.is_symlink():
             continue
         command = re.sub(r'(?<!\S)--intf(?:=|\s+)skins2(?=\s|$)', '', command)
         command = re.sub(r'(?<!\S)--skins2-last(?:=\S+|\s+\S+)', '', command)
+        command = re.sub(r'(?<!\S)QT_STYLE_OVERRIDE=\S+\s*', '', command).strip()
+        match = re.search(r'(?<!\S)(?:/[^\s]*)?\bvlc(?=\s|$)', command)
         # The natural user-native interface is enforced for THIS launcher,
         # not the global /usr/bin/vlc binary or unrelated applications.
         if not re.search(r'(?<!\S)--intf(?:=|\s+)qt(?=\s|$)', command):
             command = command[:match.end()] + ' --intf=qt' + command[match.end():]
         if '--no-qt-video-autoresize' not in command:
             command = command.replace('--intf=qt', '--intf=qt --no-qt-video-autoresize', 1)
+        # No extra desktop entry: this style override is specific to VLC only.
+        if command.startswith('env '):
+            command = 'env QT_STYLE_OVERRIDE=AlternixVLC ' + command[4:]
+        else:
+            command = 'env QT_STYLE_OVERRIDE=AlternixVLC ' + command
         output.append('Exec=' + command + '\n')
         changed_exec += 1
     if changed_exec:
@@ -419,7 +474,7 @@ if launcher.is_file() and not launcher.is_symlink():
 else:
     print('[VLC] WARNING: distro VLC launcher not present: /usr/share/applications/vlc.desktop')
 
-print('[VLC] Native Qt selected; Qtile controls window size, Kvantum styles widgets.')
+print('[VLC] Alternix Qt player layout and theme selected; standard VLC window remains under Qtile.')
 ALT_VLC_CONFIGURATION
 if command -v update-desktop-database >/dev/null 2>&1; then
     sudo update-desktop-database /usr/share/applications 2>/dev/null || true
@@ -435,7 +490,7 @@ fi
 if pgrep -u "$ALT_VLC_USER" -x vlc >/dev/null 2>&1; then
     echo "[VLC] NOTE: VLC is running. Exit all VLC windows/tray instances before reopening it."
 fi
-echo "[VLC] Native Qt/Kvantum theme installed. No fixed-size skins2 player will be started by the standard launcher."
+echo "[VLC] Compiled Alternix Qt theme installed; VLC uses a single tiled native window."
 
 # ------------------------------------------------
 # AlternixOS clock actions: osm-sudo pattern authentication + a fixed helper.
