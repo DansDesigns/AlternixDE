@@ -820,19 +820,69 @@ flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
 
-# Flatpak Games:
-flatpak install -y flathub net.retrodeck.retrodeck
-flatpak install -y flathub net.wz2100.wz2100
-flatpak install -y flathub com.play0ad.zeroad
+# Optional Flatpaks are deliberately excluded from the ISO prebuilt preview.
+# Only ask during an interactive installation, never in live-build's chroot.
+# A non-interactive ISO installer can pass ALTERNIX_INSTALL_GAMES=yes/no and
+# ALTERNIX_INSTALL_EXTRAS=yes/no after gathering the user's choices itself.
+alt_wants_optional_flatpaks() {
+    local category="$1" preset="$2" choice=""
 
-# Flatpak other:
-flatpak install -y flathub page.codeberg.lo_vely.Nucleus
-flatpak install -y flathub io.github.rinigus.PureMaps
-flatpak install -y flathub space.gaiasky.GaiaSky
-flatpak install -y flathub io.github.leolost2605.emergency-alerts
-flatpak install -y flathub com.pojtinger.felicitas.Sessions
-flatpak install -y flathub no.bragefuglseth.Keypunch
-flatpak install -y flathub de.haeckerfelix.Shortwave
+    if [ "$ALT_IS_LIVE_BUILD" = 1 ]; then
+        echo "[Flatpak] ISO prebuild: not including optional $category."
+        return 1
+    fi
+
+    case "${preset,,}" in
+        y|yes|1|true|on)  echo "[Flatpak] $category selected."; return 0 ;;
+        n|no|0|false|off) echo "[Flatpak] $category skipped."; return 1 ;;
+        '') ;;
+        *) echo "WARNING: Unrecognized $category selection '$preset'; skipping." >&2; return 1 ;;
+    esac
+
+    # Don't stall an unattended install waiting for input. The two choices
+    # default to No if no interactive terminal is present.
+    if ! ( : </dev/tty ) 2>/dev/null; then
+        echo "[Flatpak] No interactive terminal for $category; skipping (default: No)."
+        return 1
+    fi
+
+    while true; do
+        if ! IFS= read -r -p "Install $category? [y/N]: " choice </dev/tty; then
+            echo "[Flatpak] No selection received; skipping $category."
+            return 1
+        fi
+        case "${choice,,}" in
+            y|yes) echo "[Flatpak] $category selected."; return 0 ;;
+            ''|n|no) echo "[Flatpak] $category skipped."; return 1 ;;
+            *) echo "Please enter Y or N." ;;
+        esac
+    done
+}
+
+echo ""
+echo "=============================================================="
+echo "       AlternixOS - Optional Flatpak Applications"
+echo "=============================================================="
+echo "Games:  RetroDECK, Warzone 2100, 0 A.D."
+echo "Extras: Nucleus, Gaia Sky, Emergency Alerts, Keypunch, Shortwave"
+echo "Choose each group separately (press Enter to skip)."
+echo ""
+
+# Flatpak Games:
+if alt_wants_optional_flatpaks "Games" "${ALTERNIX_INSTALL_GAMES:-}"; then
+    flatpak install -y flathub net.retrodeck.retrodeck
+    flatpak install -y flathub net.wz2100.wz2100
+    flatpak install -y flathub com.play0ad.zeroad
+fi
+
+# Flatpak extras:
+if alt_wants_optional_flatpaks "Extras" "${ALTERNIX_INSTALL_EXTRAS:-}"; then
+    flatpak install -y flathub page.codeberg.lo_vely.Nucleus
+    flatpak install -y flathub space.gaiasky.GaiaSky
+    flatpak install -y flathub io.github.leolost2605.emergency-alerts
+    flatpak install -y flathub no.bragefuglseth.Keypunch
+    flatpak install -y flathub de.haeckerfelix.Shortwave
+fi
 
 echo "[System] Installing Bauh Application Manager.."
 sudo pip3 install bauh --break-system-packages
