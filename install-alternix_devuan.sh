@@ -843,6 +843,15 @@ alt_wants_optional_flatpaks() {
         *) echo "WARNING: Unrecognized $category selection '$preset'; skipping." >&2; return 1 ;;
     esac
 
+    # The ISO graphical/TUI installer supplies a pipe as stdin and collects
+    # optional components on its own page. Never prompt on /dev/tty here:
+    # that would be an invisible, blocking second question during install.
+    # Direct desktop installs from an interactive terminal still ask.
+    if [ ! -t 0 ]; then
+        echo "[Flatpak] $category selection deferred to the ISO installer (non-interactive desktop setup)."
+        return 1
+    fi
+
     # Don't stall an unattended install waiting for input. The two choices
     # default to No if no interactive terminal is present.
     if ! ( : </dev/tty ) 2>/dev/null; then
