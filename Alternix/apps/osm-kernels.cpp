@@ -22,6 +22,8 @@
 #include <functional>
 #include <QCryptographicHash>
 #include <QUrl>
+#include <QQueue>
+#include <QTimer>
 
 namespace {
 
@@ -281,9 +283,17 @@ private:
     int m_cpuLevel = 0;
     bool m_isPi = false, m_hasGrub = false, m_sbOn = false, m_busy = false, m_mlLoaded = false;
     QMap<QString, QString> m_images;      // installed concrete image pkg -> version
-    QMap<QString, QString> m_installDates; // date of original installation when dpkg logs retain it
-    mutable QSettings m_seenDates{QSettings::IniFormat, QSettings::UserScope,
-                                   QStringLiteral("AlternixOS"), QStringLiteral("osm-kernels")};
+    // Dates are sourced from publisher changelogs or upstream release archives;
+    // never from the local installation/discovery time.
+    struct Published { QString date, provenance; };
+    QHash<QString, Published> m_published;
+    QHash<QString, QString> m_upstreamDates;
+    QSet<QString> m_changelogAttempted;
+    QSet<int> m_upstreamAttempted;
+    QQueue<QPair<QString, QString>> m_changelogQueue; // cache key, pkg=version
+    int m_changelogActive = 0;
+    QSettings m_publishSettings{QSettings::IniFormat, QSettings::UserScope,
+                                QStringLiteral("AlternixOS"), QStringLiteral("osm-kernels-published")};
     QSet<QString> m_installed;            // fully configured linux-* packages
     QSet<QString> m_present;              // also include unpacked / half-configured packages for removal
     QVector<KPkg> m_apt;
@@ -449,51 +459,291 @@ private:
             : QStringLiteral("Uninstall the selected kernel, its modules and matching headers"));
     }
 
-    // Dates in apt's Packages indexes are not per-package publication dates.
-    // Remember when a package/version was first observed instead of making up a release date.
-    QString firstSeenDate(const QString &key) const
+    // APT's Packages files have no per-binary publication timestamp. The
+    // changelog date describes that exact package release (not its install date).
+    // A kernel.org ChangeLog file timestamp is used only when package-specific
+    // metadata is unavailable; its tooltip makes that distinction explicit.
+    static QString aptPublishKey(const KPkg &k)
     {
+        // Flavor binaries often share the same source changelog/version.
+        // Keep third-party and custom repositories distinct from Debian.
+        return QStringLiteral("apt:%1:%2:%3:%4")
+            .arg(k.src).arg(k.customName,
+                k.src == SrcCustom ? k.name : QString(), k.version);
+    }
+
+    static QString installedPublishKey(const QString &pkg, const QString &version)
+    {
+        return QStringLiteral("installed:") + pkg + QLatin1Char('@') + version;
+    }
+
+    QString exactKeyForInstalled(const QString &pkg, const QString &version) const
+    {
+        for (const KPkg &k : m_apt)
+            if (k.name == pkg && k.version == version) return aptPublishKey(k);
+        return installedPublishKey(pkg, version);
+    }
+
+    static QString upstreamVersion(const QString &release)
+    {
+        static const QRegularExpression re(QStringLiteral("^v?(\\d+\\.\\d+(?:\\.\\d+)?)(?=[^0-9.]|$)"));
+        return re.match(release).captured(1);
+    }
+
+    Published cachedPublished(const QString &key) const
+    {
+        auto it = m_published.constFind(key);
+        return it == m_published.cend() ? Published{} : it.value();
+    }
+
+    Published publishedFor(const QString &key, const QString &release) const
+    {
+        const Published exact = cachedPublished(key);
+        if (!exact.date.isEmpty()) return exact;
+        QString upstream = upstreamVersion(release);
+        QString date = m_upstreamDates.value(upstream);
+        // kernel.org names initial releases 6.12, not 6.12.0.
+        if (date.isEmpty() && upstream.endsWith(QLatin1String(".0"))) {
+            upstream.chop(2);
+            date = m_upstreamDates.value(upstream);
+        }
+        if (!date.isEmpty())
+            return {date, QStringLiteral("Upstream Linux %1 release (kernel.org ChangeLog timestamp). "
+                                         "This is not the distribution package's publication date.").arg(upstream)};
+        return {QStringLiteral("—"), QStringLiteral("Publication date unavailable from publisher metadata; "
+                                                    "no installation or first-seen date is substituted.")};
+    }
+
+    Published publishedForInstalled(const QString &pkg, const QString &version, const QString &release) const
+    {
+        // Installed mainline packages are not APT source packages.
+        if (classifyRelease(release) == SrcMainline) {
+            for (const MLVer &v : m_ml)
+                if (v.release() == release && !v.archiveDate.isEmpty())
+                    return {v.archiveDate, QStringLiteral("Ubuntu mainline archive directory last-modified "
+                                                         "date (approximation of build publication date)")};
+            return {QStringLiteral("—"), QStringLiteral("Open the Mainline tab to load "
+                                                            "Ubuntu's build publication metadata")};
+        }
+        const Published local = cachedPublished(installedPublishKey(pkg, version));
+        return local.date.isEmpty() ? publishedFor(exactKeyForInstalled(pkg, version), release) : local;
+    }
+
+    void storePublished(const QString &key, const Published &p)
+    {
+        if (!QDate::fromString(p.date, Qt::ISODate).isValid()) return;
+        m_published.insert(key, p);
         const QString id = QString::fromLatin1(QCryptographicHash::hash(
             key.toUtf8(), QCryptographicHash::Sha256).toHex());
-        m_seenDates.beginGroup(QStringLiteral("first-seen"));
-        QString date = m_seenDates.value(id).toString();
-        if (!QDate::fromString(date, Qt::ISODate).isValid()) {
-            date = QDate::currentDate().toString(Qt::ISODate);
-            m_seenDates.setValue(id, date);
-        }
-        m_seenDates.endGroup();
-        return date;
+        m_publishSettings.beginGroup(QStringLiteral("verified"));
+        m_publishSettings.setValue(id + QStringLiteral("/date"), p.date);
+        m_publishSettings.setValue(id + QStringLiteral("/source"), p.provenance);
+        m_publishSettings.endGroup();
     }
 
-    // dpkg logs retain actual install dates while their rotation history is available.
-    // APT does not expose the original install timestamp via dpkg-query.
-    void loadInstallDates()
+    bool loadPublishedCache(const QString &key)
     {
-        m_installDates.clear();
-        static const QRegularExpression installRe(QStringLiteral(
-            "^(\\d{4}-\\d{2}-\\d{2}) \\d{2}:\\d{2}:\\d{2} install "
-            "(linux-image-(?:unsigned-)?[^ :]+)(?::[^ ]+)? "));
-        for (const QString &path : {QStringLiteral("/var/log/dpkg.log.1"),
-                                    QStringLiteral("/var/log/dpkg.log")}) {
-            QFile f(path);
-            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
-            while (!f.atEnd()) {
-                const QString line = QString::fromUtf8(f.readLine());
-                const auto m = installRe.match(line);
-                if (!m.hasMatch()) continue;
-                const QString name = m.captured(2), date = m.captured(1);
-                if (!QDate::fromString(date, Qt::ISODate).isValid()) continue;
-                if (!m_installDates.contains(name) || date < m_installDates.value(name))
-                    m_installDates.insert(name, date);
+        if (m_published.contains(key)) return true;
+        const QString id = QString::fromLatin1(QCryptographicHash::hash(
+            key.toUtf8(), QCryptographicHash::Sha256).toHex());
+        m_publishSettings.beginGroup(QStringLiteral("verified"));
+        const QString date = m_publishSettings.value(id + QStringLiteral("/date")).toString();
+        const QString source = m_publishSettings.value(id + QStringLiteral("/source")).toString();
+        m_publishSettings.endGroup();
+        if (!QDate::fromString(date, Qt::ISODate).isValid() || source.isEmpty()) return false;
+        m_published.insert(key, {date, source});
+        return true;
+    }
+
+    // Debian changelogs use an RFC-2822 date in each signed-off version entry.
+    // Prefer an entry for the requested version, never an unrelated newer entry.
+    static QString changelogDate(const QString &changelog, const QString &version)
+    {
+        static const QRegularExpression heading(QStringLiteral(
+            "^\\S+\\s+\\(([^)]+)\\)\\s+[^\\n]*$"), QRegularExpression::MultilineOption);
+        static const QRegularExpression dated(QStringLiteral(
+            "^\\s+--\\s+[^\\n]*?\\s{2}([^\\n]+)$"), QRegularExpression::MultilineOption);
+        auto it = heading.globalMatch(changelog);
+        while (it.hasNext()) {
+            const auto match = it.next();
+            QString foundVersion = match.captured(1);
+            // Debian epochs may be suppressed in a source changelog.
+            const QString wanted = version.section(QLatin1Char(':'), -1);
+            foundVersion = foundVersion.section(QLatin1Char(':'), -1);
+            if (foundVersion != wanted) continue;
+            const int start = match.capturedEnd(0);
+            const auto next = heading.match(changelog, start);
+            const QString stanza = changelog.mid(start,
+                next.hasMatch() ? next.capturedStart(0) - start : 16000);
+            const auto d = dated.match(stanza);
+            if (!d.hasMatch()) return {};
+            const QString rfcDate = d.captured(1).trimmed();
+            QDateTime dt = QDateTime::fromString(rfcDate, Qt::RFC2822Date);
+            if (!dt.isValid()) {
+                // Some Debian changelogs use single-digit days or abbreviated TZs.
+                const QString withoutZone = rfcDate.section(QLatin1Char('+'), 0, 0).trimmed();
+                dt = QDateTime::fromString(withoutZone, QStringLiteral("ddd, d MMM yyyy HH:mm:ss"));
+            }
+            if (dt.isValid()) return dt.date().toString(Qt::ISODate);
+        }
+        return {};
+    }
+
+    // Installed package documentation can give an accurate date without network.
+    void loadLocalPublished(const QString &pkg, const QString &version)
+    {
+        if (!safeToken(pkg) || !safeToken(version)) return;
+        const QString key = installedPublishKey(pkg, version);
+        if (loadPublishedCache(key)) return;
+        const QString dir = QStringLiteral("/usr/share/doc/") + pkg + QLatin1Char('/');
+        QString content;
+        for (const QString &file : {QStringLiteral("changelog.Debian.gz"), QStringLiteral("changelog.gz"),
+                                    QStringLiteral("changelog.Debian"), QStringLiteral("changelog")}) {
+            if (!QFile::exists(dir + file)) continue;
+            if (file.endsWith(QLatin1String(".gz"))) {
+                QProcess gz;
+                gz.start(QStringLiteral("gzip"), {QStringLiteral("-cd"), dir + file});
+                if (gz.waitForFinished(1500) && gz.exitCode() == 0)
+                    content = QString::fromUtf8(gz.readAllStandardOutput());
+            } else content = readFile(dir + file);
+            if (!content.isEmpty()) break;
+        }
+        const QString date = changelogDate(content, version);
+        if (!date.isEmpty())
+            storePublished(key, {date, QStringLiteral("Installed package's changelog entry for version %1 "
+                                                     "(maintainer release date)").arg(version)});
+    }
+
+    void queueChangelog(const QString &key, const QString &pkg, const QString &version)
+    {
+        if (loadPublishedCache(key) || m_changelogAttempted.contains(key)) return;
+        if (!safeToken(pkg) || !safeToken(version)) return;
+        m_changelogAttempted.insert(key);
+        m_changelogQueue.enqueue({key, pkg + QLatin1Char('=') + version});
+    }
+
+    void runChangelogQueue()
+    {
+        // Keep requests bounded and asynchronous; unavailable changelog servers
+        // must not freeze the interface or hold the kernel manager 'busy'.
+        while (m_changelogActive < 2 && !m_changelogQueue.isEmpty()) {
+            const auto job = m_changelogQueue.dequeue();
+            const QString version = job.second.section(QLatin1Char('='), -1);
+            auto *proc = new QProcess(this);
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("LC_ALL"), QStringLiteral("C"));
+            env.insert(QStringLiteral("PAGER"), QStringLiteral("cat"));
+            env.insert(QStringLiteral("DEBIAN_FRONTEND"), QStringLiteral("noninteractive"));
+            proc->setProcessEnvironment(env);
+            ++m_changelogActive;
+            auto finished = std::make_shared<bool>(false);
+            auto complete = [this, job, version, proc, finished](bool ok) {
+                if (*finished) return;
+                *finished = true;
+                if (ok) {
+                    const QString date = changelogDate(QString::fromUtf8(proc->readAllStandardOutput()), version);
+                    if (!date.isEmpty())
+                        storePublished(job.first, {date, QStringLiteral("Package changelog entry for version %1 "
+                                                                    "(maintainer release date)").arg(version)});
+                }
+                proc->deleteLater();
+                --m_changelogActive;
+                refreshPublishedCells();
+                runChangelogQueue();
+            };
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                    [complete](int code, QProcess::ExitStatus status) {
+                complete(status == QProcess::NormalExit && code == 0);
+            });
+            connect(proc, &QProcess::errorOccurred, this,
+                    [complete](QProcess::ProcessError err) {
+                if (err == QProcess::FailedToStart) complete(false);
+            });
+            QTimer::singleShot(18000, proc, [proc]() {
+                if (proc->state() != QProcess::NotRunning) proc->kill();
+            });
+            proc->start(QStringLiteral("apt-get"), {QStringLiteral("-qq"),
+                                                        QStringLiteral("changelog"), job.second});
+        }
+    }
+
+    void queueAllChangelogs()
+    {
+        for (auto it = m_images.cbegin(); it != m_images.cend(); ++it) {
+            const QString release = releaseOf(it.key());
+            if (classifyRelease(release) == SrcMainline) continue;
+            loadLocalPublished(it.key(), it.value());
+            const QString key = installedPublishKey(it.key(), it.value());
+            if (!m_published.contains(key)) queueChangelog(key, it.key(), it.value());
+        }
+        for (const KPkg &k : m_apt) queueChangelog(aptPublishKey(k), k.name, k.version);
+        // The persistent cache may have supplied dates without starting jobs.
+        refreshPublishedCells();
+        runChangelogQueue();
+    }
+
+    void loadUpstreamDates()
+    {
+        // Official per-release ChangeLog directory timestamps; can provide
+        // meaningful upstream dates even if the distribution has no changelog.
+        QSet<int> majors;
+        for (auto it = m_images.cbegin(); it != m_images.cend(); ++it) {
+            const int major = upstreamVersion(releaseOf(it.key())).section(QLatin1Char('.'), 0, 0).toInt();
+            if (major >= 3 && major <= 20) majors.insert(major);
+        }
+        for (const KPkg &k : m_apt) {
+            const int major = upstreamVersion(k.release).section(QLatin1Char('.'), 0, 0).toInt();
+            if (major >= 3 && major <= 20) majors.insert(major);
+        }
+        for (int major : majors) {
+            if (m_upstreamAttempted.contains(major)) continue;
+            m_upstreamAttempted.insert(major);
+            fetchText(QStringLiteral("https://www.kernel.org/pub/linux/kernel/v%1.x/").arg(major),
+                      [this](bool ok, const QString &html) {
+                if (!ok) return;
+                static const QRegularExpression re(QStringLiteral(
+                    "ChangeLog-(\\d+\\.\\d+(?:\\.\\d+)?)</a>\\s+(\\d{2}-[A-Za-z]{3}-\\d{4})"));
+                auto it = re.globalMatch(html);
+                while (it.hasNext()) {
+                    const auto m = it.next();
+                    const QDate date = QDate::fromString(m.captured(2), QStringLiteral("dd-MMM-yyyy"));
+                    if (date.isValid()) m_upstreamDates.insert(m.captured(1), date.toString(Qt::ISODate));
+                }
+                refreshPublishedCells();
+            });
+        }
+    }
+
+    void refreshPublishedCells()
+    {
+        if (!m_pInst.tree || !m_pRepo.tree) return;
+        auto update = [](QTreeWidgetItem *item, int col, const Published &p) {
+            item->setText(col, p.date);
+            item->setToolTip(col, p.provenance);
+        };
+        for (int i = 0; i < m_pInst.tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = m_pInst.tree->topLevelItem(i);
+            const QString pkg = item->data(0, Qt::UserRole).toString();
+            update(item, 2, publishedForInstalled(pkg, m_images.value(pkg), releaseOf(pkg)));
+        }
+        for (Page *p : {&m_pRepo, &m_pLiq, &m_pXan, &m_pCustom}) {
+            const int column = p == &m_pCustom ? 4 : 3;
+            for (int i = 0; i < p->tree->topLevelItemCount(); ++i) {
+                QTreeWidgetItem *item = p->tree->topLevelItem(i);
+                const QString pkg = item->data(0, Qt::UserRole).toString();
+                const QString version = item->text(1);
+                for (const KPkg &k : m_apt) {
+                    if (k.name == pkg && k.version == version &&
+                        ((p == &m_pCustom && k.src == SrcCustom) ||
+                         (p == &m_pLiq && k.src == SrcLiquorix) ||
+                         (p == &m_pXan && k.src == SrcXanmod) ||
+                         (p == &m_pRepo && k.src == SrcRepo))) {
+                        update(item, column, publishedFor(aptPublishKey(k), k.release));
+                        break;
+                    }
+                }
             }
         }
-    }
-
-    QString installedDate(const QString &pkg, const QString &version) const
-    {
-        const QString actual = m_installDates.value(pkg);
-        return actual.isEmpty() ? firstSeenDate(QStringLiteral("installed:") + pkg + QLatin1Char('@') + version)
-                                : actual;
     }
 
     // ================================================================ UI
@@ -527,12 +777,12 @@ private:
         for (int i = 1; i < cols.size(); ++i)
             t->header()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
         t->header()->setStretchLastSection(false);
-        const int dateCol = cols.indexOf(QStringLiteral("Date added"));
+        const int dateCol = cols.indexOf(QStringLiteral("Date published"));
         if (dateCol >= 0) t->headerItem()->setToolTip(dateCol, QStringLiteral(
-            "Installed: date recorded by dpkg, if still in its logs. "
-            "Mainline: date last modified in Ubuntu's archive. "
-            "APT packages and missing history: date first detected by this manager on this device. "
-            "These are not necessarily the upstream kernel release dates."));
+            "APT packages: dated publisher changelog entry where available. "
+            "Mainline: Ubuntu archive directory date (publication approximation). "
+            "If unavailable, a kernel.org upstream release date may be shown. "
+            "Unknown means no reliable date was found. Hover each date for its source."));
         QScroller::grabGesture(t->viewport(), QScroller::LeftMouseButtonGesture);
         return t;
     }
@@ -610,7 +860,7 @@ private:
         root->addLayout(nav);
 
         // ---- pages
-        m_pInst = makePage({"Kernel", "Source", "Date added", "Status"},
+        m_pInst = makePage({"Kernel", "Source", "Date published", "Status"},
             {grubBtn(btn("Boot by default", [this] { setDefault(); })),
              grubBtn(btn("Newest by default", [this] { resetDefault(); })),
              (m_removeBtn = btn("Uninstall selected", [this] { removeSelected(); })),
@@ -618,25 +868,25 @@ private:
              btn("Refresh", [this] { reloadLocal(); })});
         connect(m_pInst.tree, &QTreeWidget::itemSelectionChanged, this, [this] { updateRemoveButton(); });
         updateRemoveButton();
-        m_pRepo = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
+        m_pRepo = makePage({"Kernel", "Version", "Suite", "Date published", "Status"},
             {btn("Install", [this] { installApt(m_pRepo); }),
              btn("Update package lists", [this] { aptUpdate(); }),
              btn("Refresh", [this] { reloadLocal(); })});
 
         m_showRc = new QCheckBox(QStringLiteral("Show release candidates"));
         connect(m_showRc, &QCheckBox::toggled, this, [this](bool) { fillMainline(); });
-        m_pMl = makePage({"Version", "Kernel", "Date added", "Status"},
+        m_pMl = makePage({"Version", "Kernel", "Date published", "Status"},
             {btn("Install", [this] { installMainline(); }),
              btn("Retry headers", [this] { installMainline(true); }),
              btn("Refresh", [this] { loadMainline(); })}, m_showRc);
 
-        m_pLiq = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
+        m_pLiq = makePage({"Kernel", "Version", "Suite", "Date published", "Status"},
             {btn("Install", [this] { installApt(m_pLiq); }),
              btn("Refresh", [this] { reloadLocal(); })});
         m_pLiq.enableBtn = btn("Enable Liquorix repository", [this] { enableRepo(SrcLiquorix); });
         m_pLiq.w->layout()->addWidget(m_pLiq.enableBtn);
 
-        m_pXan = makePage({"Kernel", "Version", "Suite", "Date added", "Status"},
+        m_pXan = makePage({"Kernel", "Version", "Suite", "Date published", "Status"},
             {btn("Install", [this] { installApt(m_pXan); }),
              btn("Refresh", [this] { reloadLocal(); })});
         m_pXan.enableBtn = btn("Enable XanMod repository", [this] { enableRepo(SrcXanmod); });
@@ -658,7 +908,7 @@ private:
         customLayout->addLayout(customButtons);
         connect(m_customRepos, &QListWidget::itemSelectionChanged, this,
                 [this] { updateCustomRemoveButton(); });
-        m_pCustom = makePage({"Kernel", "Version", "Suite", "Source", "Date added", "Status"},
+        m_pCustom = makePage({"Kernel", "Version", "Suite", "Source", "Date published", "Status"},
             {btn("Install", [this] { installApt(m_pCustom); }),
              btn("Update package lists", [this] { aptUpdate(); }),
              btn("Refresh", [this] { reloadLocal(); })}, customTop);
@@ -886,11 +1136,15 @@ private:
                 m_installed.insert(f.at(0));
                 if (!releaseOf(f.at(0)).isEmpty()) m_images.insert(f.at(0), f.at(1));
             }
-            loadInstallDates();
             loadCustomSources();
             fillCustomRepos();
             refreshHeader();
+            // Read dates shipped with installed kernels even if APT metadata is unavailable.
+            for (auto it = m_images.cbegin(); it != m_images.cend(); ++it)
+                if (classifyRelease(releaseOf(it.key())) != SrcMainline)
+                    loadLocalPublished(it.key(), it.value());
             fillInstalled();
+            loadUpstreamDates();
             loadApt();
         });
     }
@@ -918,6 +1172,8 @@ private:
                 m_apt.clear();
                 fillApt();
                 setBusy(false);
+                queueAllChangelogs();
+                loadUpstreamDates();
                 return;
             }
             runAsync(QStringLiteral("apt-cache"), QStringList{"madison"} + images,
@@ -970,6 +1226,8 @@ private:
                 });
                 fillApt();
                 if (m_mlLoaded) fillMainline();
+                queueAllChangelogs();
+                loadUpstreamDates();
             });
         });
     }
@@ -1005,6 +1263,7 @@ private:
             if (m_ml.isEmpty()) { fail(QStringLiteral("The mainline index was fetched but no versions could be parsed from it.")); return; }
             m_mlLoaded = true;
             fillMainline();
+            refreshPublishedCells();
         });
     }
 
@@ -1042,13 +1301,11 @@ private:
                     break;
                 }
             const QString pkg = pkgOf.value(r);
-            const QString date = installedDate(pkg, m_images.value(pkg));
-            auto *item = new QTreeWidgetItem({r, sourceLabel, date, st.join(QStringLiteral(" · "))});
+            const Published pub = publishedForInstalled(pkg, m_images.value(pkg), r);
+            auto *item = new QTreeWidgetItem({r, sourceLabel, pub.date, st.join(QStringLiteral(" · "))});
             item->setData(0, Qt::UserRole, pkgOf.value(r));
             item->setData(0, Qt::UserRole + 1, r);
-            item->setToolTip(2, m_installDates.contains(pkg)
-                ? QStringLiteral("Original installation date recorded in dpkg logs")
-                : QStringLiteral("First detected by osm-kernels; old dpkg install history is unavailable"));
+            item->setToolTip(2, pub.provenance);
             m_pInst.tree->addTopLevelItem(item);
         }
         updateRemoveButton();
@@ -1060,15 +1317,14 @@ private:
         for (const KPkg &k : m_apt) {
             Page &p = k.src == SrcLiquorix ? m_pLiq : k.src == SrcXanmod ? m_pXan
                       : k.src == SrcCustom ? m_pCustom : m_pRepo;
-            const QString date = firstSeenDate(QStringLiteral("apt:") + k.name + QLatin1Char('@') + k.version);
+            const Published pub = publishedFor(aptPublishKey(k), k.release);
             auto *item = new QTreeWidgetItem(k.src == SrcCustom
-                ? QStringList{k.release, k.version, k.suite, k.customName, date, statusFor(k.release)}
-                : QStringList{k.release, k.version, k.suite, date, statusFor(k.release)});
+                ? QStringList{k.release, k.version, k.suite, k.customName, pub.date, statusFor(k.release)}
+                : QStringList{k.release, k.version, k.suite, pub.date, statusFor(k.release)});
             item->setData(0, Qt::UserRole, k.name);
             item->setData(0, Qt::UserRole + 1, k.release);
             item->setData(0, Qt::UserRole + 2, k.suite);
-            item->setToolTip(k.src == SrcCustom ? 4 : 3,
-                             QStringLiteral("First detected by osm-kernels (APT has no per-package publication date)"));
+            item->setToolTip(k.src == SrcCustom ? 4 : 3, pub.provenance);
             p.tree->addTopLevelItem(item);
         }
     }
@@ -1083,14 +1339,14 @@ private:
             if (status.contains(QLatin1String("Installed"))
                 && !m_installed.contains(QStringLiteral("linux-headers-") + v.release()))
                 status += QStringLiteral(" · Headers missing");
-            const QString date = v.archiveDate.isEmpty()
-                ? firstSeenDate(QStringLiteral("mainline:") + v.tag) : v.archiveDate;
+            const QString date = v.archiveDate.isEmpty() ? QStringLiteral("—") : v.archiveDate;
             auto *item = new QTreeWidgetItem({v.tag, v.release(), date, status});
             item->setData(0, Qt::UserRole, v.tag);
             item->setData(0, Qt::UserRole + 1, v.release());
             item->setToolTip(2, v.archiveDate.isEmpty()
-                ? QStringLiteral("First detected by osm-kernels (archive date unavailable)")
-                : QStringLiteral("Ubuntu mainline archive directory last-modified date"));
+                ? QStringLiteral("Ubuntu mainline archive build date unavailable")
+                : QStringLiteral("Ubuntu mainline archive directory last-modified date "
+                                 "(approximation of build publication date)"));
             m_pMl.tree->addTopLevelItem(item);
             if (++shown >= 120) break;
         }
