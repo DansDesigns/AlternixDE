@@ -492,7 +492,7 @@ private:
         const AtspiRole role = atspi_accessible_get_role(e->source, nullptr);
         bool editable = role == ATSPI_ROLE_ENTRY || role == ATSPI_ROLE_PASSWORD_TEXT ||
                         role == ATSPI_ROLE_TERMINAL || role == ATSPI_ROLE_EDITBAR;
-        AtspiStateSet *states = atspi_accessible_get_state_set(e->source, nullptr);
+        AtspiStateSet *states = atspi_accessible_get_state_set(e->source);
         if (states) {
             // Plain text views should open a keyboard only when editable.
             editable = (editable && atspi_state_set_contains(states, ATSPI_STATE_EDITABLE)) ||
