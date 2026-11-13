@@ -9,6 +9,7 @@ CONFIG_DIR="$HOME/.config/Alternix"
 PIDFILE="$CONFIG_DIR/rotate-monitor.pid"
 READYFILE="$CONFIG_DIR/rotate-monitor.ready"
 AUTOSTART="$HOME/.config/autostart/alternix-auto-rotate.desktop"
+MIGRATION_FLAG="$CONFIG_DIR/rotate-autostart-migrated"
 MONITOR="$SCRIPT_DIR/alternix-rotate-monitor.sh"
 mkdir -p "$CONFIG_DIR"
 
@@ -88,6 +89,9 @@ case "$MODE" in
             }
         done
         [ -x "$MONITOR" ] || { echo "Monitor missing/not executable: $MONITOR" >&2; exit 1; }
+        # Record an explicit selection so an older Settings preference cannot
+        # restore rotation after it is subsequently disabled from osm-notify.
+        touch "$MIGRATION_FLAG"
         if [ "$STARTUP" != '--startup' ]; then install_autostart; fi
         if monitor_pid >/dev/null; then exit 0; fi
         rm -f "$PIDFILE" "$READYFILE"
@@ -98,7 +102,22 @@ case "$MODE" in
         pid=$(monitor_pid) || exit 0
         kill -USR1 "$pid" 2>/dev/null || :
         ;;
+    restart)
+        # Used by the updater after replacing the backend. Bash processes
+        # already running do not necessarily execute the new file contents.
+        # Keep the current display orientation and saved on/off selection.
+        monitor_pid >/dev/null || exit 0
+        [ -n "${DISPLAY:-}" ] || { echo 'DISPLAY not available for monitor restart' >&2; exit 1; }
+        stop_monitor
+        rm -f "$PIDFILE" "$READYFILE"
+        # Remap immediately, even if monitor-sensor takes time to emit the
+        # current orientation after its new D-Bus claim is established.
+        /bin/bash "$MONITOR" --sync-input || :
+        nohup /bin/bash "$MONITOR" >>"$CONFIG_DIR/rotate-launch.log" 2>&1 </dev/null &
+        disown || :
+        ;;
     off)
+        touch "$MIGRATION_FLAG"
         rm -f "$AUTOSTART"
         stop_monitor
         reset_orientation
@@ -109,7 +128,7 @@ case "$MODE" in
         echo "Auto-Rotate active (PID $pid)"
         ;;
     *)
-        echo 'Usage: alternix-rotate-toggle.sh on|off|status|refresh [--startup]' >&2
+        echo 'Usage: alternix-rotate-toggle.sh on|off|status|refresh|restart [--startup]' >&2
         exit 2
         ;;
 esac

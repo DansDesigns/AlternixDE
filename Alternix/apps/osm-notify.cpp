@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QFrame>
 #include <QScreen>
+#include <X11/Xlib.h>
 #include <QTimer>
 #include <QSocketNotifier>
 #include <QCryptographicHash>
@@ -51,6 +52,27 @@
 #include <algorithm>
 #include <QPropertyAnimation>
 
+
+// XLibre/XRandR can change the X11 root size before Qt5 publishes the new
+// QScreen geometry.  Query the live server root for a single-display tablet;
+// preserve Qt's per-monitor geometry on multi-display desktops.
+static QRect alternixActiveScreenGeometry() {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen) return QRect();
+    const QRect qtGeometry = screen->geometry();
+    if (QGuiApplication::screens().size() != 1) return qtGeometry;
+    static Display *dpy = XOpenDisplay(nullptr);
+    if (!dpy) return qtGeometry;
+    Window returnedRoot = 0;
+    int x = 0, y = 0;
+    unsigned int width = 0, height = 0, border = 0, depth = 0;
+    if (XGetGeometry(dpy, DefaultRootWindow(dpy), &returnedRoot,
+                     &x, &y, &width, &height, &border, &depth) &&
+        width > 0 && height > 0) {
+        return QRect(0, 0, int(width), int(height));
+    }
+    return qtGeometry;
+}
 
 // ──────────────────────────────  Helper: read file
 static QString readFile(const QString &path) {
@@ -438,7 +460,7 @@ public:
                        | Qt::WindowDoesNotAcceptFocus);
         setAttribute(Qt::WA_TranslucentBackground);
 
-        QRect g = QApplication::primaryScreen()->geometry();
+        QRect g = alternixActiveScreenGeometry();
         setGeometry(g);
 
         int screenW = g.width();
@@ -1183,7 +1205,7 @@ public:
     }
 
     void openPanel() {
-        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
+        syncScreenGeometry(alternixActiveScreenGeometry());
         if (closing) return;
 
         if (refreshTimer) {
@@ -1687,15 +1709,17 @@ int main(int argc, char **argv) {
         rightBar.syncEdgeGeometry(g.x() + edgeExclusion + leftWidth + centerExclusion,
                                   g.y(), rightWidth, barHeight);
     };
-    QObject::connect(screen, &QScreen::geometryChanged, &overlay, updateScreen);
+    QObject::connect(screen, &QScreen::geometryChanged, &overlay,
+                     [updateScreen](const QRect &) {
+        updateScreen(alternixActiveScreenGeometry());
+    });
     QTimer geometryPoll(&a);
     geometryPoll.setInterval(750);
     QObject::connect(&geometryPoll, &QTimer::timeout, &overlay, [updateScreen]() {
-        if (QScreen *current = QGuiApplication::primaryScreen())
-            updateScreen(current->geometry());
+        updateScreen(alternixActiveScreenGeometry());
     });
     geometryPoll.start();
-    updateScreen(screen->geometry());
+    updateScreen(alternixActiveScreenGeometry());
 
     return a.exec();
 }

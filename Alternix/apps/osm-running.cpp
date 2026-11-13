@@ -29,6 +29,27 @@
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 
+// XLibre/XRandR can change the X11 root size before Qt5 publishes the new
+// QScreen geometry.  Query the live server root for a single-display tablet;
+// preserve Qt's per-monitor geometry on multi-display desktops.
+static QRect alternixActiveScreenGeometry() {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen) return QRect();
+    const QRect qtGeometry = screen->geometry();
+    if (QGuiApplication::screens().size() != 1) return qtGeometry;
+    static Display *dpy = XOpenDisplay(nullptr);
+    if (!dpy) return qtGeometry;
+    Window returnedRoot = 0;
+    int x = 0, y = 0;
+    unsigned int width = 0, height = 0, border = 0, depth = 0;
+    if (XGetGeometry(dpy, DefaultRootWindow(dpy), &returnedRoot,
+                     &x, &y, &width, &height, &border, &depth) &&
+        width > 0 && height > 0) {
+        return QRect(0, 0, int(width), int(height));
+    }
+    return qtGeometry;
+}
+
 // ───────────────────────────────────────────── X11 helpers
 static Atom getAtom(Display *dpy, const char *name) {
     return XInternAtom(dpy, name, False);
@@ -206,7 +227,7 @@ SidePanel::SidePanel(Display *dpy, QWidget *parent)
     setFocusPolicy(Qt::NoFocus);
     setAttribute(Qt::WA_TranslucentBackground);
 
-    QRect g = QGuiApplication::primaryScreen()->geometry();
+    QRect g = alternixActiveScreenGeometry();
 
     m_width = qMin(520, int(g.width()*0.35));
     m_maxH  = int(g.height()*0.9);
@@ -308,7 +329,7 @@ void SidePanel::resizeToItems(int count) {
     const int cardH = 120;
     int h = count * cardH + 60;
 
-    const QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
+    const QRect screenGeo = alternixActiveScreenGeometry();
     const int top = int(screenGeo.height() * 0.15);
     const int available = qMax(1, screenGeo.height() - top);
     const int maximum = qMax(1, qMin(m_maxH, available));
@@ -390,7 +411,7 @@ void SidePanel::refreshWindows() {
 
     // compute and apply width
     int needed = computeRequiredWidth(titles);
-    m_width = qMin(needed, qMin(1080, QGuiApplication::primaryScreen()->geometry().width()));
+    m_width = qMin(needed, qMin(1080, alternixActiveScreenGeometry().width()));
 
     QRect g = geometry();
     if (g.width() != m_width)
@@ -487,7 +508,7 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_DeleteOnClose);
 
-        m_screenGeo = QGuiApplication::primaryScreen()->geometry();
+        m_screenGeo = alternixActiveScreenGeometry();
         setGeometry(m_screenGeo);
 
         m_panel = new SidePanel(dpy,this);
@@ -518,7 +539,7 @@ public:
     }
 
     void showPanel() {
-        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
+        syncScreenGeometry(alternixActiveScreenGeometry());
         if (m_panelVisible) return;
         m_panelVisible = true;
 
@@ -596,7 +617,7 @@ public:
         setMouseTracking(true);
         setAttribute(Qt::WA_AcceptTouchEvents, true);
 
-        QRect g = QGuiApplication::primaryScreen()->geometry();
+        QRect g = alternixActiveScreenGeometry();
         syncScreenGeometry(g);
         setStyleSheet("background: rgba(0,0,0,0);");
 
@@ -709,16 +730,18 @@ int main(int argc,char**argv) {
         bar.syncScreenGeometry(g);
     };
     QScreen *screen = QGuiApplication::primaryScreen();
-    QObject::connect(screen, &QScreen::geometryChanged, &root, updateScreen);
+    QObject::connect(screen, &QScreen::geometryChanged, &root,
+                     [updateScreen](const QRect &) {
+        updateScreen(alternixActiveScreenGeometry());
+    });
     // Fallback for X11 screen updates whose geometryChanged event was missed.
     QTimer geometryPoll(&app);
     geometryPoll.setInterval(750);
     QObject::connect(&geometryPoll, &QTimer::timeout, &root, [updateScreen]() {
-        if (QScreen *current = QGuiApplication::primaryScreen())
-            updateScreen(current->geometry());
+        updateScreen(alternixActiveScreenGeometry());
     });
     geometryPoll.start();
-    updateScreen(screen->geometry());
+    updateScreen(alternixActiveScreenGeometry());
 
     int r=app.exec();
     XCloseDisplay(dpy);

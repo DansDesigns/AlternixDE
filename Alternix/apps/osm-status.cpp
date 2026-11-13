@@ -7,6 +7,7 @@
 #include <QFrame>
 #include <QPushButton>
 #include <QScreen>
+#include <X11/Xlib.h>
 #include <QTimer>
 #include <QGraphicsDropShadowEffect>
 #include <QMouseEvent>
@@ -38,6 +39,27 @@
 #include <QtDBus/QDBusMetaType>
 
 #include <functional>
+
+// XLibre/XRandR can change the X11 root size before Qt5 publishes the new
+// QScreen geometry.  Query the live server root for a single-display tablet;
+// preserve Qt's per-monitor geometry on multi-display desktops.
+static QRect alternixActiveScreenGeometry() {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen) return QRect();
+    const QRect qtGeometry = screen->geometry();
+    if (QGuiApplication::screens().size() != 1) return qtGeometry;
+    static Display *dpy = XOpenDisplay(nullptr);
+    if (!dpy) return qtGeometry;
+    Window returnedRoot = 0;
+    int x = 0, y = 0;
+    unsigned int width = 0, height = 0, border = 0, depth = 0;
+    if (XGetGeometry(dpy, DefaultRootWindow(dpy), &returnedRoot,
+                     &x, &y, &width, &height, &border, &depth) &&
+        width > 0 && height > 0) {
+        return QRect(0, 0, int(width), int(height));
+    }
+    return qtGeometry;
+}
 
 // ───────────────────────────────────────────── Structures
 
@@ -286,7 +308,7 @@ StatusPanel::StatusPanel(QWidget *parent)
     setFocusPolicy(Qt::NoFocus);
     setAttribute(Qt::WA_TranslucentBackground);
 
-    QRect g = QGuiApplication::primaryScreen()->geometry();
+    QRect g = alternixActiveScreenGeometry();
 
     m_width = qMin(520, int(g.width()*0.65));
     m_maxH  = int(g.height()*0.9);
@@ -379,7 +401,7 @@ void StatusPanel::resizeToItems(int count) {
 
     // inner + outer margins overhead (approx), similar to osm-running
     int h = totalH + 72;
-    QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
+    QRect screenGeo = alternixActiveScreenGeometry();
     const int top = int(screenGeo.height() * 0.15);
     const int available = qMax(1, screenGeo.height() - top);
     const int maximum = qMax(1, qMin(m_maxH, available));
@@ -498,11 +520,11 @@ void StatusPanel::refreshNotifications() {
 
     // compute and apply width (same logic as osm-running)
     int needed = computeRequiredWidth(titles);
-    QRect scr = QGuiApplication::primaryScreen()->geometry();
+    QRect scr = alternixActiveScreenGeometry();
     m_width = qMin(qMin(needed, 1080), scr.width());
 
     QRect g = geometry();
-    int x = QGuiApplication::primaryScreen()->geometry().width() - m_width;
+    int x = alternixActiveScreenGeometry().width() - m_width;
     if (g.width() != m_width || g.x() != x)
         setGeometry(x, g.y(), m_width, g.height());
 
@@ -617,7 +639,7 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
 
-    syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
+    syncScreenGeometry(alternixActiveScreenGeometry());
 
     hide();
 
@@ -711,7 +733,7 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_DeleteOnClose);
 
-        m_screenGeo = QGuiApplication::primaryScreen()->geometry();
+        m_screenGeo = alternixActiveScreenGeometry();
         setGeometry(m_screenGeo);
 
         m_panel = new StatusPanel(this);
@@ -757,7 +779,7 @@ public:
     }
 
     void showPanel() {
-        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
+        syncScreenGeometry(alternixActiveScreenGeometry());
         if (m_panelVisible) return;
         m_panelVisible = true;
 
@@ -855,7 +877,7 @@ public:
         setMouseTracking(true);
         setAttribute(Qt::WA_AcceptTouchEvents, true);
 
-        QRect g = QGuiApplication::primaryScreen()->geometry();
+        QRect g = alternixActiveScreenGeometry();
         syncScreenGeometry(g);
         setStyleSheet("background: rgba(0,0,0,0);");
 
@@ -1311,15 +1333,17 @@ int main(int argc,char**argv) {
         bar.syncScreenGeometry(g);
     };
     QScreen *screen = QGuiApplication::primaryScreen();
-    QObject::connect(screen, &QScreen::geometryChanged, &root, updateScreen);
+    QObject::connect(screen, &QScreen::geometryChanged, &root,
+                     [updateScreen](const QRect &) {
+        updateScreen(alternixActiveScreenGeometry());
+    });
     QTimer geometryPoll(&app);
     geometryPoll.setInterval(750);
     QObject::connect(&geometryPoll, &QTimer::timeout, &root, [updateScreen]() {
-        if (QScreen *current = QGuiApplication::primaryScreen())
-            updateScreen(current->geometry());
+        updateScreen(alternixActiveScreenGeometry());
     });
     geometryPoll.start();
-    updateScreen(screen->geometry());
+    updateScreen(alternixActiveScreenGeometry());
 
     // ensure the default sound folders exist — boot/ and notifications/
     QDir().mkpath(soundDirPath() + "/boot");

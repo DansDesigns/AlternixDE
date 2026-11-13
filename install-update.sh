@@ -80,6 +80,22 @@ for alt_input_file in \
         exit 1
     fi
 done
+# Refuse outdated gesture and input sources: earlier versions silently read
+# XRandR's SUPPORTED orientations as "normal" even while rotated.
+if ! grep -Fq 'The active rotation follows the geometry' \
+        "$ALT_INPUT_SOURCE_DIR/alternix-rotate-monitor.sh" || \
+   ! grep -Fq '    restart)' "$ALT_INPUT_SOURCE_DIR/alternix-rotate-toggle.sh"; then
+    echo 'ERROR: Install the latest complete rotation monitor and controller in Alternix/scripts.' >&2
+    exit 1
+fi
+for alt_input_ui in osm-running.cpp osm-status.cpp osm-notify.cpp; do
+    if [ ! -s "$ALT_ROOT/Alternix/apps/$alt_input_ui" ] || \
+       ! grep -Fq 'alternixActiveScreenGeometry' "$ALT_ROOT/Alternix/apps/$alt_input_ui"; then
+        echo "ERROR: Missing rotation-aware gesture source: Alternix/apps/$alt_input_ui" >&2
+        exit 1
+    fi
+done
+
 if [ ! -s "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp" ] || \
    ! grep -Fq 'alternix-stylus-apply.sh' "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp"; then
     echo "ERROR: Updated Display settings source with stylus controls is missing." >&2
@@ -1660,6 +1676,52 @@ if ! sudo bash "$ALT_ROOT/Alternix/apps/alternix-auth-setup.sh" \
         "$ALT_TIME_USER" "$ALT_ROOT/Alternix/apps"; then
     echo "ERROR: Pattern authentication did not pass its live test; activation was rolled back." >&2
     exit 1
+fi
+
+# All system modifications and PAM tests are complete. Restart only the
+# existing, same-X-session gesture apps so the newly installed binaries are
+# actually active without requiring a reboot. Never spawn apps that the user
+# did not already have running, and never terminate another X11 session.
+if [ "$(id -un)" = "$ALT_INPUT_USER" ] && [ -n "${DISPLAY:-}" ]; then
+    echo "[Input] Activating updated touch mapping and gesture binaries for $DISPLAY..."
+    ALT_INPUT_RUNTIME="$ALT_INPUT_HOME/.config/Alternix/scripts"
+    # The monitor's old shell process keeps old code until it is restarted.
+    if [ -x "$ALT_INPUT_RUNTIME/alternix-rotate-toggle.sh" ]; then
+        /bin/bash "$ALT_INPUT_RUNTIME/alternix-rotate-toggle.sh" restart || \
+            echo 'WARNING: Rotation monitor restart was not confirmed.' >&2
+        /bin/bash "$ALT_INPUT_RUNTIME/alternix-rotate-monitor.sh" --sync-input || \
+            echo 'WARNING: Input mapping could not be confirmed; inspect the rotation log.' >&2
+    fi
+    for alt_overlay in osm-running osm-status osm-notify; do
+        overlay_pids=()
+        while IFS= read -r overlay_pid; do
+            [ -n "$overlay_pid" ] || continue
+            if [ -r "/proc/$overlay_pid/environ" ] && \
+               tr '\0' '\n' < "/proc/$overlay_pid/environ" | \
+                   grep -Fxq "DISPLAY=$DISPLAY"; then
+                overlay_pids+=("$overlay_pid")
+            fi
+        done < <(pgrep -u "$ALT_INPUT_USER" -x "$alt_overlay" 2>/dev/null || true)
+        if (( ${#overlay_pids[@]} == 0 )); then continue; fi
+        echo "[Input] Restarting $alt_overlay on $DISPLAY..."
+        kill -TERM "${overlay_pids[@]}" 2>/dev/null || :
+        # Wait for process exit / Qt lock and notification socket release.
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            running=0
+            for overlay_pid in "${overlay_pids[@]}"; do
+                if kill -0 "$overlay_pid" 2>/dev/null; then running=1; fi
+            done
+            [ "$running" = 0 ] && break
+            sleep 0.25
+        done
+        if [ "$running" = 0 ]; then
+            nohup "/usr/local/bin/$alt_overlay" >/dev/null 2>&1 </dev/null &
+        else
+            echo "WARNING: $alt_overlay was not restarted; it will refresh after logout/reboot." >&2
+        fi
+    done
+else
+    echo '[Input] Session not directly accessible; new gesture binaries activate at next desktop login.'
 fi
 
 echo "=============================================="

@@ -99,6 +99,22 @@ for alt_input_file in \
         exit 1
     fi
 done
+# Refuse outdated gesture and input sources: earlier versions silently read
+# XRandR's SUPPORTED orientations as "normal" even while rotated.
+if ! grep -Fq 'The active rotation follows the geometry' \
+        "$ALT_INPUT_SOURCE_DIR/alternix-rotate-monitor.sh" || \
+   ! grep -Fq '    restart)' "$ALT_INPUT_SOURCE_DIR/alternix-rotate-toggle.sh"; then
+    echo 'ERROR: Install the latest complete rotation monitor and controller in Alternix/scripts.' >&2
+    exit 1
+fi
+for alt_input_ui in osm-running.cpp osm-status.cpp osm-notify.cpp; do
+    if [ ! -s "$ALT_ROOT/Alternix/apps/$alt_input_ui" ] || \
+       ! grep -Fq 'alternixActiveScreenGeometry' "$ALT_ROOT/Alternix/apps/$alt_input_ui"; then
+        echo "ERROR: Missing rotation-aware gesture source: Alternix/apps/$alt_input_ui" >&2
+        exit 1
+    fi
+done
+
 if [ ! -s "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp" ] || \
    ! grep -Fq 'alternix-stylus-apply.sh' "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp"; then
     echo "ERROR: Updated Display settings source with stylus controls is missing." >&2

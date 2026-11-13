@@ -39,21 +39,33 @@ select_output() {
     printf '%s\n' "$name"
 }
 
+# Current XRandR geometry and ACTIVE orientation.  The parenthesized text
+# on this line is the list of SUPPORTED orientations, not the active one.
+# For example, the active `left` appears BEFORE `(normal left inverted right ...)`.
 output_geometry() {
     local output="$1"
     xrandr --query | awk -v target="$output" '
       $1==target && $2=="connected" {
         for (i=3;i<=NF;i++) {
-          if ($i ~ /^[0-9]+x[0-9]+[+][-]?[0-9]+[+][-]?[0-9]+$/) {print $i; exit}
+          if ($i ~ /^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$/) {
+            print $i; exit
+          }
         }
       }'
 }
 
 output_rotation() {
-    xrandr --query | awk -v target="$1" '
+    local output="$1"
+    xrandr --query | awk -v target="$output" '
       $1==target && $2=="connected" {
-        for (i=3;i<=NF;i++) if ($i ~ /^\((normal|left|right|inverted)$/) {
-          gsub(/\(/,"",$i); print $i; exit
+        for (i=3;i<=NF;i++) {
+          if ($i ~ /^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$/) {
+            # The active rotation follows the geometry; when absent it is normal.
+            if ((i+1)<=NF && $(i+1) ~ /^(left|right|inverted|normal)$/)
+              print $(i+1)
+            else print "normal"
+            exit
+          }
         }
       }'
 }
@@ -132,12 +144,16 @@ sync_input() {
     local output rot geometry desktop matrix wrot line id name kind type
     local -A wacom_processed=()
     local total=0 failures=0
+    local -a mapped_names=() failed_names=()
     output=$(select_output)
     [ -n "$output" ] || { log 'No connected X11 display output'; return 1; }
     geometry=$(output_geometry "$output")
     [ -n "$geometry" ] || { log "No XRandR geometry for $output"; return 1; }
     rot=$(output_rotation "$output")
-    [ -n "$rot" ] || rot=normal
+    if [ -z "$rot" ]; then
+        log "Unable to read active XRandR rotation for $output"
+        return 1
+    fi
     desktop=$(xrandr --query | sed -n 's/.*current \([0-9]\+\) x \([0-9]\+\).*/\1x\2/p' | head -n1)
     matrix=$(make_matrix "$rot" "$geometry" "$desktop") || return 1
     [[ -n "$matrix" ]] || return 1
@@ -162,6 +178,7 @@ sync_input() {
                xsetwacom set "$id" MapToOutput "$output" >/dev/null 2>&1; then
                 wacom_processed[$id]=1
                 ((total+=1))
+                mapped_names+=("wacom:$id")
             else
                 # If either native operation fails, reset native rotation
                 # BEFORE applying the generic CTM (avoids double-rotation).
@@ -182,24 +199,43 @@ sync_input() {
         # 3x3 matrix (including 180 degrees and multi-monitor offsets).
         # An explicit float type avoids XInput interpreting 0/1 as integers.
         # shellcheck disable=SC2086
-        if xinput set-prop --type=float "$id" 'Coordinate Transformation Matrix' $matrix 2>/dev/null; then
+        local error_output=''
+        if error_output=$(xinput set-prop --type=float "$id" \
+                'Coordinate Transformation Matrix' $matrix 2>&1); then
             ((total+=1))
+            mapped_names+=("$kind:$id")
         else
-            log "Input CTM failed for $kind $id: $name"
-            ((failures+=1))
+            # Some XLibre/libinput builds expose a writable libinput
+            # Calibration Matrix even when their generic XInput CTM is not
+            # writable. Try this driver-native absolute transform as a
+            # fallback instead of leaving the touch surface unrotated.
+            local device_props fallback_error=''
+            device_props=$(xinput list-props "$id" 2>/dev/null) || device_props=''
+            if [[ "$device_props" == *'libinput Calibration Matrix'* ]] && \
+               fallback_error=$(xinput set-prop --type=float "$id" \
+                   'libinput Calibration Matrix' $matrix 2>&1); then
+                ((total+=1))
+                mapped_names+=("$kind:$id:calibration")
+                log "Input $kind $id mapped via libinput Calibration Matrix after CTM failure"
+            else
+                log "Input mapping FAILED for $kind $id ($name): CTM=${error_output:-no detail}; calibration=${fallback_error:-unsupported}"
+                failed_names+=("$kind:$id")
+                ((failures+=1))
+            fi
         fi
     done < <(xinput --list --short 2>/dev/null)
 
     # Explicit commands can be run in the user's own X11 session to inspect
     # which devices actually got mapped without needing root permissions.
+    log "Input sync: output=$output active_rotation=$rot geometry=$geometry desktop=$desktop mapped=$total failed=$failures ${mapped_names[*]:-none}"
     if [ "${1:-}" = verbose ]; then
-        printf 'OUTPUT=%s\nROTATION=%s\nGEOMETRY=%s\nDESKTOP=%s\nMATRIX=%s\nMAPPED=%s\nFAILED=%s\n' \
-            "$output" "$rot" "$geometry" "$desktop" "$matrix" "$total" "$failures"
+        printf 'OUTPUT=%s\nROTATION=%s\nGEOMETRY=%s\nDESKTOP=%s\nMATRIX=%s\nMAPPED=%s\nFAILED=%s\nDEVICES=%s\n' \
+            "$output" "$rot" "$geometry" "$desktop" "$matrix" "$total" "$failures" "${mapped_names[*]:-none}"
     fi
     if (( total == 0 )); then
-        log "No touch/pen absolute devices mapped (output $output, rotation $rot); check xinput --list"
+        log "WARNING: No absolute touch/pen devices mapped. Check xinput --list and xinput list-props."
     fi
-    (( failures == 0 ))
+    (( failures == 0 && total > 0 ))
 }
 
 if [ "${1:-}" = '--sync-input' ]; then
@@ -289,7 +325,9 @@ while :; do
             fi
             output=$(select_output)
             if [ -n "$output" ] && xrandr --output "$output" --rotate "$target" 2>>"$LOGFILE"; then
-                sync_input || :
+                if ! sync_input; then
+                    log "WARNING: Screen rotated to $target, but touchscreen/pen mapping was not confirmed"
+                fi
                 last_orientation="$pending"
                 printf '%s\n' "$$" > "$READYFILE"
                 last_sync=$SECONDS
