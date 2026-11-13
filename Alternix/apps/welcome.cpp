@@ -3,10 +3,10 @@
 // Build: g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome \
 //        $(pkg-config --cflags --libs Qt5Widgets)
 //
-// The 7 screens follow onboarding.pptx. PowerPoint's small desktop screenshots
-// showing the top and bottom bars are intentionally NOT displayed. All text,
-// arrows, highlight brackets and striped indicators are drawn dynamically,
-// without shipping or opening the presentation at runtime.
+// The 7 screens follow onboarding.pptx. Text, arrows, highlight brackets and
+// striped indicators are drawn dynamically, while the PowerPoint's desktop
+// bar screenshots are shipped as separate assets and displayed on the relevant
+// slides so the result still matches the onboarding deck closely.
 
 #include <QApplication>
 #include <QColor>
@@ -24,6 +24,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QPointF>
 #include <QPolygonF>
 #include <QPen>
@@ -91,6 +92,24 @@ QRectF frac(qreal x, qreal y, qreal w, qreal h, const QSize &size) {
 QColor glowPurple() { return QColor(199, 51, 190); }
 QColor glowGreen()  { return QColor(92, 213, 52); }
 
+
+QString assetPath(const QString &fileName) {
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates = {
+        QStringLiteral("/usr/share/alternix/welcome/") + fileName,
+        QStringLiteral("/usr/local/share/alternix/welcome/") + fileName,
+        QDir::currentPath() + QStringLiteral("/assets/welcome/") + fileName,
+        appDir + QStringLiteral("/../share/alternix/welcome/") + fileName,
+        appDir + QStringLiteral("/assets/welcome/") + fileName
+    };
+    for (const QString &path : candidates) {
+        if (QFileInfo::exists(path) && QFileInfo(path).isFile())
+            return QFileInfo(path).canonicalFilePath().isEmpty() ? path : QFileInfo(path).canonicalFilePath();
+    }
+    return QString();
+}
+
+
 class WelcomeWindow final : public QWidget {
 public:
     explicit WelcomeWindow(QWidget *parent = nullptr) : QWidget(parent) {
@@ -109,6 +128,7 @@ protected:
         QPainter p(this);
         p.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing | QPainter::SmoothPixmapTransform);
         drawBackground(p);
+        drawPowerPointBars(p);
         const bool portrait = width() * 10 < height() * 12;
         switch (page) {
         case 0: welcome(p); break;
@@ -230,6 +250,37 @@ private:
             g.setColorAt(1, QColor("#98def7"));
         }
         p.fillRect(rect(), g);
+    }
+
+    const QPixmap &topBarPixmap() const {
+        static const QPixmap pix(assetPath(QStringLiteral("top-bar.png")));
+        return pix;
+    }
+
+    const QPixmap &bottomBarPixmap() const {
+        static const QPixmap pix(assetPath(QStringLiteral("bottom-bar.png")));
+        return pix;
+    }
+
+    void drawPowerPointBars(QPainter &p) const {
+        if (page == 0) return;
+
+        const QPixmap &top = topBarPixmap();
+        const QPixmap &bottom = bottomBarPixmap();
+
+        if (!top.isNull()) {
+            const qreal h = qMax(1.0, width() * (qreal(top.height()) / qreal(top.width())));
+            p.drawPixmap(QRectF(0, 0, width(), h), top, QRectF(0, 0, top.width(), top.height()));
+        } else {
+            p.fillRect(QRectF(0, 0, width(), qMax(16.0, height() * .03)), QColor(10, 16, 24, 210));
+        }
+
+        if (!bottom.isNull()) {
+            const qreal h = qMax(1.0, width() * (qreal(bottom.height()) / qreal(bottom.width())));
+            p.drawPixmap(QRectF(0, height() - h, width(), h), bottom, QRectF(0, 0, bottom.width(), bottom.height()));
+        } else {
+            p.fillRect(QRectF(0, height() - qMax(18.0, height() * .033), width(), qMax(18.0, height() * .033)), QColor(10, 16, 24, 210));
+        }
     }
 
     void paintWords(QPainter &p, const QString &words, const R &area,
@@ -434,8 +485,8 @@ private:
 
     void quickSettings(QPainter &p,bool portrait) const {
         const QSize sz=size();
-        // Keep the PPT's yellow/black top indicators and green brackets, NOT
-        // the photos of Qtile's real top/bottom bars.
+        // Add the PowerPoint bar image first, then overlay the same striped
+        // highlight markers and green brackets shown in the presentation.
         stripes(p,frac(0,0,.11,.031,sz));
         stripes(p,frac(.45,0,.10,.031,sz));
         stripes(p,frac(.90,0,.10,.031,sz));

@@ -170,12 +170,16 @@ for vlc_asset in \
     fi
 done
 
-# Welcome: ship the complete native Qt5 source and launcher icon in the
-# repository. Do not silently install a first-boot guide with missing assets.
+# Welcome: ship the complete native Qt5 source, launcher icon and deck-image
+# assets in the repository. Do not silently install a first-boot guide with
+# missing PowerPoint-derived UI artwork.
 ALT_WELCOME_SOURCE="$ALT_ROOT/Alternix/apps/welcome.cpp"
 ALT_WELCOME_ICON="$ALT_ROOT/Alternix/icons/welcome.png"
-if [ ! -s "$ALT_WELCOME_SOURCE" ] || [ ! -s "$ALT_WELCOME_ICON" ]; then
-    echo "ERROR: Welcome requires Alternix/apps/welcome.cpp and Alternix/icons/welcome.png." >&2
+ALT_WELCOME_ASSET_DIR="$ALT_ROOT/Alternix/assets/welcome"
+ALT_WELCOME_TOP_BAR="$ALT_WELCOME_ASSET_DIR/top-bar.png"
+ALT_WELCOME_BOTTOM_BAR="$ALT_WELCOME_ASSET_DIR/bottom-bar.png"
+if [ ! -s "$ALT_WELCOME_SOURCE" ] || [ ! -s "$ALT_WELCOME_ICON" ] ||    [ ! -s "$ALT_WELCOME_TOP_BAR" ] || [ ! -s "$ALT_WELCOME_BOTTOM_BAR" ]; then
+    echo "ERROR: Welcome requires Alternix/apps/welcome.cpp, Alternix/icons/welcome.png and Alternix/assets/welcome/{top-bar,bottom-bar}.png." >&2
     exit 1
 fi
 
@@ -1237,6 +1241,9 @@ echo "• Building welcome (responsive fullscreen onboarding)..."
 g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome $(pkg-config --cflags --libs Qt5Widgets) || exit 1
 sudo install -m 0755 welcome /usr/local/bin/welcome || exit 1
 sudo install -D -m 0644 icons/welcome.png /usr/share/icons/hicolor/256x256/apps/welcome.png || exit 1
+sudo install -d -m 0755 /usr/share/alternix/welcome || exit 1
+sudo install -m 0644 assets/welcome/top-bar.png /usr/share/alternix/welcome/top-bar.png || exit 1
+sudo install -m 0644 assets/welcome/bottom-bar.png /usr/share/alternix/welcome/bottom-bar.png || exit 1
 # One global launcher: osm-launcher scans /usr/share/applications by default.
 sudo tee /usr/share/applications/welcome.desktop >/dev/null <<'ALT_WELCOME_DESKTOP'
 [Desktop Entry]
