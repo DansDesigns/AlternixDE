@@ -1,0 +1,28 @@
+# AlternixOS dark legacy GTK2 fallback. GTK3/4 use Adwaita dark natively.
+# These colours match Kvantum AlternixDark.
+gtk-color-scheme = "fg_color:#E9EEEA\nbg_color:#292B2D\nbase_color:#202225\ntext_color:#E9EEEA\nselected_bg_color:#28DA58\nselected_fg_color:#101B12"
+style "alternix-dark" {
+    xthickness = 2
+    ythickness = 2
+    bg[NORMAL] = "#292B2D"
+    bg[PRELIGHT] = "#3B4540"
+    bg[ACTIVE] = "#384A40"
+    bg[SELECTED] = "#28DA58"
+    bg[INSENSITIVE] = "#292B2D"
+    fg[NORMAL] = "#E9EEEA"
+    fg[PRELIGHT] = "#FFFFFF"
+    fg[ACTIVE] = "#FFFFFF"
+    fg[SELECTED] = "#101B12"
+    fg[INSENSITIVE] = "#8C9691"
+    base[NORMAL] = "#202225"
+    base[PRELIGHT] = "#252A27"
+    base[ACTIVE] = "#384A40"
+    base[SELECTED] = "#28DA58"
+    base[INSENSITIVE] = "#292B2D"
+    text[NORMAL] = "#E9EEEA"
+    text[PRELIGHT] = "#FFFFFF"
+    text[ACTIVE] = "#FFFFFF"
+    text[SELECTED] = "#101B12"
+    text[INSENSITIVE] = "#8C9691"
+}
+class "*" style "alternix-dark"

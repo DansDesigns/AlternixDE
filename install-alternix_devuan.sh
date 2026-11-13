@@ -172,19 +172,15 @@ if [ ! -s "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp" ] || \
     exit 1
 fi
 
-# Alternix VLC: require the FULL native Qt interface theme before the install.
-# No .vlt files or separate patch/repair commands are used.
-ALT_VLC_THEME_SRC="$ALT_ROOT/Alternix/themes/vlc"
-for vlc_asset in \
-    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
-    "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
-    "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
-    "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.json" \
-    "$ALT_VLC_THEME_SRC/icons/play_up.png" \
-    "$ALT_VLC_THEME_SRC/icons/pause_up.png"; do
-    if [ ! -s "$vlc_asset" ]; then
-        echo "ERROR: Required Alternix VLC theme asset not found: $vlc_asset" >&2
-        echo "Commit Alternix/themes/vlc from the supplied repository assets first." >&2
+# Unified AlternixOS dark theme assets: required before a long ISO build/update.
+ALT_UNIFIED_THEME_SRC="$ALT_ROOT/Alternix/themes/unified"
+for theme_asset in \
+    "$ALT_UNIFIED_THEME_SRC/Kvantum/AlternixDark/AlternixDark.svg" \
+    "$ALT_UNIFIED_THEME_SRC/Kvantum/AlternixDark/AlternixDark.kvconfig" \
+    "$ALT_UNIFIED_THEME_SRC/gtk-2.0/AlternixDark/gtkrc" \
+    "$ALT_ROOT/Alternix/apps/osm-styling.cpp"; do
+    if [ ! -s "$theme_asset" ]; then
+        echo "ERROR: Required unified AlternixOS theme asset missing: $theme_asset" >&2
         exit 1
     fi
 done
@@ -1104,284 +1100,210 @@ fi
 
 ALT_VLC_USER="$TARGET_USER"
 ALT_VLC_HOME="$TARGET_HOME"
-# ────────────────────────────────────────────────
-# Alternix VLC — compiled Qt5 theme + responsive player layout INSIDE VLC.
-# VLC itself is still the standard Qt QMainWindow; Qtile owns tile geometry.
-# Build this shipped, complete source directly here (no patch files/scripts).
-# ────────────────────────────────────────────────
-echo "[VLC] Building and activating Alternix native Qt player theme..."
-sudo apt-get install -y qtbase5-dev qtbase5-dev-tools vlc vlc-plugin-qt qt5-style-kvantum
+# ──────────────────────────────────────────────────────────────
+# AlternixOS unified dark appearance: ONE Kvantum engine/theme for Qt5/Qt6,
+# including VLC's standard Qt interface; Adwaita-dark for GTK3/GTK4/GNOME;
+# native AlternixDark palette for legacy GTK2. No VLC skins2 or extra launcher.
+# osm-styling.cpp manages the SAME preferences instead of competing CSS rules.
+# ──────────────────────────────────────────────────────────────
+ALT_STYLE_USER="$ALT_VLC_USER"
+ALT_STYLE_HOME="$ALT_VLC_HOME"
+echo "[Theme] Installing unified AlternixDark for Qt, GTK, GNOME and native VLC..."
+sudo apt-get install -y qt-style-kvantum gnome-themes-extra gnome-themes-extra-data \
+    adwaita-icon-theme gsettings-desktop-schemas libglib2.0-bin \
+    dconf-gsettings-backend dbus-x11 xdg-desktop-portal xdg-desktop-portal-gtk \
+    vlc vlc-plugin-qt
+sudo install -D -m 0644 \
+    "$ALT_UNIFIED_THEME_SRC/Kvantum/AlternixDark/AlternixDark.svg" \
+    /usr/share/Kvantum/AlternixDark/AlternixDark.svg
+sudo install -D -m 0644 \
+    "$ALT_UNIFIED_THEME_SRC/Kvantum/AlternixDark/AlternixDark.kvconfig" \
+    /usr/share/Kvantum/AlternixDark/AlternixDark.kvconfig
+sudo install -D -m 0644 \
+    "$ALT_UNIFIED_THEME_SRC/gtk-2.0/AlternixDark/gtkrc" \
+    /usr/share/themes/AlternixDark/gtk-2.0/gtkrc
 
-sudo install -d -m 0755 /usr/share/Kvantum/AlternixVLC
-sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.svg" \
-    /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg
-sudo install -m 0644 "$ALT_VLC_THEME_SRC/Kvantum/AlternixVLC/AlternixVLC.kvconfig" \
-    /usr/share/Kvantum/AlternixVLC/AlternixVLC.kvconfig
+# GNOME/libadwaita and Flatpak portals can read the system dark preference,
+# including accounts created after an ISO's live-preview desktop user.
+sudo install -d -m 0755 /usr/share/glib-2.0/schemas
+sudo tee /usr/share/glib-2.0/schemas/90_alternix-unified-dark.gschema.override >/dev/null <<'ALT_DARK_GSETTINGS'
+[org.gnome.desktop.interface]
+gtk-theme='Adwaita-dark'
+color-scheme='prefer-dark'
+ALT_DARK_GSETTINGS
+sudo glib-compile-schemas /usr/share/glib-2.0/schemas
 
-sudo install -d -m 0755 /usr/share/alternix/vlc/icons /usr/share/alternix/vlc/qt5-style
-for vlc_icon in "$ALT_VLC_THEME_SRC"/icons/*.png; do
-    [ -f "$vlc_icon" ] || { echo "ERROR: Alternix VLC icon set is missing." >&2; exit 1; }
-    sudo install -m 0644 "$vlc_icon" /usr/share/alternix/vlc/icons/
-done
-for vlc_style_source in alternixvlcstyle.cpp alternixvlcstyle.json; do
-    sudo install -m 0644 "$ALT_VLC_THEME_SRC/qt5-style/$vlc_style_source" \
-        "/usr/share/alternix/vlc/qt5-style/$vlc_style_source"
-done
+# Login shells and Qtile-launched apps both inherit the Qt style. Do not
+# overwrite QT_QPA_PLATFORMTHEME, GTK_THEME or the user's icon preferences.
+sudo tee /etc/profile.d/alternix-unified-dark.sh >/dev/null <<'ALT_DARK_PROFILE'
+# AlternixOS uniform Qt style; Kvantum chooses the matching dark palette.
+unset GTK_THEME  # Let GTK/GNOME read their native dark preference.
+export QT_STYLE_OVERRIDE=kvantum
+ALT_DARK_PROFILE
+sudo chmod 0644 /etc/profile.d/alternix-unified-dark.sh
 
-ALT_VLC_MOC="$(command -v moc || true)"
-[ -n "$ALT_VLC_MOC" ] || ALT_VLC_MOC=/usr/lib/qt5/bin/moc
-if [ ! -x "$ALT_VLC_MOC" ] || ! command -v qmake >/dev/null 2>&1 || \
-   ! pkg-config --exists Qt5Widgets Qt5Gui Qt5Core; then
-    echo "ERROR: VLC Qt5 theme build tools are unavailable." >&2
-    exit 1
+# Remove ONLY the superseded Alternix VLC style plugin, if installed by the
+# previous integration. Keeping it could re-enable a conflicting QProxyStyle.
+ALT_OLD_QT_STYLE_ROOT="$(qmake -query QT_INSTALL_PLUGINS 2>/dev/null || true)"
+if [ -n "$ALT_OLD_QT_STYLE_ROOT" ] && [ "$ALT_OLD_QT_STYLE_ROOT" != / ]; then
+    sudo rm -f -- "$ALT_OLD_QT_STYLE_ROOT/styles/libalternixvlcstyle.so"
 fi
-ALT_VLC_QT_VERSION="$(qmake -query QT_VERSION 2>/dev/null)"
-case "$ALT_VLC_QT_VERSION" in
-    5.*) ;;
-    *) echo "ERROR: Expected Qt5 qmake, found Qt version: $ALT_VLC_QT_VERSION" >&2; exit 1 ;;
-esac
-ALT_VLC_PLUGIN_ROOT="$(qmake -query QT_INSTALL_PLUGINS 2>/dev/null)"
-if [ -z "$ALT_VLC_PLUGIN_ROOT" ] || [ "$ALT_VLC_PLUGIN_ROOT" = / ]; then
-    echo "ERROR: Cannot determine the Qt5 style plugin directory." >&2
-    exit 1
-fi
-ALT_VLC_BUILD_DIR="$(mktemp -d /tmp/alternix-vlc-native.XXXXXXXX)"
-if ! "$ALT_VLC_MOC" "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
-        -o "$ALT_VLC_BUILD_DIR/alternixvlcstyle.moc" || \
-   ! g++ -std=c++17 -O2 -fPIC -shared \
-        -I "$ALT_VLC_BUILD_DIR" \
-        "$ALT_VLC_THEME_SRC/qt5-style/alternixvlcstyle.cpp" \
-        -o "$ALT_VLC_BUILD_DIR/libalternixvlcstyle.so" \
-        $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core); then
-    echo "ERROR: Alternix native VLC Qt theme failed to compile. The previous plugin remains untouched." >&2
-    rm -rf -- "$ALT_VLC_BUILD_DIR"
-    exit 1
-fi
-sudo install -D -m 0644 "$ALT_VLC_BUILD_DIR/libalternixvlcstyle.so" \
-    "$ALT_VLC_PLUGIN_ROOT/styles/libalternixvlcstyle.so"
-rm -rf -- "$ALT_VLC_BUILD_DIR"
-if [ ! -s "$ALT_VLC_PLUGIN_ROOT/styles/libalternixvlcstyle.so" ]; then
-    echo "ERROR: Native Qt theme plugin installation failed." >&2
-    exit 1
-fi
+sudo rm -f -- "$ALT_STYLE_HOME/.local/share/vlc/skins2/Alternix-VLC.vlt" \
+    /etc/skel/.local/share/vlc/skins2/Alternix-VLC.vlt
 
-# The preceding integration installed this exact fixed-size legacy skin.
-# It must not remain enabled as a seemingly valid Alternix player option.
-# Remove only our own named skin file; leave other user skins untouched.
-sudo rm -f -- "$ALT_VLC_HOME/.local/share/vlc/skins2/Alternix-VLC.vlt" \
-              "/etc/skel/.local/share/vlc/skins2/Alternix-VLC.vlt"
-
-# Configure the logged-in desktop account and defaults for future users.
-# Do not change the globally selected Kvantum theme or create new launchers.
-sudo python3 - "$ALT_VLC_HOME" "$ALT_VLC_USER" /etc/skel <<'ALT_VLC_CONFIGURATION'
+# Change existing configuration IN PLACE, retaining unrelated settings,
+# preserving any user GTK CSS, and avoiding duplicate .desktop launchers.
+sudo python3 - "$ALT_STYLE_HOME" "$ALT_STYLE_USER" /etc/skel <<'ALT_UNIFIED_DARK_CONFIG'
 import os
 import pwd
 import re
 import sys
 from pathlib import Path
 
-home = Path(sys.argv[1])
-account = pwd.getpwnam(sys.argv[2])
+home = Path(sys.argv[1]); account = pwd.getpwnam(sys.argv[2]); skel = Path(sys.argv[3])
 
-
-def save(path, contents, owner):
+def save(path, data, owner):
+    if path.is_symlink():
+        raise RuntimeError(f'Refusing to overwrite symlinked appearance config: {path}')
     missing = []
     parent = path.parent
     while not parent.exists():
-        missing.append(parent)
-        parent = parent.parent
+        missing.append(parent); parent = parent.parent
     path.parent.mkdir(parents=True, exist_ok=True)
-    for directory in reversed(missing):
-        if owner is not None:
-            os.chown(directory, *owner)
-    if not path.is_file() or path.read_text(encoding='utf-8') != contents:
-        path.write_text(contents, encoding='utf-8')
-    if owner is not None:
-        os.chown(path, *owner)
+    if owner:
+        for d in reversed(missing): os.chown(d, *owner)
+    if not path.exists() or path.read_text(encoding='utf-8') != data:
+        path.write_text(data, encoding='utf-8')
+    if owner: os.chown(path, *owner)
     os.chmod(path, 0o644)
 
-
-def modify_ini(path, section_name, changes, owner):
-    """Preserve every unrelated preference and replace only requested keys."""
+def set_ini(path, section, keys, owner, suppress_app_exceptions=False):
     lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.is_file() else []
-    output = []
-    active = None
-    found = False
-    written = set()
-
+    result, active, seen, done = [], None, False, set()
     def finish():
-        for key, value in changes.items():
-            if key not in written:
-                output.append(f'{key}={value}\n')
-                written.add(key)
-
+        for key, value in keys.items():
+            if key not in done:
+                result.append(f'{key}={value}\n'); done.add(key)
     for line in lines:
-        section = re.match(r'^\s*\[([^]]+)\]', line)
-        if section:
-            if active == section_name:
-                finish()
-            active = section.group(1).strip()
-            found |= active == section_name
-            output.append(line)
-            continue
-        if active == section_name:
-            key_match = re.match(r'^\s*#?\s*([\w.-]+)\s*=', line)
-            if key_match and key_match.group(1) in changes:
-                key = key_match.group(1)
-                if key not in written:
-                    output.append(f'{key}={changes[key]}\n')
-                    written.add(key)
-                continue
-        output.append(line)
-    if active == section_name:
-        finish()
-    if not found:
-        if output and not output[-1].endswith('\n'):
-            output[-1] += '\n'
-        output.append(f'\n[{section_name}]\n')
-        finish()
-    save(path, ''.join(output), owner)
-
-
-def map_application_kvantum(path, owner):
-    """Assign just vlc to AlternixVLC; preserve all other app assignments."""
-    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.is_file() else []
-    result = []
-    section = None
-    seen_section = False
-    wrote = False
-    for line in lines:
-        heading = re.match(r'^\s*\[([^]]+)\]', line)
-        if heading:
-            if section == 'Applications' and not wrote:
-                result.append('AlternixVLC=vlc\n')
-                wrote = True
-            section = heading.group(1).strip()
-            seen_section |= section == 'Applications'
+        header = re.match(r'^\s*\[([^]]+)\]\s*$', line)
+        if header:
+            if active == section: finish()
+            active = header.group(1).strip()
+            seen |= active == section
             result.append(line)
             continue
-        assignment = re.match(r'^(\s*)([A-Za-z0-9_.-]+)(\s*=\s*)([^\r\n]*)(\r?\n?)$', line)
-        if section == 'Applications' and assignment:
-            lead, theme, sep, apps, ending = assignment.groups()
-            items = [app.strip() for app in apps.split(',') if app.strip() and app.strip() != 'vlc']
-            if theme == 'AlternixVLC' and not wrote:
-                items.append('vlc')
-                wrote = True
-            if items:
-                result.append(lead + theme + sep + ', '.join(items) + (ending or '\n'))
-            continue
+        if suppress_app_exceptions and active == 'Applications':
+            if line.strip() and not line.lstrip().startswith(('#', ';')):
+                result.append('# Alternix unified dark (former app rule): ' + line)
+                continue
+        if active == section:
+            match = re.match(r'^\s*([A-Za-z0-9_.-]+)\s*=', line)
+            if match and match.group(1) in keys:
+                key = match.group(1)
+                if key not in done:
+                    result.append(f'{key}={keys[key]}\n'); done.add(key)
+                continue
         result.append(line)
-    if section == 'Applications' and not wrote:
-        result.append('AlternixVLC=vlc\n')
-    elif not seen_section:
-        if result and not result[-1].endswith('\n'):
-            result[-1] += '\n'
-        result.extend(['\n[Applications]\n', 'AlternixVLC=vlc\n'])
+    if active == section: finish()
+    if not seen:
+        if result and not result[-1].endswith('\n'): result[-1] += '\n'
+        result.append(f'\n[{section}]\n'); finish()
     save(path, ''.join(result), owner)
 
+def gtk2(path, owner):
+    lines = path.read_text(encoding='utf-8').splitlines(keepends=True) if path.is_file() else []
+    result, found = [], False
+    for line in lines:
+        if re.match(r'^\s*gtk-theme-name\s*=', line):
+            if not found: result.append('gtk-theme-name="AlternixDark"\n')
+            found = True
+        else: result.append(line)
+    if not found: result.append('gtk-theme-name="AlternixDark"\n')
+    save(path, ''.join(result), owner)
 
-def remove_prior_duplicate_launcher(path):
-    """Remove only the redundant user launcher generated by v1 integration."""
-    if not path.is_file() or path.is_symlink():
-        return
-    content = path.read_text(encoding='utf-8')
-    if ('QT_STYLE_OVERRIDE=kvantum' in content and
-            '--intf=qt' in content and
-            '--no-qt-video-autoresize' in content and
-            re.search(r'(?m)^\s*\[Desktop Entry\]\s*$', content)):
-        path.unlink()
-        print('[VLC] Removed previous generated duplicate launcher:', path)
-    else:
-        print('[VLC] Kept independently customized user launcher:', path)
+def xinitrc(path, owner):
+    if not path.is_file() or path.is_symlink(): return
+    text = path.read_text(encoding='utf-8')
+    start = '# Alternix unified Qt style'
+    if start in text: return
+    lines = text.splitlines(keepends=True)
+    pos = next((i for i,l in enumerate(lines) if l.lstrip().startswith('exec ') and 'qtile' in l), None)
+    if pos is None: return  # Never rewrite an unrelated window-manager startup.
+    lines.insert(pos, start+'\nunset GTK_THEME\nexport QT_STYLE_OVERRIDE=kvantum\n')
+    save(path, ''.join(lines), owner)
 
+def legacy_css(path):
+    if not path.is_file() or path.is_symlink(): return
+    css = path.read_text(encoding='utf-8')
+    old = r'^\s*\*\s*\{\s*background-color:\s*rgb\(40,\s*40,\s*40\);\s*color:\s*white;\s*font-size:\s*\d+px;\s*\}\s*$'
+    if re.fullmatch(old, css, re.I | re.S):
+        path.unlink()  # Only remove old osm-styling-generated, global '*' CSS.
 
-for target, owner in ((home, (account.pw_uid, account.pw_gid)), (Path(sys.argv[3]), None)):
-    map_application_kvantum(target / '.config/Kvantum/kvantum.kvconfig', owner)
-    modify_ini(target / '.config/vlc/vlcrc', 'core', {'intf': 'qt'}, owner)
-    modify_ini(target / '.config/vlc/vlcrc', 'qt', {
-        'qt-video-autoresize': '0',
-        'qt-dark-palette': '0',
-        'embedded-video': '1',
-        'qt-minimal-view': '0',
-    }, owner)
-    modify_ini(target / '.config/vlc/vlc-qt-interface.conf', 'MainWindow', {
-        'QtStyle': 'AlternixVLC',
-        'MainToolbar1': '65;2;10;9;19;20;7;36;65',
-        'MainToolbar2': '65;1;22;0;23;12;65',
-        'ToolbarPos': 'false',
-    }, owner)
-    remove_prior_duplicate_launcher(target / '.local/share/applications/vlc.desktop')
+for folder, owner in ((home, (account.pw_uid, account.pw_gid)), (skel, None)):
+    set_ini(folder/'.config/Kvantum/kvantum.kvconfig', 'General', {'theme':'AlternixDark'}, owner, True)
+    for v in ('gtk-3.0', 'gtk-4.0'):
+        set_ini(folder/f'.config/{v}/settings.ini', 'Settings',
+                {'gtk-theme-name':'Adwaita-dark','gtk-application-prefer-dark-theme':'1'}, owner)
+    gtk2(folder/'.gtkrc-2.0', owner)
+    legacy_css(folder/'.config/gtk-3.0/gtk.css')
+    set_ini(folder/'.config/vlc/vlcrc', 'core', {'intf':'qt'}, owner)
+    set_ini(folder/'.config/vlc/vlcrc', 'qt',
+            {'qt-video-autoresize':'0','embedded-video':'1','qt-minimal-view':'0'}, owner)
+    set_ini(folder/'.config/vlc/vlc-qt-interface.conf', 'MainWindow', {'QtStyle':'kvantum'}, owner)
+    for v in ('qt5ct', 'qt6ct'):
+        p = folder/f'.config/{v}/{v}.conf'
+        if p.exists(): set_ini(p, 'Appearance', {'style':'kvantum'}, owner)
+    xinitrc(folder/'.xinitrc', owner)
+    launcher = folder/'.local/share/applications/vlc.desktop'
+    if launcher.is_file() and not launcher.is_symlink():
+        entry = launcher.read_text(encoding='utf-8')
+        if (('QT_STYLE_OVERRIDE=AlternixVLC' in entry or 'QT_STYLE_OVERRIDE=kvantum' in entry)
+                and '--intf=qt' in entry and '--no-qt-video-autoresize' in entry
+                and '[Desktop Entry]' in entry):
+            launcher.unlink()  # Legacy launcher generated by our earlier integration.
 
-
-# Modify the *existing* distribution desktop entry IN PLACE, so no extra VLC
-# appears in osm-launcher. --intf=qt wins over a saved Skins2 preference;
-# this is especially important when VLC previously ran a .vlt skin. Preserve
-# the distro desktop name, menu categories, MIME types and %U arguments.
+# Remove a style override from the ORIGINAL distro VLC launcher; never create
+# a second VLC desktop entry or change unrelated desktop-entry fields.
 launcher = Path('/usr/share/applications/vlc.desktop')
 if launcher.is_file() and not launcher.is_symlink():
-    raw = launcher.read_text(encoding='utf-8')
+    data = launcher.read_text(encoding='utf-8')
     output = []
-    changed_exec = 0
-    for line in raw.splitlines(keepends=True):
-        if not line.startswith('Exec='):
-            output.append(line)
-            continue
-        command = line[len('Exec='):].rstrip('\r\n')
-        # Only change commands which start the system VLC binary.
-        match = re.search(r'(?<!\S)(?:/[^\s]*)?\bvlc(?=\s|$)', command)
-        if match is None:
-            output.append(line)
-            continue
-        command = re.sub(r'(?<!\S)--intf(?:=|\s+)skins2(?=\s|$)', '', command)
-        command = re.sub(r'(?<!\S)--skins2-last(?:=\S+|\s+\S+)', '', command)
-        command = re.sub(r'(?<!\S)QT_STYLE_OVERRIDE=\S+\s*', '', command).strip()
-        match = re.search(r'(?<!\S)(?:/[^\s]*)?\bvlc(?=\s|$)', command)
-        # The natural user-native interface is enforced for THIS launcher,
-        # not the global /usr/bin/vlc binary or unrelated applications.
-        if not re.search(r'(?<!\S)--intf(?:=|\s+)qt(?=\s|$)', command):
-            command = command[:match.end()] + ' --intf=qt' + command[match.end():]
-        if '--no-qt-video-autoresize' not in command:
-            command = command.replace('--intf=qt', '--intf=qt --no-qt-video-autoresize', 1)
-        # No extra desktop entry: this style override is specific to VLC only.
-        if command.startswith('env '):
-            command = 'env QT_STYLE_OVERRIDE=AlternixVLC ' + command[4:]
-        else:
-            command = 'env QT_STYLE_OVERRIDE=AlternixVLC ' + command
-        output.append('Exec=' + command + '\n')
-        changed_exec += 1
-    if changed_exec:
-        updated = ''.join(output)
-        if updated != raw:
-            backup = Path('/usr/share/alternix/vlc/vlc.desktop.original')
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            if not backup.exists():
-                backup.write_text(raw, encoding='utf-8')
-                backup.chmod(0o644)
-            launcher.write_text(updated, encoding='utf-8')
-            launcher.chmod(0o644)
-        print(f'[VLC] Updated {changed_exec} existing desktop Exec line(s) for native Qt.')
-    else:
-        print('[VLC] WARNING: /usr/share/applications/vlc.desktop has no recognized VLC command.')
-else:
-    print('[VLC] WARNING: distro VLC launcher not present: /usr/share/applications/vlc.desktop')
+    for line in data.splitlines(keepends=True):
+        if line.startswith('Exec=') and 'vlc' in line:
+            value = line[5:].rstrip('\r\n')
+            value = re.sub(r'(?<!\S)QT_STYLE_OVERRIDE=(?:AlternixVLC|kvantum)(?=\s|$)\s*', '', value)
+            value = re.sub(r'(?<!\S)--intf(?:=|\s+)skins2(?=\s|$)', '--intf=qt', value)
+            value = re.sub(r'(?<!\S)--skins2-last(?:=\S+|\s+\S+)', '', value)
+            value = re.sub(r'^env\s+(?=(?:/?\S*\bvlc\b))', '', value)
+            output.append('Exec='+value+'\n')
+        else: output.append(line)
+    new = ''.join(output)
+    if new != data:
+        launcher.write_text(new, encoding='utf-8')
+        launcher.chmod(0o644)
+print('[Theme] Kvantum global theme, GTK settings and VLC native Qt synchronized.')
+ALT_UNIFIED_DARK_CONFIG
 
-print('[VLC] Alternix Qt player layout and theme selected; standard VLC window remains under Qtile.')
-ALT_VLC_CONFIGURATION
+# If a real user session exists, set dconf as THAT user, not as root. For ISO
+# chroots and new users, the schema override and /etc/skel are already seeded.
+if [ "${ALT_IS_LIVE_BUILD:-${ALT_CLAMAV_BUILD_CHROOT:-0}}" != 1 ] && \
+   command -v dbus-run-session >/dev/null 2>&1 && command -v gsettings >/dev/null 2>&1; then
+    for kv in 'gtk-theme Adwaita-dark' 'color-scheme prefer-dark'; do
+        read -r name value <<< "$kv"
+        sudo -u "$ALT_STYLE_USER" -H dbus-run-session -- \
+            gsettings set org.gnome.desktop.interface "$name" "$value" || \
+            echo "WARNING: GNOME setting $name could not be written for $ALT_STYLE_USER." >&2
+    done
+fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     sudo update-desktop-database /usr/share/applications 2>/dev/null || true
-    sudo update-desktop-database "$ALT_VLC_HOME/.local/share/applications" 2>/dev/null || true
 fi
-if [ ! -s /usr/share/Kvantum/AlternixVLC/AlternixVLC.svg ] || \
-   [ ! -s "$ALT_VLC_HOME/.config/vlc/vlc-qt-interface.conf" ]; then
-    echo "ERROR: AlternixVLC native Qt theme installation failed verification." >&2
+if [ ! -s /usr/share/Kvantum/AlternixDark/AlternixDark.svg ] || \
+   [ ! -s "$ALT_STYLE_HOME/.config/Kvantum/kvantum.kvconfig" ]; then
+    echo "ERROR: Unified AlternixDark theme failed verification." >&2
     exit 1
 fi
-# Do not force-close VLC during an installation or updater (unsaved playback
-# state could be lost). Close all running VLC instances after the update.
-if pgrep -u "$ALT_VLC_USER" -x vlc >/dev/null 2>&1; then
-    echo "[VLC] NOTE: VLC is running. Exit all VLC windows/tray instances before reopening it."
-fi
-echo "[VLC] Compiled Alternix Qt theme installed; VLC uses a single tiled native window."
+echo "[Theme] AlternixDark active for Qt/Kvantum, GNOME/GTK in dark mode, VLC native Qt (no skins2)."
 
 # ────────────────────────────────────────────────
 # Install Wallpapers
@@ -1569,6 +1491,9 @@ if [ -x /usr/local/bin/welcome ]; then
     /usr/local/bin/welcome --once --startup-delay >/dev/null 2>&1 &
 fi
 # End AlternixOS Welcome first-login guide.
+# Alternix unified Qt style
+unset GTK_THEME
+export QT_STYLE_OVERRIDE=kvantum
 exec dbus-launch --exit-with-session "$HOME/.qtile_venv/bin/qtile" start
 EOF
 chmod +x "$TARGET_HOME/.xinitrc"
