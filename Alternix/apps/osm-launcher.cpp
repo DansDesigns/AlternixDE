@@ -30,6 +30,17 @@
 #include <QVariantAnimation>
 #include <QGraphicsEffect>
 #include <QPair>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QCryptographicHash>
+#include <QUuid>
+#include <QInputDialog>
+#include <QMenu>
+#include <QContextMenuEvent>
+#include <QLineEdit>
+#include <QHash>
+#include <QStyle>
 #include <QEasingCurve>
 #include <QPointer>
 #include <QFile>
@@ -240,6 +251,25 @@ public:
     using QWidget::QWidget;
 
     bool isTransitioning() const { return opening || dismissing; }
+    bool editingDrag = false;
+    void replaceViewTiles(const QVector<QWidget*> &tiles, int columns) {
+        if (isTransitioning()) return;
+        for (const auto &animation : scrollRevealAnimations) {
+            if (!animation) continue;
+            animation->stop();
+            animation->deleteLater();
+        }
+        scrollRevealAnimations.clear();
+        animationColumns = columns;
+        animationTiles.clear();
+        for (QWidget *tile : tiles) animationTiles.append(tile);
+        rowReveals.clear();
+        rowReveals.resize((animationTiles.size() + columns - 1) / columns);
+        for (RowReveal &row : rowReveals) {
+            row.started = true;
+            row.completed = true;
+        }
+    }
     void setIconLoader(QTimer *timer) { iconLoader = timer; }
     void setRowIconLoader(std::function<void(int)> callback) {
         requestRowIcons = std::move(callback);
@@ -651,6 +681,9 @@ struct AppEntry {
     QString name;
     QString exec;
     QString icon;
+    // Persistent desktop-entry identity: group membership survives app updates
+    // that change Name=, Exec= or Icon= within the same .desktop file.
+    QString desktopPath;
 };
 
 static QStringList standardDesktopDirs() {
@@ -776,7 +809,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
             settings.endGroup();
             if (name.isEmpty() || exec.isEmpty() || nodisplay == "true")
                 continue;
-            const AppEntry entry{name, cleanExec(exec), icon};
+            const AppEntry entry{name, cleanExec(exec), icon, QDir::cleanPath(path)};
             if (isPicomApp(entry, path)) continue;
             apps.append(entry);
         }
@@ -788,7 +821,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
 }
 
 static constexpr quint32 launcherCacheMagic = 0x4f534d4c; // 'OSML'
-static constexpr quint32 launcherCacheVersion = 2; // Rebuild old caches including Picom
+static constexpr quint32 launcherCacheVersion = 3; // Desktop path needed for persistent groups
 
 static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
     QFile cache(cachePath);
@@ -816,7 +849,7 @@ static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
     QList<AppEntry> cachedApps;
     for (quint32 i = 0; i < appCount; ++i) {
         AppEntry entry;
-        stream >> entry.name >> entry.exec >> entry.icon;
+        stream >> entry.name >> entry.exec >> entry.icon >> entry.desktopPath;
         if (stream.status() != QDataStream::Ok) return false;
         cachedApps.append(entry);
     }
@@ -846,7 +879,7 @@ static void writeDesktopCache(const QString &cachePath,
     for (const DesktopCacheStamp &stamp : files)
         stream << stamp.path << stamp.modifiedMs << stamp.size << stamp.directory;
     for (const AppEntry &entry : apps)
-        stream << entry.name << entry.exec << entry.icon;
+        stream << entry.name << entry.exec << entry.icon << entry.desktopPath;
     if (stream.status() == QDataStream::Ok) cache.commit();
     else cache.cancelWriting();
 }
@@ -972,175 +1005,369 @@ static bool launchDesktopCommand(const QString &command) {
     return QProcess::startDetached(program, parts);
 }
 
-// ──────────────────────────────  AppTile (lazy icon loading)
-class AppTile : public QFrame {
-    AppEntry entry;
-    bool dragging = false;
-    QPoint startPos;
-    QLabel *iconLabel;
+// Group membership is stored separately from the discovered application cache.
+// Stable app keys do not depend on .desktop directory iteration or sort order.
+static QString appKey(const AppEntry &app) {
+    const QByteArray signature = app.desktopPath.isEmpty()
+        ? (app.name + QChar(0x001f) + app.exec).toUtf8()
+        : app.desktopPath.toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(
+        signature, QCryptographicHash::Sha256).toHex());
+}
+
+struct LauncherGroup {
+    QString id;
+    QString name;
+    QStringList members;
+};
+
+class LauncherGroups {
+    QString configPath;
+    QList<LauncherGroup> groups;
+    QSet<QString> installed;
 
 public:
-    explicit AppTile(const AppEntry &e, QWidget *parent=nullptr)
-        : QFrame(parent), entry(e), iconLabel(nullptr)
-    {
+    explicit LauncherGroups(const QString &path, const QList<AppEntry> &apps)
+        : configPath(path) {
+        for (const AppEntry &app : apps) installed.insert(appKey(app));
+        QFile file(configPath);
+        if (!file.open(QIODevice::ReadOnly)) return;
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (!doc.isObject() || doc.object().value("version").toInt() != 1) return;
+        QSet<QString> assigned;
+        QSet<QString> groupIds;
+        for (const QJsonValue &v : doc.object().value("groups").toArray()) {
+            if (!v.isObject()) continue;
+            const QJsonObject object = v.toObject();
+            LauncherGroup group;
+            group.id = object.value("id").toString().trimmed();
+            group.name = object.value("name").toString().trimmed().left(64);
+            if (group.id.isEmpty() || groupIds.contains(group.id)) continue;
+            if (group.name.isEmpty()) group.name = QStringLiteral("New Group");
+            for (const QJsonValue &item : object.value("apps").toArray()) {
+                const QString key = item.toString();
+                if (installed.contains(key) && !assigned.contains(key)) {
+                    group.members.append(key);
+                    assigned.insert(key);
+                }
+            }
+            if (group.members.isEmpty()) continue;
+            groupIds.insert(group.id);
+            groups.append(group);
+        }
+    }
+
+    const QList<LauncherGroup> &all() const { return groups; }
+    const LauncherGroup *byId(const QString &id) const {
+        for (const LauncherGroup &g : groups) if (g.id == id) return &g;
+        return nullptr;
+    }
+    QString owningGroup(const QString &app) const {
+        for (const LauncherGroup &g : groups)
+            if (g.members.contains(app)) return g.id;
+        return {};
+    }
+    bool save() const {
+        QJsonArray stored;
+        for (const LauncherGroup &g : groups) {
+            QJsonArray items;
+            for (const QString &key : g.members) items.append(key);
+            QJsonObject object;
+            object.insert("id", g.id);
+            object.insert("name", g.name);
+            object.insert("apps", items);
+            stored.append(object);
+        }
+        QJsonObject root;
+        root.insert("version", 1);
+        root.insert("groups", stored);
+        QDir().mkpath(QFileInfo(configPath).absolutePath());
+        QSaveFile file(configPath);
+        if (!file.open(QIODevice::WriteOnly)) {
+            qWarning() << "osm-launcher: could not save app groups" << configPath;
+            return false;
+        }
+        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        const QByteArray content = QJsonDocument(root).toJson(QJsonDocument::Indented);
+        if (file.write(content) != content.size() || !file.commit()) {
+            qWarning() << "osm-launcher: failed to commit app groups" << configPath;
+            return false;
+        }
+        return true;
+    }
+    QString create(const QString &first, const QString &second) {
+        if (first == second || !installed.contains(first) || !installed.contains(second)) return {};
+        if (!owningGroup(first).isEmpty() || !owningGroup(second).isEmpty()) return {};
+        LauncherGroup group;
+        group.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        group.name = QStringLiteral("New Group");
+        group.members << second << first;
+        groups.append(group);
+        save();
+        return group.id;
+    }
+    bool moveToGroup(const QString &key, const QString &destination) {
+        if (!installed.contains(key) || !byId(destination)) return false;
+        if (owningGroup(key) == destination) return false;
+        for (int i = groups.size() - 1; i >= 0; --i) {
+            groups[i].members.removeAll(key);
+            if (groups[i].members.isEmpty()) groups.removeAt(i);
+        }
+        for (LauncherGroup &group : groups) if (group.id == destination) {
+            group.members.append(key);
+            save();
+            return true;
+        }
+        return false;
+    }
+    bool ungroupApp(const QString &key) {
+        bool changed = false;
+        for (int i = groups.size() - 1; i >= 0; --i) {
+            if (groups[i].members.removeAll(key) > 0) changed = true;
+            if (groups[i].members.isEmpty()) groups.removeAt(i);
+        }
+        if (changed) save();
+        return changed;
+    }
+    bool rename(const QString &id, const QString &name) {
+        const QString clean = name.trimmed().left(64);
+        if (clean.isEmpty()) return false;
+        for (LauncherGroup &group : groups) if (group.id == id) {
+            if (group.name == clean) return false;
+            group.name = clean;
+            save();
+            return true;
+        }
+        return false;
+    }
+    bool dissolve(const QString &id) {
+        for (int i = 0; i < groups.size(); ++i) if (groups[i].id == id) {
+            groups.removeAt(i);
+            save();
+            return true;
+        }
+        return false;
+    }
+    bool merge(const QString &source, const QString &destination) {
+        if (source == destination || !byId(source) || !byId(destination)) return false;
+        const QStringList members = byId(source)->members;
+        for (LauncherGroup &group : groups) if (group.id == destination) {
+            for (const QString &member : members)
+                if (!group.members.contains(member)) group.members.append(member);
+            break;
+        }
+        for (int i = 0; i < groups.size(); ++i) if (groups[i].id == source) {
+            groups.removeAt(i);
+            break;
+        }
+        save();
+        return true;
+    }
+    bool reorder(const QString &groupId, const QString &moving, const QString &before) {
+        for (LauncherGroup &group : groups) if (group.id == groupId) {
+            if (moving == before || !group.members.contains(moving) ||
+                !group.members.contains(before)) return false;
+            group.members.removeAll(moving);
+            group.members.insert(group.members.indexOf(before), moving);
+            save();
+            return true;
+        }
+        return false;
+    }
+};
+
+struct LauncherItem {
+    enum Kind { Application, Folder } kind = Application;
+    AppEntry app;
+    QString key;
+    QString groupId;
+    QString title;
+    QList<AppEntry> preview;
+};
+
+static void activateLauncherApp(const AppEntry &app, LauncherWindow *window) {
+    if (!window || window->isTransitioning()) return;
+    const QString command = app.exec;
+    if (needsPolkit(command)) {
+        if (!polkitPamUsesAlternix()) {
+            QMessageBox::warning(window, "AlternixOS PolicyKit authentication",
+                "The PolicyKit PAM rule is not currently connected to "
+                "the existing Alternix pattern/PIN verifier.\n\n"
+                "The existing authentication setup may have rolled back "
+                "PolicyKit after its live test failed. Run the updated "
+                "alternix-auth-setup.sh from your normal desktop session.");
+            return;
+        }
+        if (!polkitAgentRunning() && !startPolkitAgent()) {
+            QMessageBox::warning(window, "PolicyKit graphical agent unavailable",
+                "No installed graphical PolicyKit agent could be started "
+                "in the current Qtile session.\n\n"
+                "An existing PolicyKit agent is required before "
+                "Synaptic can request the Alternix pattern/PIN.");
+            return;
+        }
+        QPointer<LauncherWindow> safeWindow(window);
+        QTimer::singleShot(1100, window, [command, safeWindow]() {
+            if (!safeWindow) return;
+            if (!polkitAgentRunning()) {
+                QMessageBox::warning(safeWindow, "PolicyKit agent could not register",
+                    "The graphical agent did not stay running. Check "
+                    "the Qtile session D-Bus address and the PolicyKit "
+                    "diagnostic output before retrying Synaptic.");
+                return;
+            }
+            if (launchDesktopCommand(command)) safeWindow->dismissWithAnimation();
+            else QMessageBox::warning(safeWindow, "Could not start application",
+                                       "Failed to start: " + command);
+        });
+        return;
+    }
+    if (launchDesktopCommand(command)) window->dismissWithAnimation();
+    else qWarning() << "osm-launcher: failed to start desktop command:" << command;
+}
+
+// A card can represent either an application or an app folder. The nested
+// icon/label widgets never steal mouse events from this card's gesture handler.
+class AppTile : public QFrame {
+    LauncherItem data;
+    QLabel *iconLabel = nullptr;
+    QWidget *hoverBox = nullptr;
+    bool moved = false;
+    QPoint pressedAt;
+    std::function<void(const LauncherItem &)> activated;
+    std::function<void(const LauncherItem &, const QPoint &)> contextMenu;
+
+public:
+    explicit AppTile(const LauncherItem &item, QWidget *parent = nullptr)
+        : QFrame(parent), data(item) {
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAutoFillBackground(false);
-        setStyleSheet("QFrame { background: #00000099; border: none; }");
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         setMinimumSize(150, 160);
+        setStyleSheet("QFrame { background: #00000099; border: none; }");
+        setContextMenuPolicy(Qt::DefaultContextMenu);
 
-        QWidget *hoverBox = new QWidget(this);
+        hoverBox = new QWidget(this);
         hoverBox->setObjectName("hoverBox");
-        hoverBox->setStyleSheet(
-            "#hoverBox { background: #80708099; border-radius: 20px; }"
-            "#hoverBox:hover { background-color: #282828; border: 1px solid #ffffff; }"
-        );
-
+        hoverBox->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setDropHighlighted(false);
         QVBoxLayout *v = new QVBoxLayout(hoverBox);
-        v->setContentsMargins(16,16,16,16);
+        v->setContentsMargins(16, 16, 16, 16);
         v->setSpacing(8);
         v->setAlignment(Qt::AlignCenter);
 
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 48 : 48;
-
+        const int iconSize = 48;
         iconLabel = new QLabel(hoverBox);
         iconLabel->setAlignment(Qt::AlignCenter);
-
-        // Transparent placeholder to keep layout stable
         QPixmap placeholder(iconSize, iconSize);
         placeholder.fill(Qt::transparent);
         iconLabel->setPixmap(placeholder);
-
         v->addWidget(iconLabel);
 
-        QLabel *lbl = new QLabel(e.name, hoverBox);
-        lbl->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
-        lbl->setWordWrap(true);
-        lbl->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-        lbl->setMinimumHeight(60);
-        lbl->setMaximumHeight(200);
-        // Font size is inherited from QApplication font (set from UI settings config)
-        v->addWidget(lbl);
+        QLabel *label = new QLabel(data.title, hoverBox);
+        label->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
+        label->setWordWrap(true);
+        label->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        label->setMinimumHeight(60);
+        label->setMaximumHeight(200);
+        v->addWidget(label);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
-        outer->setContentsMargins(0,0,0,0);
+        outer->setContentsMargins(0, 0, 0, 0);
         outer->addWidget(hoverBox);
     }
 
-    // Called later by the timer to actually load the icon
+    const LauncherItem &item() const { return data; }
+    void setActivated(std::function<void(const LauncherItem &)> callback) {
+        activated = std::move(callback);
+    }
+    void setContextHandler(std::function<void(const LauncherItem &, const QPoint &)> callback) {
+        contextMenu = std::move(callback);
+    }
+    void setDropHighlighted(bool active) {
+        if (!hoverBox) return;
+        hoverBox->setStyleSheet(active
+            ? "#hoverBox { background: #63619ccc; border: 2px solid white; border-radius: 20px; }"
+            : "#hoverBox { background: #80708099; border-radius: 20px; }"
+              "#hoverBox:hover { background-color: #282828; border: 1px solid white; }");
+    }
     void loadIcon() {
-        if (!iconLabel)
-            return;
-
-        int iconSize = QApplication::primaryScreen()->size().width() <= 720 ? 48 : 48;
-
-        // If there is no icon defined at all, go straight to the puzzle placeholder
-        if (entry.icon.trimmed().isEmpty()) {
-            iconLabel->setPixmap(QPixmap());
-            iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:48px;");
+        if (!iconLabel) return;
+        if (data.kind == LauncherItem::Folder) {
+            const int canvasSize = 64;
+            const int iconSize = 27;
+            QPixmap collage(canvasSize, canvasSize);
+            collage.fill(Qt::transparent);
+            QPainter painter(&collage);
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform);
+            painter.setBrush(QColor(255, 255, 255, 24));
+            painter.setPen(Qt::NoPen);
+            painter.drawRoundedRect(QRectF(0, 0, 64, 64), 11, 11);
+            for (int i = 0; i < data.preview.size() && i < 4; ++i) {
+                const AppEntry &app = data.preview.at(i);
+                const int x = 4 + (i % 2) * 31;
+                const int y = 4 + (i / 2) * 31;
+                const QIcon icon = DesktopIconResolver::resolve(app.icon, iconSize);
+                const QPixmap picture = icon.pixmap(iconSize, iconSize);
+                if (!picture.isNull()) painter.drawPixmap(x, y, picture);
+                else {
+                    painter.setBrush(QColor(255, 255, 255, 90));
+                    painter.drawRoundedRect(QRectF(x + 3, y + 3, 21, 21), 4, 4);
+                }
+            }
+            painter.end();
+            iconLabel->setText(QString());
+            iconLabel->setPixmap(collage);
             return;
         }
-
-        QPixmap pix;
-        const QIcon icon = DesktopIconResolver::resolve(entry.icon, iconSize);
-        if (!icon.isNull())
-            pix = icon.pixmap(iconSize, iconSize);
-
-        if (!pix.isNull()) {
+        const QIcon icon = DesktopIconResolver::resolve(data.app.icon, 48);
+        const QPixmap picture = icon.pixmap(48, 48);
+        if (!picture.isNull()) {
             iconLabel->setText(QString());
             iconLabel->setStyleSheet(QString());
-            iconLabel->setPixmap(
-                pix.scaled(iconSize, iconSize, Qt::KeepAspectRatio, Qt::SmoothTransformation)
-            );
+            iconLabel->setPixmap(picture.scaled(48, 48, Qt::KeepAspectRatio,
+                                               Qt::SmoothTransformation));
         } else {
-            // fallback if icon cannot be resolved
             iconLabel->setPixmap(QPixmap());
-            iconLabel->setText("🧩");
-            iconLabel->setStyleSheet("font-size:48px;");
+            iconLabel->setText(QString::fromUtf8("🧩"));
+            iconLabel->setStyleSheet("font-size: 48px;");
         }
     }
 
 protected:
-    void mousePressEvent(QMouseEvent *e) override {
-        dragging = false;
-        startPos = e->pos();
-        QFrame::mousePressEvent(e);
-    }
-
-    void mouseMoveEvent(QMouseEvent *e) override {
-        if ((e->pos() - startPos).manhattanLength() > 10)
-            dragging = true;
-        QFrame::mouseMoveEvent(e);
-    }
-
-    void mouseReleaseEvent(QMouseEvent *e) override {
-        if (!dragging && e->button() == Qt::LeftButton) {
-            const QString command = entry.exec;
-            if (needsPolkit(command)) {
-                if (!polkitPamUsesAlternix()) {
-                    QMessageBox::warning(this, "AlternixOS PolicyKit authentication",
-                        "The PolicyKit PAM rule is not currently connected to "
-                        "the existing Alternix pattern/PIN verifier.\n\n"
-                        "The existing authentication setup may have rolled back "
-                        "PolicyKit after its live test failed. Run the updated "
-                        "alternix-auth-setup.sh from your normal desktop session.");
-                    QFrame::mouseReleaseEvent(e);
-                    return;
-                }
-                if (!polkitAgentRunning() && !startPolkitAgent()) {
-                    QMessageBox::warning(this, "PolicyKit graphical agent unavailable",
-                        "No installed graphical PolicyKit agent could be started "
-                        "in the current Qtile session.\n\n"
-                        "An existing PolicyKit agent is required before "
-                        "Synaptic can request the Alternix pattern/PIN.");
-                    QFrame::mouseReleaseEvent(e);
-                    return;
-                }
-                // A newly spawned agent must register over the D-Bus session
-                // before pkexec requests authentication. Check again without
-                // freezing the desktop or leaving a sudo prompt behind.
-                QPointer<QWidget> launcherWindow = window();
-                QTimer::singleShot(1100, this, [this, command, launcherWindow]() {
-                    if (!polkitAgentRunning()) {
-                        QMessageBox::warning(this, "PolicyKit agent could not register",
-                            "The graphical agent did not stay running. Check "
-                            "the Qtile session D-Bus address and the PolicyKit "
-                            "diagnostic output before retrying Synaptic.");
-                        return;
-                    }
-                    if (launchDesktopCommand(command)) {
-                        if (auto *launcher = dynamic_cast<LauncherWindow*>(launcherWindow.data()))
-                            launcher->dismissWithAnimation();
-                        else if (launcherWindow) launcherWindow->close();
-                    } else {
-                        qWarning() << "osm-launcher: failed to launch" << command;
-                        QMessageBox::warning(this, "Could not start application",
-                                             "Failed to start: " + command);
-                    }
-                });
-                QFrame::mouseReleaseEvent(e);
-                return;
-            }
-            if (launchDesktopCommand(command)) {
-                if (auto *launcher = dynamic_cast<LauncherWindow*>(window()))
-                    launcher->dismissWithAnimation();
-                else if (QWidget *w = window()) w->close();
-            } else {
-                qWarning() << "osm-launcher: failed to start desktop command:" << command;
-            }
+    void mousePressEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton) {
+            moved = false;
+            pressedAt = event->pos();
         }
-        QFrame::mouseReleaseEvent(e);
+        QFrame::mousePressEvent(event);
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if ((event->buttons() & Qt::LeftButton) &&
+            (event->pos() - pressedAt).manhattanLength() > 10) moved = true;
+        QFrame::mouseMoveEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        if (event->button() == Qt::LeftButton && !moved && activated)
+            activated(data);
+        QFrame::mouseReleaseEvent(event);
+    }
+    void contextMenuEvent(QContextMenuEvent *event) override {
+        if (contextMenu) contextMenu(data, event->globalPos());
+        event->accept();
     }
 };
 
 // ──────────────────────────────  Escape-to-close (unchanged)
 class KeyFilter : public QObject {
 public:
+    std::function<bool()> onEscape;
     bool eventFilter(QObject *obj, QEvent *ev) override {
         if (ev->type() == QEvent::KeyPress) {
             QKeyEvent *ke = static_cast<QKeyEvent*>(ev);
             if (ke->key() == Qt::Key_Escape) {
+                if (onEscape && onEscape()) return true;
                 if (auto w = qobject_cast<QWidget*>(obj)) {
                     while (w && !w->isWindow()) w = w->parentWidget();
                     if (auto *launcher = dynamic_cast<LauncherWindow*>(w))
@@ -1216,6 +1443,7 @@ public:
 
 protected:
     bool eventFilter(QObject *object, QEvent *event) override {
+        if (launcher->editingDrag) { pointer = None; return false; }
         switch (event->type()) {
         case QEvent::MouseButtonPress: {
             if (launcher->isTransitioning()) return true;
@@ -1269,6 +1497,482 @@ protected:
             break;
         default:
             break;
+        }
+        return QObject::eventFilter(object, event);
+    }
+};
+
+// The grid keeps one set of cards at a time: all ungrouped apps and folders,
+// or the contents of a single folder. No desktop launchers are moved/deleted.
+class LauncherGridController : public QObject {
+    LauncherWindow *launcher;
+    QScrollArea *scroll;
+    QWidget *container;
+    QGridLayout *grid;
+    QWidget *folderHeader;
+    QLabel *folderTitle;
+    QLabel *hintLabel;
+    QPushButton *backButton;
+    QPushButton *renameButton;
+    QPushButton *ungroupButton;
+    LauncherGroups groups;
+    QList<AppEntry> apps;
+    QHash<QString, AppEntry> lookup;
+    QVector<AppTile*> &tiles;
+    QString currentGroup;
+    std::function<void()> onViewChanged;
+    bool live = false;
+    const int columns = 4;
+
+    void askRename(const QString &groupId) {
+        const LauncherGroup *g = groups.byId(groupId);
+        if (!g) return;
+        bool accepted = false;
+        const QString name = QInputDialog::getText(launcher, "Rename app group",
+            "Group name:", QLineEdit::Normal, g->name, &accepted);
+        if (accepted && groups.rename(groupId, name)) render();
+    }
+
+    void askUngroup(const QString &groupId) {
+        const LauncherGroup *g = groups.byId(groupId);
+        if (!g) return;
+        if (QMessageBox::question(launcher, "Ungroup applications",
+                QString("Remove group '%1'? The applications will return "
+                        "to All Apps, and will not be uninstalled.").arg(g->name),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel)
+                != QMessageBox::Yes) return;
+        if (groups.dissolve(groupId)) {
+            if (currentGroup == groupId) currentGroup.clear();
+            render();
+        }
+    }
+
+    void showContext(const LauncherItem &item, const QPoint &where) {
+        QMenu menu(launcher);
+        if (item.kind == LauncherItem::Folder) {
+            QAction *rename = menu.addAction("Rename group");
+            QAction *ungroup = menu.addAction("Ungroup apps");
+            QAction *chosen = menu.exec(where);
+            if (chosen == rename) askRename(item.groupId);
+            else if (chosen == ungroup) askUngroup(item.groupId);
+        } else if (!currentGroup.isEmpty()) {
+            QAction *remove = menu.addAction("Remove from group");
+            if (menu.exec(where) == remove && groups.ungroupApp(item.key)) {
+                if (!groups.byId(currentGroup)) currentGroup.clear();
+                render();
+            }
+        }
+    }
+
+public:
+    LauncherGridController(LauncherWindow *window, QScrollArea *area,
+                           QWidget *list, QGridLayout *layout,
+                           QWidget *header, QLabel *title, QLabel *hint,
+                           QPushButton *back, QPushButton *rename,
+                           QPushButton *ungroup,
+                           const QList<AppEntry> &foundApps,
+                           const QString &configFile, QVector<AppTile*> &cardList)
+        : QObject(window), launcher(window), scroll(area), container(list),
+          grid(layout), folderHeader(header), folderTitle(title), hintLabel(hint),
+          backButton(back), renameButton(rename), ungroupButton(ungroup),
+          groups(configFile, foundApps), apps(foundApps), tiles(cardList) {
+        for (const AppEntry &app : apps) lookup.insert(appKey(app), app);
+        connect(backButton, &QPushButton::clicked, this,
+                [this]() { openGroup(QString()); });
+        connect(renameButton, &QPushButton::clicked, this,
+                [this]() { askRename(currentGroup); });
+        connect(ungroupButton, &QPushButton::clicked, this,
+                [this]() { askUngroup(currentGroup); });
+        render();
+    }
+
+    void setLive(std::function<void()> viewChanged) {
+        onViewChanged = std::move(viewChanged);
+        live = true;
+    }
+    bool insideGroup() const { return !currentGroup.isEmpty(); }
+    QPushButton *groupBackButton() const {
+        return insideGroup() ? backButton : nullptr;
+    }
+    void openGroup(const QString &id) {
+        if (!id.isEmpty() && !groups.byId(id)) return;
+        if (currentGroup == id) return;
+        currentGroup = id;
+        render();
+    }
+
+    bool canDrop(const LauncherItem &source, const LauncherItem &target) const {
+        if (source.kind == LauncherItem::Folder) {
+            return currentGroup.isEmpty() && target.kind == LauncherItem::Folder &&
+                   source.groupId != target.groupId;
+        }
+        if (!currentGroup.isEmpty()) {
+            return source.kind == LauncherItem::Application &&
+                   target.kind == LauncherItem::Application && source.key != target.key;
+        }
+        if (target.kind == LauncherItem::Folder)
+            return groups.owningGroup(source.key) != target.groupId;
+        return source.key != target.key &&
+               groups.owningGroup(source.key).isEmpty() &&
+               groups.owningGroup(target.key).isEmpty();
+    }
+
+    bool drop(const LauncherItem &source, const LauncherItem *target,
+              bool onBackButton) {
+        if (onBackButton && insideGroup() &&
+            source.kind == LauncherItem::Application) {
+            if (!groups.ungroupApp(source.key)) return false;
+            if (!groups.byId(currentGroup)) currentGroup.clear();
+            render();
+            return true;
+        }
+        if (!target || !canDrop(source, *target)) return false;
+        bool changed = false;
+        QString newGroup;
+        if (source.kind == LauncherItem::Folder) {
+            changed = groups.merge(source.groupId, target->groupId);
+        } else if (!currentGroup.isEmpty()) {
+            changed = groups.reorder(currentGroup, source.key, target->key);
+        } else if (target->kind == LauncherItem::Folder) {
+            changed = groups.moveToGroup(source.key, target->groupId);
+        } else {
+            newGroup = groups.create(source.key, target->key);
+            changed = !newGroup.isEmpty();
+        }
+        if (!changed) return false;
+        if (!newGroup.isEmpty()) currentGroup = newGroup;
+        render();
+        if (!newGroup.isEmpty()) {
+            QTimer::singleShot(0, launcher, [this, newGroup]() {
+                if (groups.byId(newGroup)) askRename(newGroup);
+            });
+        }
+        return true;
+    }
+
+    void render() {
+        // Hide old cards immediately, but deleteLater() to avoid deleting the
+        // source of the event that just caused a folder change.
+        while (QLayoutItem *item = grid->takeAt(0)) {
+            if (QWidget *widget = item->widget()) {
+                widget->hide();
+                widget->deleteLater();
+            }
+            delete item;
+        }
+        tiles.clear();
+        QList<LauncherItem> entries;
+        if (currentGroup.isEmpty()) {
+            for (const AppEntry &app : apps) {
+                const QString key = appKey(app);
+                if (!groups.owningGroup(key).isEmpty()) continue;
+                LauncherItem item;
+                item.kind = LauncherItem::Application;
+                item.app = app;
+                item.key = key;
+                item.title = app.name;
+                entries.append(item);
+            }
+            for (const LauncherGroup &g : groups.all()) {
+                LauncherItem item;
+                item.kind = LauncherItem::Folder;
+                item.groupId = g.id;
+                item.title = g.name + "\n(" + QString::number(g.members.size()) + " apps)";
+                for (const QString &key : g.members)
+                    if (lookup.contains(key) && item.preview.size() < 4)
+                        item.preview.append(lookup.value(key));
+                entries.append(item);
+            }
+            std::sort(entries.begin(), entries.end(), [](const LauncherItem &a,
+                                                          const LauncherItem &b) {
+                return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+            });
+            folderHeader->hide();
+            hintLabel->setText("Drag an app onto another to create a group  •  "
+                               "Touch: hold, then drag");
+        } else {
+            const LauncherGroup *g = groups.byId(currentGroup);
+            if (g) {
+                folderTitle->setText(g->name);
+                for (const QString &key : g->members) {
+                    if (!lookup.contains(key)) continue;
+                    LauncherItem item;
+                    item.kind = LauncherItem::Application;
+                    item.key = key;
+                    item.app = lookup.value(key);
+                    item.title = item.app.name;
+                    entries.append(item);
+                }
+                folderHeader->show();
+                hintLabel->setText("Drag an app onto ← All Apps to remove it from "
+                                   "this group  •  Right-click for more options");
+            } else {
+                currentGroup.clear();
+                folderHeader->hide();
+            }
+        }
+        for (int i = 0; i < entries.size(); ++i) {
+            AppTile *tile = new AppTile(entries.at(i), container);
+            tile->setActivated([this](const LauncherItem &item) {
+                if (launcher->isTransitioning() || launcher->editingDrag) return;
+                if (item.kind == LauncherItem::Folder) openGroup(item.groupId);
+                else activateLauncherApp(item.app, launcher);
+            });
+            tile->setContextHandler([this](const LauncherItem &item, const QPoint &p) {
+                if (!launcher->isTransitioning()) showContext(item, p);
+            });
+            grid->addWidget(tile, i / columns, i % columns);
+            tile->show();  // Dynamically created children need an explicit show.
+            tiles.append(tile);
+        }
+        // QScrollArea::setWidgetResizable(false) expects the child to size to
+        // its grid. Reset the old min-height when the folder has fewer cards.
+        container->setMinimumHeight(0);
+        container->adjustSize();
+        container->setMinimumHeight(container->sizeHint().height() + 200);
+        scroll->verticalScrollBar()->setValue(0);
+        if (live && onViewChanged) onViewChanged();
+    }
+};
+
+// Lightweight drag overlay rather than a native QDrag loop: this allows the
+// same gestures on X11 mouse and touchscreens, without blocking Qt scrolling.
+// Mouse: drag immediately. Touch: hold a card still for 450 ms then move it.
+class LauncherDragFilter : public QObject {
+    enum Pointer { None, Mouse, Touch } pointer = None;
+    LauncherWindow *launcher;
+    LauncherGridController *controller;
+    QScrollArea *scroll;
+    QPointer<AppTile> source;
+    QPointer<AppTile> target;
+    QPointer<QLabel> ghost;
+    QPointF pressGlobal;
+    QPointF lastGlobal;
+    QTimer holdTimer;
+    QTimer edgeScrollTimer;
+    QElapsedTimer mouseBlockClock;
+    int touchId = -1;
+    bool dragActive = false;
+    bool syntheticMouse = false;
+    bool backHighlighted = false;
+
+    static AppTile *tileUnder(QWidget *w) {
+        while (w) {
+            if (auto *tile = dynamic_cast<AppTile*>(w)) return tile;
+            w = w->parentWidget();
+        }
+        return nullptr;
+    }
+    AppTile *tileAt(const QPoint &position) const {
+        return tileUnder(QApplication::widgetAt(position));
+    }
+    bool touchesBack(const QPoint &position) const {
+        QPushButton *back = controller->groupBackButton();
+        return back && back->isVisible() &&
+               back->rect().contains(back->mapFromGlobal(position));
+    }
+    void highlightBack(bool enable) {
+        if (backHighlighted == enable) return;
+        backHighlighted = enable;
+        if (QPushButton *back = controller->groupBackButton()) {
+            back->setStyleSheet(enable
+                ? "QPushButton { color: white; background: #605e9c; border: 2px solid white; border-radius: 9px; padding: 7px 15px; }"
+                : "QPushButton { color: white; background: #55555588; border-radius: 9px; padding: 8px 16px; }");
+        }
+    }
+    void beginPointer(Pointer type, AppTile *tile, const QPointF &global) {
+        if (launcher->isTransitioning() || !tile) return;
+        holdTimer.stop();
+        pointer = type;
+        source = tile;
+        pressGlobal = global;
+        lastGlobal = global;
+        dragActive = false;
+    }
+    void startDragging() {
+        if (!source || launcher->isTransitioning() || dragActive) return;
+        dragActive = true;
+        launcher->editingDrag = true;
+        QScroller::scroller(scroll->viewport())->stop();
+        ghost = new QLabel(launcher);
+        ghost->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        ghost->setAttribute(Qt::WA_TranslucentBackground, true);
+        ghost->setPixmap(source->grab().scaled(136, 144,
+                         Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        ghost->setFixedSize(144, 151);
+        ghost->setAlignment(Qt::AlignCenter);
+        ghost->setStyleSheet("background: #161625dd; border: 2px solid white; border-radius: 16px;");
+        ghost->show();
+        ghost->raise();
+        edgeScrollTimer.start(35);
+        moveDragging(lastGlobal);
+    }
+    void moveDragging(const QPointF &global) {
+        lastGlobal = global;
+        if (!dragActive) return;
+        const QPoint pixel = global.toPoint();
+        if (ghost) ghost->move(launcher->mapFromGlobal(pixel) - QPoint(72, 75));
+        AppTile *over = tileAt(pixel);
+        if (!over || over == source || !controller->canDrop(source->item(), over->item()))
+            over = nullptr;
+        if (over != target) {
+            if (target) target->setDropHighlighted(false);
+            target = over;
+            if (target) target->setDropHighlighted(true);
+        }
+        highlightBack(controller->insideGroup() &&
+                      source->item().kind == LauncherItem::Application &&
+                      touchesBack(pixel));
+    }
+    void finishPointer(bool complete, bool blockMouse = false) {
+        holdTimer.stop();
+        edgeScrollTimer.stop();
+        const bool wasDragging = dragActive;
+        const bool onBack = backHighlighted;
+        LauncherItem moving;
+        LauncherItem destination;
+        const bool hasSource = source;
+        const bool hasTarget = target;
+        if (source) moving = source->item();
+        if (target) destination = target->item();
+        if (target) target->setDropHighlighted(false);
+        highlightBack(false);
+        if (ghost) ghost->deleteLater();
+        ghost = nullptr;
+        source = nullptr;
+        target = nullptr;
+        dragActive = false;
+        launcher->editingDrag = false;
+        pointer = None;
+        touchId = -1;
+        if (blockMouse && wasDragging) mouseBlockClock.start();
+        if (complete && wasDragging && hasSource)
+            controller->drop(moving, hasTarget ? &destination : nullptr, onBack);
+    }
+    void autoScroll() {
+        if (!dragActive) return;
+        const QPoint y = scroll->viewport()->mapFromGlobal(lastGlobal.toPoint());
+        if (y.x() < 0 || y.x() > scroll->viewport()->width()) return;
+        QScrollBar *bar = scroll->verticalScrollBar();
+        if (y.y() > 0 && y.y() < 65) bar->setValue(bar->value() - 14);
+        else if (y.y() > scroll->viewport()->height() - 65 &&
+                 y.y() < scroll->viewport()->height())
+            bar->setValue(bar->value() + 14);
+        moveDragging(lastGlobal);  // destination moved with the scroll
+    }
+
+public:
+    LauncherDragFilter(LauncherWindow *window, LauncherGridController *grid,
+                       QScrollArea *area, QObject *parent = nullptr)
+        : QObject(parent), launcher(window), controller(grid), scroll(area) {
+        holdTimer.setSingleShot(true);
+        holdTimer.setInterval(450);
+        connect(&holdTimer, &QTimer::timeout, this, [this]() {
+            if (pointer != None && source && !dragActive) startDragging();
+        });
+        connect(&edgeScrollTimer, &QTimer::timeout, this, [this]() { autoScroll(); });
+    }
+
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() != Qt::LeftButton) break;
+            if (mouseBlockClock.isValid() && mouseBlockClock.elapsed() < 400 &&
+                mouse->source() != Qt::MouseEventNotSynthesized) return true;
+            if (pointer == Touch) break;  // touch may synthesize mouse events
+            AppTile *card = tileUnder(qobject_cast<QWidget*>(object));
+            if (!card) card = tileAt(mouse->screenPos().toPoint());
+            if (card) {
+                syntheticMouse = mouse->source() != Qt::MouseEventNotSynthesized;
+                beginPointer(Mouse, card, mouse->screenPos());
+                if (syntheticMouse) holdTimer.start();
+            }
+            break;
+        }
+        case QEvent::MouseMove: {
+            if (pointer != Mouse) break;
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (!(mouse->buttons() & Qt::LeftButton)) {
+                finishPointer(false);
+                break;
+            }
+            lastGlobal = mouse->screenPos();
+            if (!dragActive && (lastGlobal - pressGlobal).manhattanLength() > 14) {
+                if (syntheticMouse) { finishPointer(false); break; }
+                startDragging();
+            }
+            if (dragActive) { moveDragging(lastGlobal); return true; }
+            break;
+        }
+        case QEvent::MouseButtonRelease: {
+            QMouseEvent *mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() != Qt::LeftButton) break;
+            if (mouseBlockClock.isValid() && mouseBlockClock.elapsed() < 400 &&
+                mouse->source() != Qt::MouseEventNotSynthesized) return true;
+            if (pointer == Mouse) {
+                const bool consume = dragActive;
+                if (consume) moveDragging(mouse->screenPos());
+                finishPointer(consume, syntheticMouse);
+                if (consume) return true;
+            } else if (pointer == Touch && dragActive &&
+                       mouse->source() != Qt::MouseEventNotSynthesized) return true;
+            break;
+        }
+        case QEvent::TouchBegin: {
+            if (pointer != None || launcher->isTransitioning()) break;
+            QTouchEvent *touch = static_cast<QTouchEvent*>(event);
+            if (touch->touchPoints().size() != 1) break;
+            const QTouchEvent::TouchPoint &point = touch->touchPoints().first();
+            AppTile *card = tileAt(point.screenPos().toPoint());
+            if (card) {
+                touchId = point.id();
+                beginPointer(Touch, card, point.screenPos());
+                holdTimer.start();
+            }
+            break;
+        }
+        case QEvent::TouchUpdate: {
+            if (pointer != Touch) break;
+            QTouchEvent *touch = static_cast<QTouchEvent*>(event);
+            if (touch->touchPoints().size() != 1 ||
+                touch->touchPoints().first().id() != touchId) {
+                const bool consume = dragActive;
+                finishPointer(false, consume);
+                if (consume) return true;
+                break;
+            }
+            const QPointF position = touch->touchPoints().first().screenPos();
+            if (!dragActive && (position - pressGlobal).manhattanLength() > 13) {
+                finishPointer(false);  // normal one-finger scrolling
+                break;
+            }
+            if (dragActive) { moveDragging(position); return true; }
+            break;
+        }
+        case QEvent::TouchEnd:
+        case QEvent::TouchCancel: {
+            if (pointer == Touch) {
+                const bool consume = dragActive;
+                if (consume && event->type() == QEvent::TouchEnd) {
+                    QTouchEvent *touch = static_cast<QTouchEvent*>(event);
+                    if (!touch->touchPoints().isEmpty())
+                        moveDragging(touch->touchPoints().first().screenPos());
+                }
+                finishPointer(consume && event->type() == QEvent::TouchEnd, consume);
+                if (consume) return true;
+            }
+            break;
+        }
+        case QEvent::KeyPress: {
+            if (dragActive && static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+                finishPointer(false);
+                return true;
+            }
+            break;
+        }
+        default: break;
         }
         return QObject::eventFilter(object, event);
     }
@@ -1337,6 +2041,34 @@ int main(int argc, char **argv) {
     main->setContentsMargins(20,5,20,5);
     main->setSpacing(12);
 
+    // Folder navigation appears only when the user opens a group. The Back
+    // button doubles as a drop target for removing a card from that group.
+    QWidget *folderHeader = new QWidget(&window);
+    folderHeader->setStyleSheet("background: transparent;");
+    QHBoxLayout *folderBar = new QHBoxLayout(folderHeader);
+    folderBar->setContentsMargins(12, 3, 12, 3);
+    folderBar->setSpacing(10);
+    QPushButton *folderBack = new QPushButton(QString::fromUtf8("← All Apps"), folderHeader);
+    QPushButton *folderRename = new QPushButton("Rename", folderHeader);
+    QPushButton *folderUngroup = new QPushButton("Ungroup", folderHeader);
+    const QString folderButtonStyle =
+        "QPushButton { color: white; background: #55555588; border-radius: 9px; padding: 8px 16px; }"
+        "QPushButton:hover { background: #646475cc; }";
+    folderBack->setStyleSheet(folderButtonStyle);
+    folderRename->setStyleSheet(folderButtonStyle);
+    folderUngroup->setStyleSheet(folderButtonStyle);
+    QLabel *folderTitle = new QLabel(folderHeader);
+    folderTitle->setAlignment(Qt::AlignCenter);
+    folderTitle->setStyleSheet("color: white; background: transparent; font-weight: bold;");
+    folderBar->addWidget(folderBack);
+    folderBar->addStretch(1);
+    folderBar->addWidget(folderTitle, 2);
+    folderBar->addStretch(1);
+    folderBar->addWidget(folderRename);
+    folderBar->addWidget(folderUngroup);
+    main->addWidget(folderHeader);
+    folderHeader->hide();
+
     QScrollArea *scroll = new QScrollArea(&window);
     scroll->setWidgetResizable(false);
     scroll->setStyleSheet("border: none; background:transparent;");
@@ -1355,22 +2087,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 4; ++i)
         grid->setColumnStretch(i, 1);
 
-    int cols = 4;
-    int idx = 0;
-
+    const int cols = 4;
     QVector<AppTile*> tiles;
     tiles.reserve(apps.size());
-
-    // Create all tiles with lightweight placeholders only
-    for (const AppEntry &e : apps) {
-        AppTile *tile = new AppTile(e, container);
-        grid->addWidget(tile, idx / cols, idx % cols);
-        tiles.append(tile);
-        ++idx;
-    }
-
-    container->setLayout(grid);
-    container->adjustSize();
 
     int screenWidth = QApplication::primaryScreen()->size().width();
 
@@ -1387,7 +2106,8 @@ int main(int argc, char **argv) {
     scroll->setWidget(container);
 
     QScroller::grabGesture(scroll->viewport(), QScroller::TouchGesture);
-    QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
+    // Mouse dragging is reserved for folder organisation; touch still uses
+    // inertial QScroller scrolling until a deliberate long-press occurs.
     QScrollerProperties prop;
     prop.setScrollMetric(QScrollerProperties::DecelerationFactor, 0.1);
     prop.setScrollMetric(QScrollerProperties::MaximumVelocity, 0.4);
@@ -1396,6 +2116,14 @@ int main(int argc, char **argv) {
     QScroller::scroller(scroll->viewport())->setScrollerProperties(prop);
 
     main->addWidget(scroll, 1, Qt::AlignHCenter);
+
+    QLabel *groupHint = new QLabel(
+        "Drag an app onto another to create a group  •  Touch: hold, then drag",
+        &window);
+    groupHint->setStyleSheet("color: #cccccc; background: transparent; font-size: 10pt;");
+    groupHint->setAlignment(Qt::AlignCenter);
+    groupHint->setWordWrap(true);
+    main->addWidget(groupHint);
 
     QHBoxLayout *closeRow = new QHBoxLayout();
     closeRow->addStretch();
@@ -1410,7 +2138,19 @@ int main(int argc, char **argv) {
     closeRow->addStretch();
     main->addLayout(closeRow);
 
+    // The groups JSON is independent of the indexed desktop-entry cache.
+    const QString groupsPath = QDir::homePath() +
+                               "/.config/Alternix/osm-launcher-groups.json";
+    LauncherGridController controller(&window, scroll, container, grid,
+        folderHeader, folderTitle, groupHint, folderBack, folderRename, folderUngroup,
+        apps, groupsPath, tiles);
+
     KeyFilter *kf = new KeyFilter();
+    kf->onEscape = [&controller]() {
+        if (!controller.insideGroup()) return false;
+        controller.openGroup(QString());
+        return true;
+    };
     window.installEventFilter(kf);
 
     if (!usedAppCache) {
@@ -1478,6 +2218,40 @@ int main(int argc, char **argv) {
             iconTimer->start();
     });
 
+    // Once a folder is opened, its contents are rebuilt without replaying the
+    // fullscreen opening cascade. Load the new viewport icons incrementally;
+    // scrolling to more rows queues their icons rather than decoding all apps.
+    bool viewChanged = false;
+    std::function<void()> requestVisibleIcons = [&]() {
+        if (!viewChanged || window.isTransitioning() ||
+            iconRequested.size() != tiles.size()) return;
+        QWidget *viewport = scroll->viewport();
+        for (int i = 0; i < tiles.size(); ++i) {
+            AppTile *tile = tiles.at(i);
+            if (!tile || iconRequested.at(i)) continue;
+            const QRect inViewport(tile->mapTo(viewport, QPoint(0, 0)), tile->size());
+            if (!inViewport.intersects(viewport->rect())) continue;
+            iconRequested[i] = true;
+            pendingIcons.append(i);
+        }
+        if (nextPendingIcon < pendingIcons.size() && !iconTimer->isActive())
+            iconTimer->start();
+    };
+    controller.setLive([&]() {
+        iconTimer->stop();
+        pendingIcons.clear();
+        nextPendingIcon = 0;
+        iconRequested = QVector<bool>(tiles.size(), false);
+        QVector<QWidget*> fresh;
+        fresh.reserve(tiles.size());
+        for (AppTile *tile : tiles) fresh.append(tile);
+        window.replaceViewTiles(fresh, cols);
+        viewChanged = true;
+        QTimer::singleShot(0, &window, requestVisibleIcons);
+    });
+    QObject::connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+                     &window, [&](int) { requestVisibleIcons(); });
+
     // Suppress the first fullscreen paint until the row effects are installed;
     // otherwise the entire launcher can flash for one frame before cascading.
     window.setUpdatesEnabled(false);
@@ -1491,6 +2265,11 @@ int main(int argc, char **argv) {
     // Observe touches and mouse drags anywhere in the scrollable app list.
     PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
     a.installEventFilter(pullFilter);
+    // Installed after the pull filter so a real app drag cannot be mistaken
+    // for the top-of-list pull-down-to-dismiss gesture.
+    LauncherDragFilter *dragFilter = new LauncherDragFilter(&window, &controller,
+                                                            scroll, &window);
+    a.installEventFilter(dragFilter);
     if (profileStartup)
         qInfo() << "osm-launcher startup: fullscreen requested in"
                 << startupClock.elapsed() << "ms";
