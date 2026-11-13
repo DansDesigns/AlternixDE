@@ -167,9 +167,9 @@ static void logBoot(const QString &line) {
 // startDetached so a slow-to-init onboard/ulauncher can't stall the
 // boot-sound retry loop below.
 static void launchLoginApps() {
-    if (!QProcess::startDetached("onboard"))
+    if (!QProcess::startDetached("onboard", QStringList()))
         logBoot("launchLoginApps: failed to start onboard");
-    if (!QProcess::startDetached("ulauncher"))
+    if (!QProcess::startDetached("ulauncher", QStringList()))
         logBoot("launchLoginApps: failed to start ulauncher");
     if (!QProcess::startDetached("python3", QStringList() << "/usr/bin/rounded_corners"))
         logBoot("launchLoginApps: failed to start rounded_corners");

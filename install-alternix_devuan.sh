@@ -107,6 +107,16 @@ if ! grep -Fq 'The active rotation follows the geometry' \
     echo 'ERROR: Install the latest complete rotation monitor and controller in Alternix/scripts.' >&2
     exit 1
 fi
+# These three launch helpers are stored in the repository's Alternix/scripts,
+# not alongside this installer or in Alternix/apps. Check them before changing
+# the installed system; a failed copy must never look like a completed update.
+for alt_layer_script in alternix-touchscroll.py alternix-waydroid-session alternix-exe; do
+    if [ ! -s "$ALT_INPUT_SOURCE_DIR/$alt_layer_script" ]; then
+        echo "ERROR: Required Alternix script missing: $ALT_INPUT_SOURCE_DIR/$alt_layer_script" >&2
+        exit 1
+    fi
+done
+
 # Qt/Xlib compatibility: the overlay sources must import Xlib only AFTER
 # Qt headers. Xlib's Status/None macros otherwise cause hundreds of Qt5
 # compile errors on Devuan Excalibur. Detect stale source BEFORE building.
@@ -1466,16 +1476,18 @@ else
 fi
 
 echo "• [Configuring AlternixOS touchscroll]..."
-chmod +x alternix-touchscroll.py
-cp alternix-touchscroll.py "$TARGET_HOME/.local/bin/alternix-touchscroll.py"
+sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0755 "$TARGET_HOME/.local/bin"
+sudo install -o "$TARGET_USER" -g "$TARGET_GROUP" -m 0755 \
+    "$ALT_INPUT_SOURCE_DIR/alternix-touchscroll.py" \
+    "$TARGET_HOME/.local/bin/alternix-touchscroll.py" || exit 1
 
 echo "• [Configuring AlternixOS Android layer]..."
-chmod +x alternix-waydroid-session
-sudo install -m 755 alternix-waydroid-session /usr/local/bin
+sudo install -m 0755 "$ALT_INPUT_SOURCE_DIR/alternix-waydroid-session" \
+    /usr/local/bin/alternix-waydroid-session || exit 1
 
 echo "• [Configuring AlternixOS Windows layer]..."
-chmod +x alternix-exe
-sudo install -m 755 alternix-exe /usr/local/bin
+sudo install -m 0755 "$ALT_INPUT_SOURCE_DIR/alternix-exe" \
+    /usr/local/bin/alternix-exe || exit 1
 
 
 # ────────────────────────────────────────────────
