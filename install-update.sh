@@ -183,6 +183,16 @@ if [ ! -s "$ALT_WELCOME_SOURCE" ] || [ ! -s "$ALT_WELCOME_ICON" ] ||    [ ! -s "
     exit 1
 fi
 
+# osm-keyboard is a standalone X11/Qtile application and a reusable Qt widget.
+# Fail before a lengthy install/update if either required source is missing.
+for alt_keyboard_source in osm-keyboard.cpp osm-keyboard.h; do
+    if [ ! -s "$ALT_ROOT/Alternix/apps/$alt_keyboard_source" ]; then
+        echo "ERROR: Required osm-keyboard source is missing: Alternix/apps/$alt_keyboard_source" >&2
+        echo "Add both complete files from the AlternixOS keyboard package to Alternix/apps/ before continuing." >&2
+        exit 1
+    fi
+done
+
 # The normal sudo PAM mechanism handles all privilege elevation.
 # No direct -n probe and no bypassing credential requests.
 if ! /usr/bin/sudo -v; then
@@ -1237,6 +1247,87 @@ echo "• Updating osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
 
+# Native build-time and AT-SPI runtime dependencies. Missing dependencies
+# must fail visibly rather than silently skipping keyboard auto-show.
+echo "• Installing osm-keyboard build/runtime dependencies..."
+if ! sudo apt-get install -y --no-install-recommends \
+        qtbase5-dev libx11-dev libxtst-dev libatspi2.0-dev at-spi2-core pkg-config; then
+    echo "ERROR: Could not install osm-keyboard dependencies." >&2
+    exit 1
+fi
+# ──────────────────────────────────────────────────────────────
+# AlternixOS system-wide on-screen keyboard (Qtile/X11).
+# The header stays reusable by other Alternix applications; the standalone
+# binary uses XTest + AT-SPI and preserves per-user QSettings preferences.
+# ──────────────────────────────────────────────────────────────
+echo "• Building osm-keyboard (X11 keyboard with accessibility auto-show)..."
+if ! pkg-config --exists Qt5Widgets Qt5Network x11 xtst atspi-2; then
+    echo "ERROR: osm-keyboard build dependencies are unavailable (Qt5, XTest or AT-SPI)." >&2
+    exit 1
+fi
+if ! g++ -std=c++17 -O2 -fPIC -DOSM_USE_ATSPI apps/osm-keyboard.cpp \
+        -o osm-keyboard $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2); then
+    echo "ERROR: osm-keyboard failed to compile; existing keyboard binary was not replaced." >&2
+    exit 1
+fi
+sudo install -m 0755 osm-keyboard /usr/local/bin/osm-keyboard || exit 1
+sudo install -D -m 0644 apps/osm-keyboard.h /usr/local/include/alternix/osm-keyboard.h || exit 1
+
+# Global launchers: appear once in osm-launcher for all desktop accounts.
+echo "• Installing osm-keyboard and Customise application launchers..."
+sudo tee /usr/share/applications/osm-keyboard.desktop >/dev/null <<'ALT_KEYBOARD_DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=On-Screen Keyboard
+GenericName=AlternixOS Keyboard
+Comment=Show or hide the AlternixOS touch keyboard
+Exec=/usr/local/bin/osm-keyboard --toggle
+Icon=input-keyboard
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=keyboard;touch;tablet;onscreen;
+StartupNotify=false
+ALT_KEYBOARD_DESKTOP
+sudo tee /usr/share/applications/osm-keyboard-settings.desktop >/dev/null <<'ALT_KEYBOARD_SETTINGS_DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Customise On-Screen Keyboard
+GenericName=Keyboard Settings
+Comment=Change the keyboard theme, key popups and behaviour
+Exec=/usr/local/bin/osm-keyboard --settings
+Icon=preferences-desktop-keyboard
+Terminal=false
+Categories=Settings;Accessibility;
+Keywords=keyboard;touch;theme;customise;
+StartupNotify=false
+ALT_KEYBOARD_SETTINGS_DESKTOP
+# XDG sessions use this entry; Qtile uses its own startup_once hook below,
+# because the AlternixOS Qtile session does not process XDG autostart itself.
+sudo install -d -m 0755 /etc/xdg/autostart
+sudo tee /etc/xdg/autostart/osm-keyboard-autostart.desktop >/dev/null <<'ALT_KEYBOARD_AUTOSTART'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AlternixOS Touch Keyboard Service
+Comment=Start the on-screen keyboard in the background
+Exec=/usr/local/bin/osm-keyboard --daemon
+Icon=input-keyboard
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+ALT_KEYBOARD_AUTOSTART
+if command -v update-desktop-database >/dev/null 2>&1; then
+    sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
+if [ ! -x /usr/local/bin/osm-keyboard ] || \
+   [ ! -s /usr/share/applications/osm-keyboard.desktop ] || \
+   [ ! -s /usr/share/applications/osm-keyboard-settings.desktop ]; then
+    echo "ERROR: osm-keyboard installation could not be verified." >&2
+    exit 1
+fi
+
 echo "• Building welcome (responsive fullscreen onboarding)..."
 g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome $(pkg-config --cflags --libs Qt5Widgets) || exit 1
 sudo install -m 0755 welcome /usr/local/bin/welcome || exit 1
@@ -1349,6 +1440,59 @@ fi
 sudo chown "$ALT_VLC_USER:$(id -gn "$ALT_VLC_USER")" \
     "$ALT_VLC_HOME/.config/qtile/config.py" || exit 1
 sudo install -Dm644 "$ALT_PAPER_QTILE_SOURCE" /etc/skel/.config/qtile/config.py || exit 1
+ALT_KEYBOARD_QTILE_USER_CONFIG="$ALT_VLC_HOME/.config/qtile/config.py"
+# Qtile does not implement XDG autostart. Start the hidden keyboard in
+# the actual Qtile session (after dbus-launch has set up its D-Bus environment)
+# so AT-SPI focus notifications work without starting it as root.
+# Preserve all existing user Qtile settings and add/update only our own block.
+echo "• Enabling osm-keyboard in Qtile (existing settings preserved)..."
+if ! sudo python3 - "$ALT_KEYBOARD_QTILE_USER_CONFIG" /etc/skel/.config/qtile/config.py <<'ALT_OSM_KEYBOARD_QTILE'
+import ast
+from pathlib import Path
+import sys
+
+start = '# --- AlternixOS osm-keyboard startup ---'
+end = '# --- End AlternixOS osm-keyboard startup ---'
+block = '''# --- AlternixOS osm-keyboard startup ---
+# Start after Qtile creates its desktop session so AT-SPI sees the session bus.
+from libqtile import hook as _alternix_keyboard_hook
+import subprocess as _alternix_keyboard_subprocess
+
+@_alternix_keyboard_hook.subscribe.startup_once
+def _alternix_start_osm_keyboard():
+    _alternix_keyboard_subprocess.Popen(
+        ['/usr/local/bin/osm-keyboard', '--daemon'],
+        stdout=_alternix_keyboard_subprocess.DEVNULL,
+        stderr=_alternix_keyboard_subprocess.DEVNULL,
+    )
+# --- End AlternixOS osm-keyboard startup ---'''
+
+for name in sys.argv[1:]:
+    path = Path(name)
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f'Cannot safely install Qtile keyboard startup: {path}')
+    previous = path.read_text(encoding='utf-8')
+    if previous.count(start) != previous.count(end) or previous.count(start) > 1:
+        raise RuntimeError(f'Malformed/duplicate Qtile keyboard startup markers: {path}')
+    if start in previous:
+        first = previous.index(start)
+        last = previous.index(end) + len(end)
+        updated = previous[:first] + block + previous[last:]
+    else:
+        updated = previous.rstrip('\n') + '\n\n' + block + '\n'
+    ast.parse(updated, filename=str(path))
+    if previous != updated:
+        path.write_text(updated, encoding='utf-8')
+        print('[Keyboard] Updated Qtile startup:', path)
+    else:
+        print('[Keyboard] Qtile startup already current:', path)
+ALT_OSM_KEYBOARD_QTILE
+then
+    echo "ERROR: Could not enable osm-keyboard in Qtile." >&2
+    exit 1
+fi
+sudo chown "$ALT_VLC_USER:$(id -gn "$ALT_VLC_USER")" "$ALT_KEYBOARD_QTILE_USER_CONFIG" || exit 1
+
 
 
 echo "• Updating osm-lockscreen..."
