@@ -204,7 +204,7 @@ Pin: version *
 Pin-Priority: -1
 ALT_NO_XTERM
 
-sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez vlc qt5-style-kvantum
+sudo nala install -y libssl-dev fonts-urw-base35 fonts-freefont-ttf wmctrl cmake g++ bluez vlc qt5-style-kvantum fonts-comfortaa
 
 # XLibre-safe tablet/pen stack. xinput and xrandr must be present for
 # display mapping; monitor-sensor comes from iio-sensor-proxy. Do not pull in

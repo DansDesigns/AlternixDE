@@ -139,16 +139,6 @@ protected:
         case 5: quickSettings(p, portrait); break;
         case 6: topBar(p, portrait); break;
         }
-        // Non-invasive progress dots, outside the original slide content.
-        const qreal r = qBound(2.0, height() * 0.0035, 5.0);
-        const qreal gap = r * 3.3;
-        const qreal y = height() - qMax(12.0, height() * 0.026);
-        const qreal startX = width() / 2.0 - gap * 3.0;
-        p.setPen(Qt::NoPen);
-        for (int i = 0; i < 7; ++i) {
-            p.setBrush(QColor(0, 25, 36, i == page ? 180 : 70));
-            p.drawEllipse(QPointF(startX + i * gap, y), r, r);
-        }
     }
 
     void mousePressEvent(QMouseEvent *e) override {
@@ -236,20 +226,40 @@ private:
     }
 
     void drawBackground(QPainter &p) const {
-        // Original PPTX uses pastel blue / off-white / peach stops. The final
-        // two slides reverse the gradient, exactly as in the presentation.
-        const bool reversed = page >= 5;
-        QLinearGradient g(0, 0, 0, height());
-        if (!reversed) {
-            g.setColorAt(0, QColor("#98def7"));
-            g.setColorAt(.50, QColor("#f2f1f1"));
-            g.setColorAt(1, QColor("#f8c9b3"));
-        } else {
-            g.setColorAt(0, QColor("#f8c9b3"));
-            g.setColorAt(.50, QColor("#f2f1f1"));
-            g.setColorAt(1, QColor("#98def7"));
+        // Exact stops and directions from onboarding.pptx slide XML and theme1:
+        // accent4 #0F9ED5 with lumMod 40% + lumOff 60% -> #96DCF8
+        // bg1 #FFFFFF with lumMod 95%                 -> #F2F2F2
+        // accent2 #E97132 with lumMod 40% + lumOff 60% -> #F6C6AD
+        // DrawingML luminance adjustments are HSL-based, not RGB arithmetic.
+        // PowerPoint gradient angle: 270 deg on slides 1-3, 0 on slide 4,
+        // 180 on slide 5, and 90 on slides 6-7. Do not approximate with the
+        // same vertical gradient on every page.
+        const QColor blue(150,220,248);
+        const QColor middle(242,242,242);
+        const QColor peach(246,198,173);
+        QLinearGradient gradient;
+        if (page <= 2) {  // 270 degrees: from bottom peach to top blue
+            gradient = QLinearGradient(0, 0, 0, height());
+            gradient.setColorAt(0.0, blue);
+            gradient.setColorAt(0.5, middle);
+            gradient.setColorAt(1.0, peach);
+        } else if (page == 3) { // 0 degrees: peach left, blue right
+            gradient = QLinearGradient(0, 0, width(), 0);
+            gradient.setColorAt(0.0, peach);
+            gradient.setColorAt(0.5, middle);
+            gradient.setColorAt(1.0, blue);
+        } else if (page == 4) { // 180 degrees: blue left, peach right
+            gradient = QLinearGradient(0, 0, width(), 0);
+            gradient.setColorAt(0.0, blue);
+            gradient.setColorAt(0.5, middle);
+            gradient.setColorAt(1.0, peach);
+        } else {              // 90 degrees: peach top, blue bottom
+            gradient = QLinearGradient(0, 0, 0, height());
+            gradient.setColorAt(0.0, peach);
+            gradient.setColorAt(0.5, middle);
+            gradient.setColorAt(1.0, blue);
         }
-        p.fillRect(rect(), g);
+        p.fillRect(rect(), gradient);
     }
 
     const QPixmap &topBarPixmap() const {
@@ -283,42 +293,165 @@ private:
         }
     }
 
+    enum class TextGlow { None, White, WhiteSoft, Purple, Green };
+    struct GlowLine {
+        TextGlow effect = TextGlow::None;
+        int prefixChars = -1; // -1 = whole line; positive = only this prefix
+    };
+    struct PaintedLine {
+        QString text;
+        TextGlow effect = TextGlow::None;
+        int prefixChars = -1;
+        bool blank = false;
+    };
+
+    void drawTextGlow(QPainter &p, const QString &text, const QFont &font,
+                      const QPointF &baseLine, TextGlow effect) const {
+        if (effect == TextGlow::None || text.isEmpty()) return;
+
+        // The deck uses Office theme colours accent5 / accent6 with 175% HSL
+        // saturation, and bg1 white. Its text effects use 40% alpha on the
+        // colourful glows and 60-67% on the white glow.
+        QColor tint;
+        qreal alpha = 0.4;
+        qreal radiusScale = .275;
+        switch (effect) {
+        case TextGlow::Purple: tint = QColor(203, 0, 180); radiusScale = .275; break;
+        case TextGlow::Green:  tint = QColor(57, 212, 1); radiusScale = .45; break;
+        case TextGlow::White:  tint = QColor(255, 255, 255); alpha = .67;
+                               radiusScale = .222; break;
+        case TextGlow::WhiteSoft: tint = QColor(255, 255, 255); alpha = .60;
+                               radiusScale = .20; break;
+        default: return;
+        }
+
+        // Feather the outline with concentric translucent strokes. Radius is
+        // proportional to font size, using the PPT's nominal ratios: purple
+        // 11pt / 40pt, green 18pt / 40pt, white 12pt / 54pt or 8pt / 40pt.
+        // The unmodified black letter fill is drawn on top of the glow.
+        QPainterPath glyphs;
+        glyphs.addText(baseLine, font, text);
+        const qreal radius = qMax(1.3, font.pixelSize() * radiusScale);
+        p.save();
+        p.setBrush(Qt::NoBrush);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        for (int step = 9; step >= 1; --step) {
+            QColor layer = tint;
+            layer.setAlphaF(alpha * (step < 4 ? .12 : .065));
+            const qreal stroke = radius * (2.0 * step / 9.0);
+            p.strokePath(glyphs, QPen(layer, stroke,
+                                     Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        }
+        p.restore();
+    }
+
+    // Paint source wording at a responsive font size, preserving the separate
+    // text-run effects from the PowerPoint. Each explicit PPT paragraph keeps
+    // its own line, but long phrases can word-wrap on narrow tablet screens.
     void paintWords(QPainter &p, const QString &words, const R &area,
-                    qreal sizeFactor = .074, const QColor &shadow = QColor(255,255,255),
-                    bool bold = false) const {
+                    qreal sizeFactor = .074,
+                    const QVector<GlowLine> &runEffects = {}) const {
         if (area.width() < 10 || area.height() < 10 || words.isEmpty()) return;
-        const auto flags = int(Qt::AlignCenter | Qt::TextWordWrap);
-        QFont font(QStringLiteral("Ubuntu"));
-        font.setWeight(bold ? QFont::DemiBold : QFont::Normal);
+        const QStringList paragraphs = words.split(QLatin1Char('\n'), Qt::KeepEmptyParts);
+        const qreal maxW = area.width() * .95;
+        QFont font(QStringLiteral("Comfortaa")); // Exact PowerPoint typeface
+        font.setWeight(QFont::Normal);
         font.setStyleStrategy(QFont::PreferAntialias);
-        // Binary-search the largest font that FITS the actual text rectangle.
-        // The same code works on tablets in portrait mode and after rotation.
-        const int ceiling = qMax(12, int(qMin(height() * sizeFactor, area.width() * .18)));
-        int lo = 9, hi = qMax(9, ceiling), best = lo;
-        while (lo <= hi) {
-            const int mid = (lo + hi) / 2;
+        const int ceiling = qMax(9, int(qMin(height() * sizeFactor, area.width() * .18)));
+
+        auto layoutLines = [&](const QFont &f) -> QVector<PaintedLine> {
+            const QFontMetricsF fm(f);
+            QVector<PaintedLine> lines;
+            for (int para = 0; para < paragraphs.size(); ++para) {
+                const QString original = paragraphs.at(para);
+                const GlowLine style = para < runEffects.size() ? runEffects.at(para)
+                                                                   : GlowLine{};
+                if (original.isEmpty()) {
+                    lines.append(PaintedLine{QString(), TextGlow::None, -1, true});
+                    continue;
+                }
+                QString line;
+                int prefixRemaining = style.prefixChars;
+                // Explicit line breaks stay where the presentation puts them.
+                // Add wraps only where needed to avoid clipping smaller displays.
+                const QStringList wordsHere = original.split(' ', Qt::SkipEmptyParts);
+                auto appendLine = [&](const QString &portion) {
+                    const int prefix = prefixRemaining < 0 ? -1
+                                        : qMin(prefixRemaining, portion.size());
+                    lines.append(PaintedLine{portion, style.effect, prefix, false});
+                    if (prefixRemaining >= 0)
+                        prefixRemaining = qMax(0, prefixRemaining - portion.size() - 1);
+                };
+                for (const QString &token : wordsHere) {
+                    QString trial = line.isEmpty() ? token : line + QLatin1Char(' ') + token;
+                    if (fm.horizontalAdvance(trial) > maxW && !line.isEmpty()) {
+                        appendLine(line);
+                        line = token;
+                    } else {
+                        line = trial;
+                    }
+                    // Fallback for very small portrait widths / giant words.
+                    while (fm.horizontalAdvance(line) > maxW && line.size() > 1) {
+                        int split = 1;
+                        while (split < line.size() &&
+                               fm.horizontalAdvance(line.left(split + 1)) <= maxW)
+                            ++split;
+                        appendLine(line.left(split));
+                        line = line.mid(split);
+                    }
+                }
+                if (!line.isEmpty()) appendLine(line);
+            }
+            return lines;
+        };
+
+        auto linesHeight = [&](const QVector<PaintedLine> &lines, const QFont &f) {
+            const qreal base = QFontMetricsF(f).lineSpacing() * 1.06;
+            qreal total = 0;
+            for (const PaintedLine &line : lines)
+                total += base * (line.blank ? .65 : 1.0);
+            return total;
+        };
+
+        int low = 8, high = ceiling, best = low;
+        while (low <= high) {
+            const int mid = (low + high) / 2;
             font.setPixelSize(mid);
-            const QFontMetricsF met(font);
-            const QRectF content = met.boundingRect(
-                R(0,0,area.width() * .94,area.height() * .94), flags, words);
-            if (content.width() <= area.width() * .96 &&
-                content.height() <= area.height() * .96) {
+            const auto lines = layoutLines(font);
+            if (linesHeight(lines, font) <= area.height() * .96) {
                 best = mid;
-                lo = mid + 1;
-            } else hi = mid - 1;
+                low = mid + 1;
+            } else high = mid - 1;
         }
         font.setPixelSize(best);
+        const QVector<PaintedLine> lines = layoutLines(font);
+        const QFontMetricsF fm(font);
+        const qreal rowH = fm.lineSpacing() * 1.06;
+        const qreal totalHeight = linesHeight(lines, font);
+        qreal y = area.top() + (area.height() - totalHeight) * .5;
+
+        p.save();
+        p.setClipRect(area.adjusted(-4,-4,4,4));
         p.setFont(font);
-        // A soft coloured halo echoes the arrows and original PowerPoint.
-        const qreal radius = qBound(1.0, best * .07, 4.5);
-        const QColor halo(shadow.red(), shadow.green(), shadow.blue(), 75);
-        p.setPen(halo);
-        for (int dx = -2; dx <= 2; ++dx)
-            for (int dy = -2; dy <= 2; ++dy)
-                if (dx*dx + dy*dy <= 5)
-                    p.drawText(area.translated(dx * radius*.55, dy * radius*.55), flags, words);
-        p.setPen(QColor("#11151a"));
-        p.drawText(area, flags, words);
+        for (const PaintedLine &line : lines) {
+            if (line.blank) {
+                y += rowH * .65;
+                continue;
+            }
+            const qreal x = area.center().x() - fm.horizontalAdvance(line.text) * .5;
+            const QPointF origin(x, y + fm.ascent());
+            if (line.effect != TextGlow::None) {
+                if (line.prefixChars < 0)
+                    drawTextGlow(p, line.text, font, origin, line.effect);
+                else if (line.prefixChars > 0)
+                    drawTextGlow(p, line.text.left(line.prefixChars), font,
+                                 origin, line.effect);
+            }
+            p.setPen(QColor(0, 0, 0));
+            p.drawText(origin, line.text);
+            y += rowH;
+        }
+        p.restore();
     }
 
     // Arrow paths are reconstructed as scalable vectors from the PowerPoint
@@ -412,9 +545,9 @@ private:
 
     void welcome(QPainter &p) const {
         const QSize sz = size();
-        paintWords(p,QStringLiteral("Welcome,"),frac(.11,.13,.78,.22,sz),.125,QColor(255,255,255));
+        paintWords(p,QStringLiteral("Welcome,"),frac(.11,.13,.78,.22,sz),.125,{{TextGlow::White}});
         paintWords(p,QStringLiteral("tap or click to continue.."),
-                   frac(.08,.65,.84,.22,sz),.108,QColor(255,255,255));
+                   frac(.08,.65,.84,.22,sz),.108,{{TextGlow::White}});
     }
 
     void launcher(QPainter &p,bool portrait) const {
@@ -423,17 +556,17 @@ private:
             drawArrowAt(p,frac(.055,.17,.15,.47,sz),0,true);
             drawArrowAt(p,frac(.795,.17,.15,.47,sz),0,true);
             paintWords(p,QStringLiteral("Swipe up\n=\nApp Launcher"),
-                       frac(.27,.11,.46,.37,sz),.085,glowPurple());
+                       frac(.27,.11,.46,.37,sz),.085,{{TextGlow::Purple}});
             paintWords(p,QStringLiteral("or\ntap the icon"),
-                       frac(.31,.53,.38,.20,sz),.076,glowPurple());
+                       frac(.31,.53,.38,.20,sz),.076,{{TextGlow::None}, {TextGlow::Green, 3}});
             drawArrowAt(p,frac(.468,.72,.064,.20,sz),2,false,glowGreen());
         } else {
             drawArrowAt(p,frac(.09,.11,.22,.32,sz),0,true);
             drawArrowAt(p,frac(.69,.11,.22,.32,sz),0,true);
             paintWords(p,QStringLiteral("Swipe up\n=\nApp Launcher"),
-                       frac(.18,.37,.64,.23,sz),.071,glowPurple());
+                       frac(.18,.37,.64,.23,sz),.071,{{TextGlow::Purple}});
             paintWords(p,QStringLiteral("or\ntap the icon"),
-                       frac(.21,.62,.58,.18,sz),.066,glowPurple());
+                       frac(.21,.62,.58,.18,sz),.066,{{TextGlow::None}, {TextGlow::Green, 3}});
             drawArrowAt(p,frac(.43,.80,.14,.14,sz),2,false,glowGreen());
         }
     }
@@ -442,16 +575,16 @@ private:
         const QSize sz=size();
         if (!portrait) {
             paintWords(p,QStringLiteral("Application Taskbar"),
-                       frac(.02,.60,.43,.16,sz),.083,glowPurple());
+                       frac(.02,.60,.43,.16,sz),.083,{{TextGlow::Green}});
             paintWords(p,QStringLiteral("Toggle Keyboard"),
-                       frac(.58,.60,.40,.16,sz),.083,glowPurple());
+                       frac(.58,.60,.40,.16,sz),.083,{{TextGlow::Green}});
             drawArrowAt(p,frac(.095,.77,.09,.19,sz),2,false,glowGreen());
             drawArrowAt(p,frac(.815,.77,.09,.19,sz),2,false,glowGreen());
         } else {
             paintWords(p,QStringLiteral("Application\nTaskbar"),
-                       frac(.02,.32,.46,.23,sz),.070,glowPurple());
+                       frac(.02,.32,.46,.23,sz),.070,{{TextGlow::Green}, {TextGlow::Green}});
             paintWords(p,QStringLiteral("Toggle\nKeyboard"),
-                       frac(.52,.32,.46,.23,sz),.070,glowPurple());
+                       frac(.52,.32,.46,.23,sz),.070,{{TextGlow::Green}, {TextGlow::Green}});
             drawArrowAt(p,frac(.18,.56,.14,.25,sz),2,false,glowGreen());
             drawArrowAt(p,frac(.68,.56,.14,.25,sz),2,false,glowGreen());
         }
@@ -462,11 +595,11 @@ private:
         if (!portrait) {
             drawArrowAt(p,frac(.10,.30,.32,.39,sz),1,true);
             paintWords(p,QStringLiteral("Swipe Right\n=\nRunning Apps"),
-                       frac(.57,.32,.40,.40,sz),.083,glowPurple());
+                       frac(.57,.32,.40,.40,sz),.083,{{TextGlow::Purple}});
         } else {
             drawArrowAt(p,frac(.12,.23,.76,.26,sz),1,true);
             paintWords(p,QStringLiteral("Swipe Right\n=\nRunning Apps"),
-                       frac(.11,.52,.78,.35,sz),.081,glowPurple());
+                       frac(.11,.52,.78,.35,sz),.081,{{TextGlow::Purple}});
         }
     }
 
@@ -474,12 +607,12 @@ private:
         const QSize sz=size();
         if (!portrait) {
             paintWords(p,QStringLiteral("Swipe Left\n=\nNotifications"),
-                       frac(.04,.32,.39,.40,sz),.083,glowPurple());
+                       frac(.04,.32,.39,.40,sz),.083,{{TextGlow::Purple}});
             drawArrowAt(p,frac(.58,.30,.32,.39,sz),3,true);
         } else {
             drawArrowAt(p,frac(.12,.23,.76,.26,sz),3,true);
             paintWords(p,QStringLiteral("Swipe Left\n=\nNotifications"),
-                       frac(.11,.52,.78,.35,sz),.081,glowPurple());
+                       frac(.11,.52,.78,.35,sz),.081,{{TextGlow::Purple}});
         }
     }
 
@@ -498,12 +631,12 @@ private:
             drawArrowAt(p,frac(.047,.27,.13,.58,sz),2,true);
             drawArrowAt(p,frac(.823,.27,.13,.58,sz),2,true);
             paintWords(p,QStringLiteral("Pull down\nor\nSwipe on desktop\n\n=\n\nQuick Settings"),
-                       frac(.25,.22,.50,.67,sz),.079,glowGreen());
+                       frac(.25,.22,.50,.67,sz),.079,{{TextGlow::Green}, {}, {TextGlow::Purple}, {}, {}, {}, {TextGlow::WhiteSoft}});
         } else {
             drawArrowAt(p,frac(.05,.59,.16,.28,sz),2,true);
             drawArrowAt(p,frac(.79,.59,.16,.28,sz),2,true);
             paintWords(p,QStringLiteral("Pull down\nor\nSwipe on desktop\n=\nQuick Settings"),
-                       frac(.13,.23,.74,.55,sz),.073,glowGreen());
+                       frac(.13,.23,.74,.55,sz),.073,{{TextGlow::Green}, {}, {TextGlow::Purple}, {}, {TextGlow::WhiteSoft}});
         }
     }
 
@@ -519,21 +652,21 @@ private:
             drawArrowAt(p,frac(.455,.12,.09,.32,sz),0,false,glowGreen());
             drawArrowAt(p,frac(.895,.12,.09,.32,sz),0,false,glowGreen());
             paintWords(p,QStringLiteral("Desktop Switcher\n&\nSystem Tray"),
-                       frac(.025,.46,.27,.45,sz),.082,QColor(255,255,255));
+                       frac(.025,.46,.27,.45,sz),.082);
             paintWords(p,QStringLiteral("Tap\n=\nClock"),
-                       frac(.377,.47,.246,.36,sz),.085,glowGreen());
+                       frac(.377,.47,.246,.36,sz),.085,{{TextGlow::Green}});
             paintWords(p,QStringLiteral("Window\n&\nDevice\nControls"),
-                       frac(.72,.45,.26,.47,sz),.082,QColor(255,255,255));
+                       frac(.72,.45,.26,.47,sz),.082);
         } else {
             drawArrowAt(p,frac(.095,.20,.14,.25,sz),0,false,glowGreen());
             drawArrowAt(p,frac(.43,.20,.14,.25,sz),0,false,glowGreen());
             drawArrowAt(p,frac(.765,.20,.14,.25,sz),0,false,glowGreen());
             paintWords(p,QStringLiteral("Desktop\nSwitcher\n&\nSystem Tray"),
-                       frac(.01,.52,.32,.35,sz),.061,QColor(255,255,255));
+                       frac(.01,.52,.32,.35,sz),.061);
             paintWords(p,QStringLiteral("Tap\n=\nClock"),
-                       frac(.34,.52,.32,.35,sz),.069,glowGreen());
+                       frac(.34,.52,.32,.35,sz),.069,{{TextGlow::Green}});
             paintWords(p,QStringLiteral("Window\n&\nDevice\nControls"),
-                       frac(.67,.52,.32,.35,sz),.061,QColor(255,255,255));
+                       frac(.67,.52,.32,.35,sz),.061);
         }
     }
 };
