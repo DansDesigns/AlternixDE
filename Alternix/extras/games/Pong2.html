@@ -25,11 +25,16 @@
   .icon-button svg { width:20px; height:20px; flex:none; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
   .icon-button:hover { border-color:var(--cyan); background:#263449; }
   .icon-button:active { background:#35506c; }
-  .arena { position:relative; width:100%; flex:1; min-height:0; overflow:hidden; border:2px solid var(--edge); border-radius:10px; background:#0f172a; box-shadow:0 0 24px rgba(56,189,248,.12); }
+  .playfield-row { display:flex; flex:1; min-height:0; min-width:0; gap:10px; align-items:stretch; }
+  .arena { position:relative; min-width:0; flex:1; min-height:0; overflow:hidden; border:2px solid var(--edge); border-radius:10px; background:#0f172a; box-shadow:0 0 24px rgba(56,189,248,.12); }
+  .touch-zone { --zone-color:var(--cyan); --zone-rgb:56,189,248; width:clamp(62px,10vw,116px); flex:none; display:flex; align-items:center; justify-content:center; border:1px solid rgba(var(--zone-rgb),.44); border-radius:9px; background:repeating-linear-gradient(135deg,rgba(var(--zone-rgb),.13) 0px,rgba(var(--zone-rgb),.13) 10px,rgba(15,23,42,.94) 10px,rgba(15,23,42,.94) 20px); color:#cbd5e1; cursor:crosshair; touch-action:none; -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent; overflow:hidden; }
+  .touch-zone.right { --zone-color:var(--pink); --zone-rgb:244,114,182; }
+  .touch-zone:hover, .touch-zone.active { border-color:var(--zone-color); box-shadow:inset 0 0 19px rgba(var(--zone-rgb),.14),0 0 14px rgba(var(--zone-rgb),.14); }
+  .touch-zone span { pointer-events:none; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; min-width:0; padding:12px 8px; border:1px solid rgba(var(--zone-rgb),.27); border-radius:8px; background:rgba(11,17,32,.9); text-shadow:0 0 12px rgba(var(--zone-rgb),.3); }
+  .touch-zone strong { color:var(--zone-color); font-size:16px; letter-spacing:1px; }
+  .touch-zone small { font-weight:800; font-size:12px; letter-spacing:3px; writing-mode:vertical-rl; }
+  .touch-zone.left small { transform:rotate(180deg); }
   #gameCanvas { display:block; width:100%; height:100%; touch-action:none; -webkit-touch-callout:none; }
-  .touch-labels { position:absolute; inset:0; display:flex; pointer-events:none; align-items:flex-end; justify-content:space-between; padding:0 16px 14px; color:#64748b; font-weight:800; font-size:11px; letter-spacing:2px; opacity:.65; }
-  .touch-labels span:nth-child(1) { color:var(--cyan); }
-  .touch-labels span:nth-child(2) { color:var(--pink); }
   .hint { text-align:center; font-size:12px; color:var(--muted); line-height:1.45; min-height:18px; flex:none; }
   .menu-overlay { position:absolute; inset:0; display:flex; justify-content:center; align-items:center; padding:12px; background:rgba(11,17,32,.86); backdrop-filter:blur(5px); z-index:5; overflow:auto; }
   .menu-overlay.hidden, .panel.hidden { display:none; }
@@ -81,7 +86,11 @@
     .panel { padding:17px 17px; }
     .panel h1 { font-size:27px; }
     .panel h2 { font-size:20px; }
-    .touch-labels { padding:0 9px 9px; font-size:9px; }
+    .playfield-row { gap:6px; }
+    .touch-zone { width:clamp(52px,15vw,72px); border-radius:7px; }
+    .touch-zone span { gap:7px; padding:10px 4px; }
+    .touch-zone strong { font-size:13px; }
+    .touch-zone small { font-size:10px; letter-spacing:2px; }
   }
   @media (max-height:540px) {
     .game-container { padding-top:5px; gap:5px; }
@@ -96,6 +105,11 @@
     .sub { margin-bottom:10px; }
     .btn { padding:8px 10px; margin-bottom:6px; }
     .row { margin-bottom:10px; }
+    .touch-zone span { gap:5px; padding:6px 4px; }
+    .touch-zone small { font-size:10px; letter-spacing:1px; }
+  }
+  @media (max-height:300px) {
+    .touch-zone small { display:none; }
   }
 </style>
 </head>
@@ -124,9 +138,10 @@
       </button>
     </div>
   </div>
-  <div class="arena" id="arena">
-    <canvas id="gameCanvas" aria-label="Pong game: drag on the left half for player one, or the right half for player two"></canvas>
-    <div class="touch-labels" aria-hidden="true"><span>P1 · TOUCH / DRAG</span><span>P2 · TOUCH / DRAG</span></div>
+  <div class="playfield-row">
+    <div class="touch-zone left" id="touch-zone-1" role="group" aria-label="Player 1 touch area: drag up or down to move the left paddle"><span><strong>P1</strong><small>TOUCH AREA</small></span></div>
+    <div class="arena" id="arena">
+      <canvas id="gameCanvas" aria-label="Pong game: drag in the left half for player one, or the right half for player two"></canvas>
     <div class="menu-overlay" id="menu">
       <div class="panel" id="panel-main">
         <h1>PONG</h1>
@@ -157,7 +172,7 @@
       <div class="panel hidden" id="panel-how">
         <h2>How to Play</h2>
         <div class="instructions">
-          <p><strong>Two-player touchscreen:</strong> Player 1 touches and drags up/down anywhere on the left half of the game. Player 2 does the same on the right half. Both can play at exactly the same time, with separate fingers.</p>
+          <p><strong>Two-player touchscreen:</strong> Player 1 drags up/down in the left touch area; Player 2 uses the right touch area. Both fingers work at the same time. You can also drag directly within your half of the playfield. The outside touch areas move paddles without obscuring the ball.</p>
           <p><strong>Keyboard:</strong> Player 1 uses <strong>W / S</strong>; Player 2 uses <strong>↑ / ↓</strong>. Two connected gamepads can also use their left sticks or D-pads.</p>
           <p><strong>Rules:</strong> Get the ball past the other paddle to score. Paddle contact angle changes the return. First player to the selected score wins (by two, if enabled).</p>
           <p><strong>Random effects:</strong> Both paddles flash for two seconds before one of four temporary effects starts. <strong>Multiball</strong> adds two balls (the first ball past either paddle scores the point), <strong>Sticky</strong> catches and automatically releases balls, <strong>Speedup</strong> makes all balls faster, and <strong>Shrink</strong> makes both paddles shorter. Effects last eight seconds and are fair to both players. You can switch them off in Settings.</p>
@@ -186,14 +201,17 @@
         <button class="btn primary" id="btn-exit-back">Back to Menu</button>
       </div>
     </div>
+    </div>
+    <div class="touch-zone right" id="touch-zone-2" role="group" aria-label="Player 2 touch area: drag up or down to move the right paddle"><span><strong>P2</strong><small>TOUCH AREA</small></span></div>
   </div>
-  <div class="hint">P1: touch left / drag vertically or W / S &nbsp;·&nbsp; P2: touch right / drag vertically or ↑ / ↓ &nbsp;·&nbsp; Both fingers work together</div>
+  <div class="hint">P1: left touch zone / W / S &nbsp;·&nbsp; P2: right touch zone / ↑ / ↓ &nbsp;·&nbsp; Both can drag simultaneously</div>
 </div>
 <script>
 (function () {
   'use strict';
   var canvas=document.getElementById('gameCanvas'), ctx=canvas.getContext('2d');
   var arena=document.getElementById('arena'), menu=document.getElementById('menu');
+  var touchZones=[document.getElementById('touch-zone-1'),document.getElementById('touch-zone-2')];
   var panels={main:document.getElementById('panel-main'),settings:document.getElementById('panel-settings'),how:document.getElementById('panel-how'),stats:document.getElementById('panel-stats'),over:document.getElementById('panel-over'),exit:document.getElementById('panel-exit')};
   var palette=['#38bdf8','#f472b6','#4ade80','#fbbf24','#fb7185','#a78bfa','#2dd4bf','#f97316'];
   var defaults={difficulty:'normal',points:7,paddle:'normal',p1Colour:palette[0],p2Colour:palette[1],winByTwo:true,randomEffects:true,sound:true,startFullscreen:false};
@@ -359,7 +377,10 @@
     document.querySelectorAll('.player-hud')[1].style.setProperty('--player',settings.p2Colour);
     paddles[0].colour=settings.p1Colour;paddles[1].colour=settings.p2Colour;
   }
-  function clearPointers(){pointerOwners.clear();playerPointers=[null,null];mouseSide=-1;}
+  function clearPointers(){
+    pointerOwners.clear();playerPointers=[null,null];mouseSide=-1;
+    touchZones.forEach(function(zone){zone.classList.remove('active');});
+  }
   function showPanel(which){Object.keys(panels).forEach(function(k){panels[k].classList.toggle('hidden',k!==which);});menu.classList.remove('hidden');}
   function hideMenu(){menu.classList.add('hidden');}
   function refreshMain(){
@@ -612,43 +633,66 @@
     if(steps>=7)accumulator=0;
     draw();requestAnimationFrame(loop);
   }
-  function surfaceCoords(event){var rect=canvas.getBoundingClientRect();return {x:(event.clientX-rect.left)*W/rect.width,y:(event.clientY-rect.top)*H/rect.height};}
-  function moveFromPointer(i,event){
+  // All input surfaces share the canvas' vertical coordinate system.
+  // Pointer capture and per-player ownership allow two independent touches.
+  function surfaceCoords(event){
+    var rect=canvas.getBoundingClientRect();
+    return {x:(event.clientX-rect.left)*W/rect.width,y:(event.clientY-rect.top)*H/rect.height};
+  }
+  function moveFromPointer(i,event,offset){
     var pos=surfaceCoords(event),p=paddles[i];
-    p.y=clamp(pos.y-p.h/2,0,H-p.h);
+    p.y=clamp(pos.y-(offset||0)-p.h/2,0,H-p.h);
   }
   function playingSurface(){return state==='playing'||state==='countdown'||state==='point';}
-  canvas.addEventListener('pointerdown',function(e){
-    if(!playingSurface())return;
-    if(e.cancelable)e.preventDefault();
-    var pos=surfaceCoords(e),i=pos.x<W/2?0:1;
-    if(playerPointers[i]!==null)return;
-    playerPointers[i]=e.pointerId;pointerOwners.set(e.pointerId,i);
-    try{canvas.setPointerCapture(e.pointerId);}catch(err){}
-    moveFromPointer(i,e);
-  });
-  canvas.addEventListener('pointermove',function(e){
-    if(!playingSurface())return;
-    if(pointerOwners.has(e.pointerId)){
+  function bindPaddleSurface(surface,fixedSide){
+    var isZone=fixedSide!==null;
+    surface.addEventListener('pointerdown',function(e){
+      if(!playingSurface())return;
       if(e.cancelable)e.preventDefault();
-      moveFromPointer(pointerOwners.get(e.pointerId),e);return;
+      var pos=surfaceCoords(e),i=isZone?fixedSide:(pos.x<W/2?0:1);
+      // The first contact on each player's side owns that paddle until released.
+      if(playerPointers[i]!==null||pointerOwners.has(e.pointerId))return;
+      var p=paddles[i];
+      // Like Breakout's touch strip, the external zones preserve the paddle's
+      // initial position. The gesture moves it relative to the finger drag.
+      // Direct touches on the field continue to position the paddle absolutely.
+      var offset=isZone?pos.y-(p.y+p.h/2):0;
+      playerPointers[i]=e.pointerId;
+      pointerOwners.set(e.pointerId,{side:i,surface:surface,offset:offset});
+      if(isZone)surface.classList.add('active');
+      try{surface.setPointerCapture(e.pointerId);}catch(err){}
+      if(!isZone)moveFromPointer(i,e,0);
+    });
+    surface.addEventListener('pointermove',function(e){
+      if(!playingSurface())return;
+      var owner=pointerOwners.get(e.pointerId);
+      if(owner){
+        if(owner.surface!==surface)return;
+        if(e.cancelable)e.preventDefault();
+        moveFromPointer(owner.side,e,owner.offset);return;
+      }
+      // Mouse hover can control either zone but never displaces an active finger.
+      if(e.pointerType==='mouse'){
+        var pos=surfaceCoords(e),i=isZone?fixedSide:(pos.x<W/2?0:1);
+        if(playerPointers[i]===null)moveFromPointer(i,e,0);
+      }
+    });
+    function releasePointer(e){
+      var owner=pointerOwners.get(e.pointerId);
+      if(!owner||owner.surface!==surface)return;
+      pointerOwners.delete(e.pointerId);
+      if(playerPointers[owner.side]===e.pointerId)playerPointers[owner.side]=null;
+      if(isZone)surface.classList.remove('active');
+      try{if(surface.hasPointerCapture(e.pointerId))surface.releasePointerCapture(e.pointerId);}catch(err){}
     }
-    // Mouse hover may control a side without clicking, but it cannot override an active touch.
-    if(e.pointerType==='mouse'){
-      var pos=surfaceCoords(e),i=pos.x<W/2?0:1;
-      if(playerPointers[i]===null)moveFromPointer(i,e);
-    }
-  });
-  function releasePointer(e){
-    if(!pointerOwners.has(e.pointerId))return;
-    var i=pointerOwners.get(e.pointerId);pointerOwners.delete(e.pointerId);
-    if(playerPointers[i]===e.pointerId)playerPointers[i]=null;
-    try{if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);}catch(err){}
+    surface.addEventListener('pointerup',releasePointer);
+    surface.addEventListener('pointercancel',releasePointer);
+    surface.addEventListener('lostpointercapture',releasePointer);
+    surface.addEventListener('contextmenu',function(e){e.preventDefault();});
   }
-  canvas.addEventListener('pointerup',releasePointer);
-  canvas.addEventListener('pointercancel',releasePointer);
-  canvas.addEventListener('lostpointercapture',releasePointer);
-  canvas.addEventListener('contextmenu',function(e){e.preventDefault();});
+  bindPaddleSurface(canvas,null);
+  bindPaddleSurface(touchZones[0],0);
+  bindPaddleSurface(touchZones[1],1);
   document.addEventListener('keydown',function(e){
     if(e.code==='KeyF'&&!e.repeat){e.preventDefault();toggleFullscreen();return;}
     if(e.code==='Escape'||e.code==='KeyP'){
