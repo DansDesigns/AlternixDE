@@ -1368,6 +1368,87 @@ else
     echo "[ERROR] osm-launcher-lockclean was not found in the repo or /usr/local/bin."
 fi
 
+echo "• Updating Pong2 Game..."
+
+# Find the source directory, using the same repository search as Breakout.
+PONG_SRC="$ALT_ROOT/Alternix/extras/games"
+if [ ! -f "$PONG_SRC/Pong2.html" ]; then
+    PONG_SRC="$ALT_ROOT/extras/games"
+fi
+
+# Resolve the desktop user's home before creating the launcher.
+if [ -z "${TARGET_HOME:-}" ]; then
+    TARGET_USER="${SUDO_USER:-$(id -un)}"
+    TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+fi
+
+if [ ! -f "$PONG_SRC/Pong2.html" ]; then
+    echo "✗ Pong2 source not found: $PONG_SRC/Pong2.html"
+
+elif [ ! -d "$TARGET_HOME" ] || [ "$TARGET_HOME" = "/root" ]; then
+    echo "✗ Invalid target home: $TARGET_HOME"
+
+else
+    TARGET_USER="$(stat -c '%U' "$TARGET_HOME")"
+    TARGET_GROUP="$(stat -c '%G' "$TARGET_HOME")"
+
+    PONG_DEST="$TARGET_HOME/extras/games"
+    PONG_DESKTOP_DIR="$TARGET_HOME/.local/share/applications"
+
+    # Create the target directories with the correct desktop-user ownership.
+    sudo install -d -o "$TARGET_USER" -g "$TARGET_GROUP" \
+        "$TARGET_HOME/extras" \
+        "$PONG_DEST" \
+        "$TARGET_HOME/.local" \
+        "$TARGET_HOME/.local/share" \
+        "$PONG_DESKTOP_DIR"
+
+    # Update the actual game, not only its launcher.
+    echo "• Installing Pong2 HTML..."
+    sudo install -m 644 \
+        -o "$TARGET_USER" -g "$TARGET_GROUP" \
+        "$PONG_SRC/Pong2.html" \
+        "$PONG_DEST/Pong2.html"
+
+    # Install/update the icon if present.
+    if [ -f "$PONG_SRC/Pong2.png" ]; then
+        echo "• Installing Pong2 icon..."
+        sudo install -D -m 644 \
+            "$PONG_SRC/Pong2.png" \
+            /usr/share/icons/hicolor/64x64/apps/Pong2.png
+    else
+        echo "⚠ Pong2 icon not found; skipping."
+    fi
+
+    # Create the user-owned launcher, matching Breakout's Chromium app mode.
+    echo "• Creating Pong2 launcher..."
+    sudo tee "$PONG_DESKTOP_DIR/Pong2.desktop" > /dev/null <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Pong2
+Comment=Two-player touch Pong
+Exec=brave-browser --app=file://$PONG_DEST/Pong2.html --new-window --force-device-scale-factor=1.3
+Icon=Pong2
+Terminal=false
+Categories=Game;
+StartupNotify=true
+EOF
+
+    sudo chown "$TARGET_USER:$TARGET_GROUP" \
+        "$PONG_DESKTOP_DIR/Pong2.desktop"
+    sudo chmod 755 "$PONG_DESKTOP_DIR/Pong2.desktop"
+
+    # Verify the files needed to launch the game are installed.
+    if [ -f "$PONG_DEST/Pong2.html" ] && \
+       [ -f "$PONG_DESKTOP_DIR/Pong2.desktop" ]; then
+        echo "✓ Pong2 Game updated successfully."
+        echo "  HTML: $PONG_DEST/Pong2.html"
+        echo "  Launcher: $PONG_DESKTOP_DIR/Pong2.desktop"
+    else
+        echo "✗ Pong2 installation failed."
+    fi
+fi
 
 
 echo "• Updating Breakout Game..."

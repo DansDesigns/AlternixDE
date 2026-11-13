@@ -2022,6 +2022,26 @@ chmod +x "$TARGET_HOME/.local/share/applications/breakout.desktop"
 echo "✓ Breakout Game installed."
 
 
+echo "[Apps] Installing Pong2 Game..."
+if [ -f "extras/games/Pong2.png" ]; then
+    sudo cp "$ALT_ROOT/Alternix/extras/games/Pong2.png" /usr/share/icons/hicolor/64x64/apps/Pong2.png
+fi
+
+cat <<EOF > "$TARGET_HOME/.local/share/applications/Pong2.desktop"
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Pong2
+Comment=Protect your goal
+Exec=brave-browser --app=file://$TARGET_HOME/extras/games/Pong2.html --new-window --force-device-scale-factor=1.3
+Icon=Pong2
+Terminal=false
+Categories=Game;
+StartupNotify=true
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/Pong2.desktop"
+echo "✓ Pong2 Game installed."
+
 
 
 echo "[Apps] Installing OpenStreetMap WebApp..."
