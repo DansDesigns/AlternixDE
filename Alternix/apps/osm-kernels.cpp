@@ -24,6 +24,8 @@
 #include <QUrl>
 #include <QQueue>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <QSaveFile>
 
 namespace {
 
@@ -237,6 +239,112 @@ struct MLVer {
     }
 };
 
+// Ubuntu mainline packages from certain builds (notably 6.19 and early 7.x)
+// ship maintainer scripts which pass TWO directories to Debian run-parts.
+// Never edit the system run-parts or installed hook directories: normalise only
+// the affected maintainer scripts in a TEMPORARY COPY of a verified .deb.
+// The tool mode below runs from this same executable (no external fix script).
+QString normaliseMainlineHooks(QString script, int *changes)
+{
+    static const QRegularExpression broken(QStringLiteral(
+        R"(((?:DEB_MAINT_PARAMS="[^"\r\n]*"[ \t]+)?run-parts[ \t]+[^\r\n]*?(?:\\\r?\n[ \t]*[^\r\n]*?)?)[ \t]+(/etc/kernel/(preinst|postinst|prerm|postrm|header_postinst)\.d)[ \t]+(/usr/share/kernel/\3\.d))"));
+    static const QRegularExpression continued(QStringLiteral(R"(\\\r?\n[ \t]*)"));
+    struct Edit { int offset, length; QString replacement; };
+    QVector<Edit> edits;
+    auto matches = broken.globalMatch(script);
+    while (matches.hasNext()) {
+        const auto match = matches.next();
+        QString command = match.captured(1);
+        command.replace(continued, QStringLiteral(" "));
+        const QString etc = match.captured(2);
+        const QString share = match.captured(4);
+        // Both calls preserve arguments and DEB_MAINT_PARAMS. Guarding each
+        // directory also works if only one hook directory exists. Literal
+        // paths (not $variables) remain valid inside unquoted <<EOF blocks.
+        const QString replacement = QStringLiteral(
+            "if [ -d %1 ]; then %2 %1 || exit 1; fi\n"
+            "if [ -d %3 ]; then %2 %3 || exit 1; fi").arg(etc, command, share);
+        edits.push_back({match.capturedStart(0), match.capturedLength(0), replacement});
+    }
+    for (int i = edits.size() - 1; i >= 0; --i)
+        script.replace(edits.at(i).offset, edits.at(i).length, edits.at(i).replacement);
+    if (changes) *changes += edits.size();
+    return script;
+}
+
+// Private CLI mode used by the normal mainline-install transaction after the
+// ORIGINAL Ubuntu .deb has passed its SHA-256 check. No admin state is altered
+// here; the new archive has a distinct filename and is confined to $work.
+int prepareMainlineDeb(const QString &path)
+{
+    const QFileInfo original(path);
+    if (!original.isFile() || original.isSymLink() || !original.fileName().endsWith(QLatin1String(".deb"))) {
+        fprintf(stderr, "ERROR: invalid mainline package path\n");
+        return 2;
+    }
+    QTemporaryDir temp(QStringLiteral("/var/tmp/osm-kernels-deb.XXXXXX"));
+    if (!temp.isValid()) { fprintf(stderr, "ERROR: could not create a temporary directory\n"); return 2; }
+
+    auto unpack = [&](const QStringList &args) -> bool {
+        QProcess p;
+        p.start(QStringLiteral("dpkg-deb"), args);
+        if (!p.waitForStarted(10000) || !p.waitForFinished(300000) || p.exitCode() != 0 ||
+            p.exitStatus() != QProcess::NormalExit) {
+            fprintf(stderr, "ERROR: dpkg-deb failed: %s\n", p.readAllStandardError().constData());
+            return false;
+        }
+        return true;
+    };
+    const QString control = temp.filePath(QStringLiteral("control"));
+    if (!unpack({QStringLiteral("-e"), original.absoluteFilePath(), control})) return 2;
+    const QStringList scripts = {QStringLiteral("preinst"), QStringLiteral("postinst"),
+                                 QStringLiteral("prerm"), QStringLiteral("postrm")};
+    int defectCount = 0;
+    for (const QString &name : scripts) {
+        const QString pathToScript = control + QLatin1Char('/') + name;
+        if (!QFile::exists(pathToScript)) continue;
+        int n = 0;
+        normaliseMainlineHooks(readFile(pathToScript), &n);
+        defectCount += n;
+    }
+    if (defectCount == 0) {
+        printf("==> %s: no broken multi-directory run-parts calls\n",
+               original.fileName().toUtf8().constData());
+        return 0;
+    }
+    const QString root = temp.filePath(QStringLiteral("unpacked"));
+    if (!unpack({QStringLiteral("-R"), original.absoluteFilePath(), root})) return 2;
+    int fixed = 0;
+    for (const QString &name : scripts) {
+        const QString scriptFile = root + QStringLiteral("/DEBIAN/") + name;
+        if (!QFile::exists(scriptFile)) continue;
+        QFile f(scriptFile);
+        if (!f.open(QIODevice::ReadOnly)) return 2;
+        const QString before = QString::fromUtf8(f.readAll());
+        f.close();
+        const QString after = normaliseMainlineHooks(before, &fixed);
+        if (after == before) continue;
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate) || f.write(after.toUtf8()) != after.toUtf8().size()) {
+            fprintf(stderr, "ERROR: failed to normalise %s\n", name.toUtf8().constData());
+            return 2;
+        }
+        f.close();
+    }
+    if (fixed != defectCount) {
+        fprintf(stderr, "ERROR: inconsistent package normalisation; refusing installation\n");
+        return 2;
+    }
+    const QString prepared = original.absoluteFilePath() + QStringLiteral(".alternix.deb");
+    if (!unpack({QStringLiteral("--root-owner-group"), QStringLiteral("-b"), root, prepared})) {
+        QFile::remove(prepared);
+        return 2;
+    }
+    printf("==> Corrected %d broken run-parts call(s) in temporary copy of %s\n",
+           fixed, original.fileName().toUtf8().constData());
+    printf("==> Original package passed the available upstream checksum checks; repacked local copy is not byte-identical\n");
+    return 0;
+}
+
 struct Page {
     QWidget *w = nullptr;
     QLabel *note = nullptr;
@@ -310,7 +418,7 @@ private:
     QPushButton *m_removeBtn = nullptr, *m_customRemoveBtn = nullptr;
     QListWidget *m_customRepos = nullptr;
     QLabel *m_banner = nullptr, *m_status = nullptr;
-    QPushButton *m_bannerClose = nullptr, *m_logToggle = nullptr;
+    QPushButton *m_bannerClose = nullptr, *m_logToggle = nullptr, *m_saveLog = nullptr;
     QWidget *m_bannerRow = nullptr;
     QPlainTextEdit *m_log = nullptr;
     QList<QWidget *> m_actions, m_grubBtns;
@@ -943,18 +1051,27 @@ private:
         m_logToggle->setMinimumHeight(44);
         m_logToggle->setFocusPolicy(Qt::NoFocus);
         connect(m_logToggle, &QPushButton::clicked, this, [this] { showLog(!m_log->isVisible()); });
+        m_saveLog = new QPushButton(QStringLiteral("Save log"));
+        m_saveLog->setMinimumHeight(44);
+        m_saveLog->setFocusPolicy(Qt::NoFocus);
+        m_saveLog->setEnabled(false);
+        connect(m_saveLog, &QPushButton::clicked, this, [this] { saveLogToDisk(); });
         foot->addWidget(m_headers);
         foot->addStretch();
         foot->addWidget(m_status);
         foot->addWidget(m_logToggle);
+        foot->addWidget(m_saveLog);
         root->addLayout(foot);
 
         m_log = new QPlainTextEdit;
         m_log->setReadOnly(true);
-        m_log->setMaximumBlockCount(5000);
+        m_log->setMaximumBlockCount(0);  // Save log must include all diagnostic lines
         m_log->setFixedHeight(190);
         m_log->hide();
         QScroller::grabGesture(m_log->viewport(), QScroller::LeftMouseButtonGesture);
+        connect(m_log, &QPlainTextEdit::textChanged, this, [this] {
+            m_saveLog->setEnabled(!m_log->document()->isEmpty());
+        });
         root->addWidget(m_log);
 
         applyNotes();
@@ -964,6 +1081,26 @@ private:
     {
         m_log->setVisible(on);
         m_logToggle->setText(on ? QStringLiteral("Hide log") : QStringLiteral("Show log"));
+    }
+
+    void saveLogToDisk()
+    {
+        if (m_log->document()->isEmpty()) return;
+        QString folder = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        if (folder.isEmpty() || !QDir(folder).exists()) folder = QDir::homePath();
+        const QString name = QStringLiteral("osm-kernels-%1.log").arg(
+            QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+        const QString target = QFileDialog::getSaveFileName(this, QStringLiteral("Save kernel manager log"),
+            QDir(folder).filePath(name), QStringLiteral("Log files (*.log);;Text files (*.txt);;All files (*)"));
+        if (target.isEmpty()) return;
+        QSaveFile file(target);
+        const QByteArray contents = m_log->toPlainText().toUtf8();
+        if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() || !file.commit()) {
+            QMessageBox::warning(this, QStringLiteral("Save log"),
+                QStringLiteral("Could not save the log to:\n%1\n\n%2").arg(target, file.errorString()));
+            return;
+        }
+        m_status->setText(QStringLiteral("Log saved"));
     }
 
     void banner(const QString &kind, const QString &text)
@@ -1529,7 +1666,7 @@ private:
             const QString r = QRegularExpression::escape(release);
             const QString common = QRegularExpression::escape(release.chopped(8)); // strip -generic
             const QString img = pickLast(debs, QStringLiteral("^linux-image-(?:unsigned-)?%1_[^_]+_%2\\.deb$").arg(r, a));
-            if (img.isEmpty()) {
+            if (img.isEmpty() && !headersOnly) {
                 if (!dirs.isEmpty()) { mlTryDirs(tag, release, dirs, headersOnly); return; }
                 setBusy(false);
                 fail(QStringLiteral("No %1 generic kernel build was found for %2. Ubuntu's build for this version may have failed for your architecture.").arg(m_arch, tag));
@@ -1608,16 +1745,41 @@ private:
             if (sha.contains(f)) s += QStringLiteral("printf '%s  %s\\n' %1 %2 | sha256sum -c -\n").arg(sq(sha.value(f)), sq(f));
             else s += QStringLiteral("echo 'WARNING: no published checksum for %1; installed unverified'\n").arg(f);
         }
-        // Install the image and modules first. Header postinst/DKMS hooks need
-        // /lib/modules/<release> to exist before attempting an external-module build.
+        // Ubuntu mainline packages from some 6.19/7.x builds contain malformed
+        // two-directory run-parts calls (including in generated trigger files).
+        // Prepare only affected packages, after verifying the original checksums.
+        // The helper is a private mode in this same C++ executable: no standalone
+        // repair script and no modifications to system-wide kernel hooks.
+        const QString exe = QCoreApplication::applicationFilePath();
+        for (const QString &f : files)
+            s += QStringLiteral("echo '==> Checking package maintainer hooks: %1'\n%2 --prepare-mainline-deb %3\n")
+                     .arg(f, sq(exe), sq(f));
+
+        auto installGroup = [&](const QStringList &group, const QString &description) {
+            QString result = QStringLiteral("echo '==> %1'\nset --\n").arg(description);
+            for (const QString &f : group) {
+                // A repaired archive is a distinct .deb, never the checksum-verified original.
+                result += QStringLiteral("if [ -f %1 ]; then set -- \"$@\" %1; "
+                                         "else set -- \"$@\" %2; fi\n")
+                    .arg(sq(QStringLiteral("./") + f + QStringLiteral(".alternix.deb")),
+                         sq(QStringLiteral("./") + f));
+            }
+            result += QStringLiteral("if ! apt-get %1 --no-remove install -y \"$@\"; then\n")
+                      .arg(kAptOpts);
+            result += QStringLiteral("  echo 'ERROR: %1 failed to install or configure'\n")
+                      .arg(description);
+            if (description.contains(QLatin1String("headers"))) {
+                result += QStringLiteral("  echo '==> Dependency and DKMS diagnostics:'\n");
+                for (const QString &f : group)
+                    result += QStringLiteral("  dpkg-deb -f %1 Depends || true\n").arg(sq(f));
+                result += QStringLiteral("  command -v gcc-15 || echo 'NOTE: gcc-15 is unavailable; inspect DKMS output for the actual requirement'\n");
+            }
+            result += QStringLiteral("  dpkg --audit || true\n  exit 1\nfi\n");
+            return result;
+        };
+        // Image and modules first: header postinst hooks expect /lib/modules/release.
         if (!requiredFiles.isEmpty()) {
-            QStringList q;
-            for (const QString &f : requiredFiles) q << sq(QStringLiteral("./") + f);
-            s += QStringLiteral("echo '==> Installing kernel image and modules'\n");
-            s += QStringLiteral("if ! apt-get %1 --no-remove install -y %2; then\n")
-                    .arg(kAptOpts, q.join(QLatin1Char(' ')));
-            s += QStringLiteral("  echo 'ERROR: kernel image/modules installation failed; check the APT and dpkg output above'\n");
-            s += QStringLiteral("  dpkg --audit || true\n  exit 1\nfi\n");
+            s += installGroup(requiredFiles, QStringLiteral("Installing kernel image and modules"));
             for (const QString &f : requiredFiles) {
                 const QString pkg = f.section(QLatin1Char('_'), 0, 0);
                 s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: required kernel package %2 is not configured'; exit 1; }\n")
@@ -1625,26 +1787,15 @@ private:
             }
         }
         if (headerFiles.size() == 2) {
-            QStringList q;
-            for (const QString &f : headerFiles) q << sq(QStringLiteral("./") + f);
-            s += QStringLiteral("echo '==> Installing matching common and generic headers together'\n");
-            s += QStringLiteral("if ! apt-get %1 --no-remove install -y %2; then\n")
-                    .arg(kAptOpts, q.join(QLatin1Char(' ')));
-            s += QStringLiteral("  echo 'ERROR: mainline headers failed to install or configure; this job is NOT complete'\n");
-            s += QStringLiteral("  echo '==> Header package dependencies:'\n");
-            for (const QString &f : headerFiles)
-                s += QStringLiteral("  dpkg-deb -f %1 Depends || true\n").arg(sq(f));
-            s += QStringLiteral("  echo '==> Compiler/DKMS diagnostics:'\n");
-            s += QStringLiteral("  command -v gcc-15 || echo 'NOTE: gcc-15 is unavailable; newer 7.x DKMS builds may require it'\n");
-            s += QStringLiteral("  dpkg --audit || true\n");
-            s += QStringLiteral("  echo 'ERROR: kernel image may already be installed, but its headers are NOT ready; check the above diagnostics before rebooting'\n");
-            s += QStringLiteral("  exit 1\nfi\n");
+            s += installGroup(headerFiles, QStringLiteral("Installing matching common and generic headers"));
             for (const QString &f : headerFiles) {
                 const QString pkg = f.section(QLatin1Char('_'), 0, 0);
-                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: header package %2 is not fully configured (DKMS/postinst may have failed)'; dpkg --audit || true; exit 1; }\n")
+                s += QStringLiteral("dpkg-query -W -f='${db:Status-Abbrev}' %1 2>/dev/null | grep -q '^ii' || { echo 'ERROR: header package %2 is not fully configured (check DKMS, dependency and postinst output)'; dpkg --audit || true; exit 1; }\n")
                         .arg(sq(pkg), pkg);
             }
             s += QStringLiteral("echo '==> Verified: both matching header packages are configured'\n");
+            // Do not call a DKMS failure a header-download failure: show
+            // dependencies and compiler diagnostics if apt/dpkg reports an error.
         } else if (wantHeaders) {
             s += QStringLiteral("echo 'ERROR: a complete matching mainline header pair was not found'\nexit 1\n");
         }
@@ -1959,6 +2110,10 @@ QMessageBox QLabel { font-family: 'DejaVu Sans'; }
 
 int main(int argc, char **argv)
 {
+    if (argc == 3 && QByteArray(argv[1]) == QByteArrayLiteral("--prepare-mainline-deb")) {
+        QCoreApplication app(argc, argv);
+        return prepareMainlineDeb(QString::fromLocal8Bit(argv[2]));
+    }
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("osm-kernels"));
     app.setFont(QFont(QStringLiteral("DejaVu Sans"), 11));

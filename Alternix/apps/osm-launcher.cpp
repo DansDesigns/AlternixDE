@@ -1322,6 +1322,13 @@ int main(int argc, char **argv) {
 
     LauncherWindow window;        // ← WINDOW TYPE WITH BUILT-IN FADE
     window.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+    // This is a transient fullscreen app picker, not a taskbar application.
+    // Qtile's TaskList excludes _NET_WM_WINDOW_TYPE_UTILITY windows. Set the
+    // X11 type BEFORE the native window is created so Qtile never registers an
+    // osm-launcher task button, including during the close animation. Keep
+    // Qt::Window (rather than Qt::Tool) to preserve fullscreen/focus behaviour
+    // and QApplication's normal exit-on-last-window-close semantics.
+    window.setAttribute(Qt::WA_X11NetWmWindowTypeUtility, true);
     window.setAttribute(Qt::WA_TranslucentBackground, true);
     window.setAutoFillBackground(false);
     window.setStyleSheet("background:transparent;");

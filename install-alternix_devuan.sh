@@ -189,6 +189,15 @@ for vlc_asset in \
     fi
 done
 
+# Welcome: ship the complete native Qt5 source and launcher icon in the
+# repository. Do not silently install a first-boot guide with missing assets.
+ALT_WELCOME_SOURCE="$ALT_ROOT/Alternix/apps/welcome.cpp"
+ALT_WELCOME_ICON="$ALT_ROOT/Alternix/icons/welcome.png"
+if [ ! -s "$ALT_WELCOME_SOURCE" ] || [ ! -s "$ALT_WELCOME_ICON" ]; then
+    echo "ERROR: Welcome requires Alternix/apps/welcome.cpp and Alternix/icons/welcome.png." >&2
+    exit 1
+fi
+
 # Ask for username
 while true; do
     read -rp "Enter the username for Alternix: " TARGET_USER
@@ -1549,6 +1558,13 @@ if [ -x "$ALT_INPUT_LOGIN_DIR/alternix-rotate-toggle.sh" ]; then
     fi
 fi
 # End AlternixOS input login restoration.
+# AlternixOS Welcome first-login guide. The --once mode checks the current
+# live/installed boot and leaves a completion marker only at the last page.
+# The short delay lets Qtile register as the window manager before fullscreen.
+if [ -x /usr/local/bin/welcome ]; then
+    /usr/local/bin/welcome --once --startup-delay >/dev/null 2>&1 &
+fi
+# End AlternixOS Welcome first-login guide.
 exec dbus-launch --exit-with-session "$HOME/.qtile_venv/bin/qtile" start
 EOF
 chmod +x "$TARGET_HOME/.xinitrc"
@@ -1584,6 +1600,28 @@ cd "$ALT_ROOT/Alternix" || { echo "ERROR: $ALT_ROOT not found"; exit 1; }
 echo "• Building osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
+
+echo "• Building welcome (responsive fullscreen onboarding)..."
+g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome $(pkg-config --cflags --libs Qt5Widgets) || exit 1
+sudo install -m 0755 welcome /usr/local/bin/welcome || exit 1
+sudo install -D -m 0644 icons/welcome.png /usr/share/icons/hicolor/256x256/apps/welcome.png || exit 1
+# One global launcher: osm-launcher scans /usr/share/applications by default.
+sudo tee /usr/share/applications/welcome.desktop >/dev/null <<'ALT_WELCOME_DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Welcome
+GenericName=AlternixOS Welcome
+Comment=Touch-friendly introduction to AlternixOS
+Exec=/usr/local/bin/welcome
+Icon=welcome
+Terminal=false
+StartupNotify=false
+Categories=Utility;Education;
+ALT_WELCOME_DESKTOP
+if command -v update-desktop-database >/dev/null 2>&1; then
+    sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
 
 echo "• Building osm-launcher-lock-cleaner..."
 chmod +x osm-launcher-lockclean && sudo mv osm-launcher-lockclean /usr/local/bin/

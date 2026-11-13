@@ -170,6 +170,15 @@ for vlc_asset in \
     fi
 done
 
+# Welcome: ship the complete native Qt5 source and launcher icon in the
+# repository. Do not silently install a first-boot guide with missing assets.
+ALT_WELCOME_SOURCE="$ALT_ROOT/Alternix/apps/welcome.cpp"
+ALT_WELCOME_ICON="$ALT_ROOT/Alternix/icons/welcome.png"
+if [ ! -s "$ALT_WELCOME_SOURCE" ] || [ ! -s "$ALT_WELCOME_ICON" ]; then
+    echo "ERROR: Welcome requires Alternix/apps/welcome.cpp and Alternix/icons/welcome.png." >&2
+    exit 1
+fi
+
 # The normal sudo PAM mechanism handles all privilege elevation.
 # No direct -n probe and no bypassing credential requests.
 if ! /usr/bin/sudo -v; then
@@ -1224,6 +1233,28 @@ echo "• Updating osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
 
+echo "• Building welcome (responsive fullscreen onboarding)..."
+g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome $(pkg-config --cflags --libs Qt5Widgets) || exit 1
+sudo install -m 0755 welcome /usr/local/bin/welcome || exit 1
+sudo install -D -m 0644 icons/welcome.png /usr/share/icons/hicolor/256x256/apps/welcome.png || exit 1
+# One global launcher: osm-launcher scans /usr/share/applications by default.
+sudo tee /usr/share/applications/welcome.desktop >/dev/null <<'ALT_WELCOME_DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Welcome
+GenericName=AlternixOS Welcome
+Comment=Touch-friendly introduction to AlternixOS
+Exec=/usr/local/bin/welcome
+Icon=welcome
+Terminal=false
+StartupNotify=false
+Categories=Utility;Education;
+ALT_WELCOME_DESKTOP
+if command -v update-desktop-database >/dev/null 2>&1; then
+    sudo update-desktop-database /usr/share/applications 2>/dev/null || true
+fi
+
 # Keep the long-running edge-gesture services in sync with rotated screens.
 # The previous updater omitted osm-running and osm-status entirely, leaving
 # their old fixed-geometry swipe bars active even after a successful update.
@@ -1616,6 +1647,42 @@ fi
             path.write_text(''.join(lines), encoding='utf-8')
             print('[Input] Installed pen/touch and auto-rotate startup in Qtile .xinitrc.')
 ALT_INPUT_XINITRC
+
+# Ensure Welcome starts after Qtile begins on the next installed-system login.
+# The existing .xinitrc was amended above for pen/rotation; keep those hooks.
+# We do not add Welcome to .config/autostart because Qtile ignores XDG entries.
+sudo python3 - "$ALT_INPUT_HOME/.xinitrc" /etc/skel/.xinitrc <<'ALT_WELCOME_XINITRC'
+from pathlib import Path
+import sys
+
+hook = r'''# AlternixOS Welcome first-login guide. The --once mode checks the current
+# live/installed boot and leaves a completion marker only at the last page.
+# The short delay lets Qtile register as the window manager before fullscreen.
+if [ -x /usr/local/bin/welcome ]; then
+    /usr/local/bin/welcome --once --startup-delay >/dev/null 2>&1 &
+fi
+# End AlternixOS Welcome first-login guide.
+'''
+
+for name in sys.argv[1:]:
+    file = Path(name)
+    if not file.is_file() or file.is_symlink():
+        print('[Welcome] Existing Qtile startup not found (or is a symlink):', file)
+        continue
+    contents = file.read_text(encoding='utf-8')
+    if '# AlternixOS Welcome first-login guide.' in contents:
+        print('[Welcome] Existing first-login hook retained:', file)
+        continue
+    lines = contents.splitlines(keepends=True)
+    idx = next((n for n, line in enumerate(lines)
+                if line.lstrip().startswith('exec ') and 'qtile' in line), None)
+    if idx is None:
+        print('[Welcome] Unrecognized/custom .xinitrc, left unchanged:', file)
+        continue
+    lines.insert(idx, hook)
+    file.write_text(''.join(lines), encoding='utf-8')
+    print('[Welcome] Added one-time installed-system Qtile startup:', file)
+ALT_WELCOME_XINITRC
 
 # ────────────────────────────────────────────────
 # Install/activate the SAME one-time hardware-aware audio setup used by
