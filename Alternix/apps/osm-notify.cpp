@@ -67,6 +67,15 @@
 #  undef Unsorted
 #endif
 
+// Use one X11 connection for reading the live root geometry and ensuring
+// the transparent swipe zones remain in front of Qtile's top bar.  A Qt
+// stays-on-top hint alone cannot reliably order bypass-WM windows after a
+// bar redraw, WM restart, or display rotation.
+static Display *alternixX11Display() {
+    static Display *dpy = XOpenDisplay(nullptr);
+    return dpy;
+}
+
 // XLibre/XRandR can change the X11 root size before Qt5 publishes the new
 // QScreen geometry.  Query the live server root for a single-display tablet;
 // preserve Qt's per-monitor geometry on multi-display desktops.
@@ -75,7 +84,7 @@ static QRect alternixActiveScreenGeometry() {
     if (!screen) return QRect();
     const QRect qtGeometry = screen->geometry();
     if (QGuiApplication::screens().size() != 1) return qtGeometry;
-    static Display *dpy = XOpenDisplay(nullptr);
+    Display *dpy = alternixX11Display();
     if (!dpy) return qtGeometry;
     Window returnedRoot = 0;
     int x = 0, y = 0;
@@ -427,6 +436,7 @@ public:
     QMap<QWidget*, QRect> finalGeomMap;
     QMap<QWidget*, QGraphicsOpacityEffect*> opacityMap;
     bool closing;
+    std::function<void()> onPanelClosed;
 
     QTimer *refreshTimer;
     QTimer *deviceTimer = nullptr;
@@ -1415,6 +1425,9 @@ public:
             lower();
             setVisible(false);
             setEnabled(true);
+            // Qtile may have restacked the bar while the panel was visible.
+            // Put its two invisible activation zones back in front immediately.
+            if (onPanelClosed) onPanelClosed();
 
             QTimer::singleShot(10, this, [this]() {
                 this->repaint();
@@ -1524,21 +1537,39 @@ public:
                        | Qt::WindowStaysOnTopHint
                        | Qt::BypassWindowManagerHint
                        | Qt::WindowDoesNotAcceptFocus);
+        // Keep an actual X11 input window: transparent pixels must remain
+        // touchable, rather than making the window click-through.
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_NativeWindow);
+        setAttribute(Qt::WA_TransparentForMouseEvents, false);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setFocusPolicy(Qt::NoFocus);
         setMouseTracking(true);
         setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         setGeometry(x, y, w, h);
-        setStyleSheet("background: rgba(0,0,0,0);");
-
+        // Intentionally no stylesheet or painted fill: the window is fully
+        // invisible, but its native input region still accepts swipes.
         show();
-        raise();
+        ensureInFront();
     }
 
     void syncEdgeGeometry(int x, int y, int w, int h) {
         const QRect target(x, y, qMax(1, w), qMax(1, h));
         if (geometry() != target) setGeometry(target);
+    }
+
+    void ensureInFront() {
+        // Do not put the activation zones in front of the open notification
+        // panel; the zones are only supposed to capture gestures on Qtile.
+        if (!isVisible() || (overlay && overlay->isVisible())) return;
+        if (Display *dpy = alternixX11Display()) {
+            XRaiseWindow(dpy, static_cast<Window>(winId()));
+            XFlush(dpy);
+        } else {
+            raise();
+        }
     }
 
 protected:
@@ -1722,6 +1753,14 @@ int main(int argc, char **argv) {
                                  leftWidth, barHeight);
         rightBar.syncEdgeGeometry(g.x() + edgeExclusion + leftWidth + centerExclusion,
                                   g.y(), rightWidth, barHeight);
+        // Qtile's bar, Picom, and XRandR can change stacking independently of
+        // Qt's geometry notifications.  Reassert only while the panel is shut.
+        leftBar.ensureInFront();
+        rightBar.ensureInFront();
+    };
+    overlay.onPanelClosed = [&leftBar, &rightBar]() {
+        leftBar.ensureInFront();
+        rightBar.ensureInFront();
     };
     QObject::connect(screen, &QScreen::geometryChanged, &overlay,
                      [updateScreen](const QRect &) {
