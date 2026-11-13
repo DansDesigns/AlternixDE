@@ -83,6 +83,28 @@ if [ ! -s "$ALT_AUDIO_SOURCE" ] || ! bash -n "$ALT_AUDIO_SOURCE"; then
     exit 1
 fi
 
+# Verify the complete X11 pen, touch and auto-rotation runtime before an
+# ISO build/update begins. These files belong in AlternixDE, not in the
+# installer directory. Refuse to ship a UI with missing backends.
+ALT_INPUT_SOURCE_DIR="$ALT_ROOT/Alternix/scripts"
+for alt_input_file in \
+    alternix-rotate-monitor.sh \
+    alternix-rotate-setup.sh \
+    alternix-rotate-toggle.sh \
+    alternix-stylus-apply.sh; do
+    if [ ! -s "$ALT_INPUT_SOURCE_DIR/$alt_input_file" ] || \
+       ! bash -n "$ALT_INPUT_SOURCE_DIR/$alt_input_file"; then
+        echo "ERROR: Missing or invalid Alternix pen/rotation source: $ALT_INPUT_SOURCE_DIR/$alt_input_file" >&2
+        echo "Add the complete updated scripts to Alternix/scripts before installing." >&2
+        exit 1
+    fi
+done
+if [ ! -s "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp" ] || \
+   ! grep -Fq 'alternix-stylus-apply.sh' "$ALT_ROOT/Alternix/apps/osm-settings/display.cpp"; then
+    echo "ERROR: Updated Display settings source with stylus controls is missing." >&2
+    exit 1
+fi
+
 # Alternix VLC: require the FULL native Qt interface theme before the install.
 # No .vlt files or separate patch/repair commands are used.
 ALT_VLC_THEME_SRC="$ALT_ROOT/Alternix/themes/vlc"
@@ -220,6 +242,20 @@ ALT_NO_XTERM
 
 
 sudo apt install xlibre -y
+# XLibre-safe tablet/pen stack. xinput and xrandr must be present for
+# display mapping; monitor-sensor comes from iio-sensor-proxy. Do not pull in
+# the Xorg Wacom driver on an XLibre session (its server ABI may differ).
+echo "[Input] Installing touchscreen, Wacom and rotation dependencies..."
+sudo apt-get install -y xinput x11-xserver-utils iio-sensor-proxy dbus-x11
+if apt-cache policy xserver-xlibre-input-wacom 2>/dev/null | \
+   grep -Eq '^[[:space:]]*Candidate:[[:space:]]*[^ (]'; then
+    if ! sudo apt-get install -y xserver-xlibre-input-wacom; then
+        echo "WARNING: XLibre Wacom driver installation failed; libinput pens remain supported." >&2
+    fi
+else
+    echo "[Input] No xserver-xlibre-input-wacom candidate in configured repositories; using XLibre libinput." 
+fi
+
 #sudo dpkg --add-architecture i386
 
 # Nala is required by os-check-update. Devuan Excalibur includes Nala
@@ -1343,10 +1379,28 @@ mkdir -p "$TARGET_HOME/.config/Alternix"
 mkdir -p "$TARGET_HOME/.local/bin"
 cp -r "$ALT_ROOT/Alternix/scripts" "$TARGET_HOME/.config/Alternix/"
 
+# Refresh the exact four backends required by the current Display module.
+# The normal scripts copy above also retains all unrelated Alternix scripts.
+for alt_input_file in \
+    alternix-rotate-monitor.sh \
+    alternix-rotate-setup.sh \
+    alternix-rotate-toggle.sh \
+    alternix-stylus-apply.sh; do
+    sudo install -m 0755 "$ALT_INPUT_SOURCE_DIR/$alt_input_file" \
+        "$TARGET_HOME/.config/Alternix/scripts/$alt_input_file"
+done
+# The ISO may create the final desktop user after the preview user. Make
+# these same runtime sources available through standard home provisioning.
+sudo install -d -m 0755 /etc/skel/.config/Alternix/scripts
+for alt_input_file in \
+    alternix-rotate-monitor.sh \
+    alternix-rotate-setup.sh \
+    alternix-rotate-toggle.sh \
+    alternix-stylus-apply.sh; do
+    sudo install -m 0755 "$ALT_INPUT_SOURCE_DIR/$alt_input_file" \
+        "/etc/skel/.config/Alternix/scripts/$alt_input_file"
+done
 cd "$TARGET_HOME/.config/Alternix/scripts"
-chmod +x alternix-rotate-monitor.sh
-chmod +x alternix-rotate-setup.sh
-chmod +x alternix-rotate-toggle.sh
 chmod +x alternix-audio-fix.sh
 
 # ────────────────────────────────────────────────
@@ -1401,12 +1455,39 @@ sudo install -m 755 alternix-exe /usr/local/bin
 # ────────────────────────────────────────────────
 echo " "
 echo "[4/10] Creating .xinitrc autostart..."
-cat <<EOF > "$TARGET_HOME/.xinitrc"
+cat <<'EOF' > "$TARGET_HOME/.xinitrc"
 #!/bin/sh
-. "\$HOME/.qtile_venv/bin/activate"
-exec dbus-launch --exit-with-session "\$HOME/.qtile_venv/bin/qtile" start
+. "$HOME/.qtile_venv/bin/activate"
+# AlternixOS X11 pen/touch + auto-rotation login restoration.
+# Qtile does not automatically run ~/.config/autostart/*.desktop entries.
+# These settings only run after the user deliberately saves/enables them.
+ALT_INPUT_LOGIN_DIR="$HOME/.config/Alternix/scripts"
+if [ -s "$HOME/.config/Alternix/stylus.conf" ] && \
+   [ -x "$ALT_INPUT_LOGIN_DIR/alternix-stylus-apply.sh" ]; then
+    (sleep 1; /bin/bash "$ALT_INPUT_LOGIN_DIR/alternix-stylus-apply.sh" apply) >/dev/null 2>&1 &
+fi
+if [ -x "$ALT_INPUT_LOGIN_DIR/alternix-rotate-toggle.sh" ]; then
+    if [ -f "$HOME/.config/autostart/alternix-auto-rotate.desktop" ]; then
+        touch "$HOME/.config/Alternix/rotate-autostart-migrated"
+        (sleep 1; /bin/bash "$ALT_INPUT_LOGIN_DIR/alternix-rotate-toggle.sh" on --startup) >/dev/null 2>&1 &
+    elif [ ! -e "$HOME/.config/Alternix/rotate-autostart-migrated" ] && \
+         grep -Eq '^display_auto_rotate=true[[:space:]]*$' \
+            "$HOME/.config/Alternix/osm-settings.conf" 2>/dev/null; then
+        # Migrate the old preference once. If later disabled from osm-notify,
+        # a stale Settings preference must NOT re-enable it at next login.
+        touch "$HOME/.config/Alternix/rotate-autostart-migrated"
+        (sleep 1; /bin/bash "$ALT_INPUT_LOGIN_DIR/alternix-rotate-toggle.sh" on) >/dev/null 2>&1 &
+    fi
+fi
+# End AlternixOS input login restoration.
+exec dbus-launch --exit-with-session "$HOME/.qtile_venv/bin/qtile" start
 EOF
 chmod +x "$TARGET_HOME/.xinitrc"
+# The live ISO may create its final user after the preview account. Seed the
+# generic Qtile X11 session (but do not overwrite an existing skel launcher).
+if [ ! -e /etc/skel/.xinitrc ]; then
+    sudo install -m 0755 "$TARGET_HOME/.xinitrc" /etc/skel/.xinitrc
+fi
 
 
 # ────────────────────────────────────────────────
