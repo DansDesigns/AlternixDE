@@ -123,6 +123,11 @@ for alt_input_file in \
         exit 1
     fi
 done
+# Faster sensor loop: prevent restoring the old 1-second debounce code.
+if ! grep -Fq 'FAST_ROTATION_V2' "$ALT_INPUT_SOURCE_DIR/alternix-rotate-monitor.sh"; then
+    echo 'ERROR: Add the updated fast auto-rotation backend to Alternix/scripts before installing.' >&2
+    exit 1
+fi
 # Refuse outdated gesture and input sources: earlier versions silently read
 # XRandR's SUPPORTED orientations as "normal" even while rotated.
 if ! grep -Fq 'The active rotation follows the geometry' \

@@ -25,17 +25,20 @@ config_value() {
 
 # Prefer the built-in panel over an external primary monitor.
 select_output() {
-    local configured name
+    local configured name query
+    # Query XRandR only ONCE for the output-selection step. The old path
+    # could launch xrandr three times before even requesting a rotation.
+    query=$(xrandr --query 2>/dev/null) || return 1
     configured=$(config_value OUTPUT)
     if [ -n "$configured" ] && [ "$configured" != auto ]; then
-        if xrandr --query | awk -v n="$configured" '$1==n && $2=="connected"{found=1} END{exit !found}'; then
+        if awk -v n="$configured" '$1==n && $2=="connected"{found=1} END{exit !found}' <<< "$query"; then
             printf '%s\n' "$configured"
             return
         fi
     fi
-    name=$(xrandr --query | awk '$2=="connected" && $1 ~ /^(eDP|DSI|LVDS)/{print $1; exit}')
-    [ -n "$name" ] || name=$(xrandr --query | awk '$2=="connected" && $3=="primary"{print $1; exit}')
-    [ -n "$name" ] || name=$(xrandr --query | awk '$2=="connected"{print $1; exit}')
+    name=$(awk '$2=="connected" && $1 ~ /^(eDP|DSI|LVDS)/{print $1; exit}' <<< "$query")
+    [ -n "$name" ] || name=$(awk '$2=="connected" && $3=="primary"{print $1; exit}' <<< "$query")
+    [ -n "$name" ] || name=$(awk '$2=="connected"{print $1; exit}' <<< "$query")
     printf '%s\n' "$name"
 }
 
@@ -282,22 +285,40 @@ fi
 sensor_pid=$!
 exec 3< "$pipe_dir/orient"
 
+# FAST_ROTATION_V2: sensor-response timing is deliberately independent of
+# XRandR's own screen/mode-set duration. Keep the stable-orientation hold short
+# (220 ms) to avoid taking 1-2 seconds before even requesting the rotation.
+# A second identical sensor event MUST NOT restart this hold.
+epoch_ms() {
+    # Bash 5 EPOCHREALTIME is a builtin: no date subprocess in the hot path.
+    local stamp="$EPOCHREALTIME"
+    local epoch=${stamp%.*} micros=${stamp#*.}
+    printf '%s\n' "$((10#$epoch * 1000 + 10#${micros:0:3}))"
+}
+
 last_orientation=''
 pending=''
-pending_since=0
+pending_since_ms=0
 started_at=$SECONDS
 last_sync=$SECONDS
-trap 'pending="$last_orientation"; last_orientation=""; pending_since=0' USR1
+trap 'pending="$last_orientation"; last_orientation=""; pending_since_ms=$(epoch_ms)' USR1
 while :; do
-    if IFS= read -r -t 1 line <&3; then
+    # Long sleep when idle, 80-ms resolution only while awaiting a candidate.
+    # A sensor line wakes read immediately, so no busy polling while idle.
+    read_timeout=1
+    [ -z "$pending" ] || read_timeout=0.08
+    if IFS= read -r -t "$read_timeout" line <&3; then
         if [[ "$line" =~ orientation:[[:space:]]*([a-z-]+) ]] || \
            [[ "$line" =~ orientation[[:space:]]changed:[[:space:]]*([a-z-]+) ]]; then
             value="${BASH_REMATCH[1]}"
             case "$value" in
                 normal|bottom-up|left-up|right-up)
-                    if [ "$value" != "$last_orientation" ]; then
+                    if [ "$value" = "$last_orientation" ]; then
+                        # A transient different orientation was cancelled.
+                        pending=''
+                    elif [ "$value" != "$pending" ]; then
                         pending="$value"
-                        pending_since=$SECONDS
+                        pending_since_ms=$(epoch_ms)
                     fi
                     ;;
             esac
@@ -312,9 +333,10 @@ while :; do
         exit 1
     fi
     if [ -n "$pending" ]; then
-        # Apply initial orientation immediately; debounce later changes so
-        # a sensor crossing two axes does not rapidly flip the interface.
-        if [ -z "$last_orientation" ] || (( SECONDS - pending_since >= 1 )); then
+        now_ms=$(epoch_ms)
+        # On startup and an explicit refresh, apply current orientation now.
+        # For changes, a short stability window filters sensor jitter.
+        if [ -z "$last_orientation" ] || (( now_ms - pending_since_ms >= 220 )); then
             target=normal
             case "$pending" in
                 normal) target=normal ;; bottom-up) target=inverted ;;
@@ -324,21 +346,45 @@ while :; do
                 case "$target" in left) target=right ;; right) target=left ;; esac
             fi
             output=$(select_output)
-            if [ -n "$output" ] && xrandr --output "$output" --rotate "$target" 2>>"$LOGFILE"; then
+            request_at_ms=$(epoch_ms)
+            sensor_to_request_ms=$((request_at_ms - pending_since_ms))
+            rotation_ok=0
+            xrandr_ms=0
+            if [ -n "$output" ]; then
+                # Initial sensor reports must not needlessly reconfigure an
+                # already correctly oriented display (especially portrait).
+                if [ -z "$last_orientation" ] && \
+                   [ "$(output_rotation "$output")" = "$target" ]; then
+                    rotation_ok=1
+                    log "Orientation already $target on $output; skipping redundant XRandR call"
+                else
+                    xrandr_start_ms=$(epoch_ms)
+                    if xrandr --output "$output" --rotate "$target" 2>>"$LOGFILE"; then
+                        rotation_ok=1
+                    fi
+                    xrandr_ms=$(( $(epoch_ms) - xrandr_start_ms ))
+                fi
+            fi
+            if [ "$rotation_ok" = 1 ]; then
+                # Mapping follows a successful XRandR change. It is separate
+                # from the sensor->display timing in the diagnostic log.
+                input_start_ms=$(epoch_ms)
                 if ! sync_input; then
                     log "WARNING: Screen rotated to $target, but touchscreen/pen mapping was not confirmed"
                 fi
+                input_ms=$(( $(epoch_ms) - input_start_ms ))
+                log "Rotation timing: orientation=$pending output=$output target=$target sensor_to_request_ms=$sensor_to_request_ms xrandr_ms=$xrandr_ms input_ms=$input_ms"
                 last_orientation="$pending"
                 printf '%s\n' "$$" > "$READYFILE"
                 last_sync=$SECONDS
             else
-                log "Could not rotate display output: $output"
+                log "Could not rotate display output: $output (XRandR elapsed ${xrandr_ms}ms)"
             fi
             pending=''
         fi
     fi
-    # Remap after monitor hotplug or output geometry changes even if the
-    # accelerometer has not changed orientation.
+    # Keep previous 8-s input remap for manual monitor rearrangements, but
+    # never use it as the orientation detection interval.
     if (( SECONDS - last_sync >= 8 )); then
         sync_input || :
         last_sync=$SECONDS

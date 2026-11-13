@@ -762,9 +762,10 @@ def _osm_paper_schedule_refresh():
     global _osm_paper_refresh_timer
     if _osm_paper_refresh_timer is not None:
         _osm_paper_refresh_timer.cancel()
-    # Coalesce the burst of RandR events on rotation. Give XLibre, picom and
-    # Qtile time to finish resizing the root window and desktop bars.
-    _osm_paper_refresh_timer = qtile.call_later(0.5, _osm_paper_refresh_now)
+    # Coalesce XRandR events briefly; the screens_reconfigured hook normally
+    # means Qtile has already finished resizing. A long delay leaves a blank
+    # portrait wallpaper area after the display becomes usable.
+    _osm_paper_refresh_timer = qtile.call_later(0.12, _osm_paper_refresh_now)
 
 
 @hook.subscribe.screen_change
