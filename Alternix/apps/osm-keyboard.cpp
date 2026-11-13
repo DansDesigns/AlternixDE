@@ -1,0 +1,576 @@
+// AlternixOS — standalone OS-wide osm-keyboard for Qtile/X11.
+// Build with AT-SPI (automatic text-field detection):
+//   g++ -std=c++17 -O2 -fPIC -DOSM_USE_ATSPI osm-keyboard.cpp -o osm-keyboard \
+//       $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2)
+// Without AT-SPI, omit -DOSM_USE_ATSPI and atspi-2: --toggle/--show still work.
+// No root, no moc, no helper scripts.
+#include "osm-keyboard.h"
+
+#include <QApplication>
+#include <QCheckBox>
+#include <QColorDialog>
+#include <QComboBox>
+#include <QCursor>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QGroupBox>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLocalServer>
+#include <QLocalSocket>
+#include <QPointer>
+#include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
+#include <QSpinBox>
+#include <QTabWidget>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <QWindow>
+#include <QDebug>
+#include <QRegularExpression>
+
+#include <X11/Xlib.h>
+#include <X11/XKBlib.h>
+#include <X11/keysym.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
+#include <X11/extensions/XTest.h>
+
+#ifdef OSM_USE_ATSPI
+#include <atspi/atspi.h>
+#endif
+
+#include <unistd.h>
+#include <algorithm>
+#include <functional>
+
+class X11KeySender {
+public:
+    X11KeySender() : display_(XOpenDisplay(nullptr)) {
+        if (!display_) {
+            qWarning() << "osm-keyboard: X11 display is unavailable";
+            return;
+        }
+        int eventBase = 0, errorBase = 0, major = 0, minor = 0;
+        if (!XTestQueryExtension(display_, &eventBase, &errorBase, &major, &minor)) {
+            qWarning() << "osm-keyboard: XTEST extension is unavailable";
+            XCloseDisplay(display_);
+            display_ = nullptr;
+        }
+    }
+    ~X11KeySender() { if (display_) XCloseDisplay(display_); }
+    Display *display() const { return display_; }
+
+    void send(int qtKey, const QString &text) {
+        if (!display_) return;
+        KeySym sym = NoSymbol;
+        switch (qtKey) {
+        case Qt::Key_Backspace: sym = XK_BackSpace; break;
+        case Qt::Key_Return: sym = XK_Return; break;
+        case Qt::Key_Tab: sym = XK_Tab; break;
+        case Qt::Key_Space: sym = XK_space; break;
+        case Qt::Key_Left: sym = XK_Left; break;
+        case Qt::Key_Right: sym = XK_Right; break;
+        default:
+            if (text.size() != 1) return;
+            // ASCII is supported by the existing keyboard layout. For Latin-1,
+            // X11 uses the Unicode code point directly as a keysym.
+            if (text.at(0).unicode() <= 0xff)
+                sym = static_cast<KeySym>(text.at(0).unicode());
+            else
+                sym = static_cast<KeySym>(0x01000000u | text.at(0).unicode());
+            break;
+        }
+        if (sym == NoSymbol) return;
+        int minKey = 8, maxKey = 255;
+        XDisplayKeycodes(display_, &minKey, &maxKey);
+        KeyCode code = 0;
+        int level = -1;
+        // Search the active base layout, not just XKeysymToKeycode; punctuation
+        // differs on UK/US keyboards and often requires Shift or AltGr.
+        for (int l = 0; l < 4 && !code; ++l) {
+            for (int c = minKey; c <= maxKey; ++c) {
+                if (XkbKeycodeToKeysym(display_, static_cast<KeyCode>(c), 0, l) == sym) {
+                    code = static_cast<KeyCode>(c);
+                    level = l;
+                    break;
+                }
+            }
+        }
+        if (!code) {
+            qWarning() << "osm-keyboard: symbol not available in current XKB layout:" << text;
+            return;
+        }
+        const bool shift = (level & 1) != 0;
+        const bool altGr = (level & 2) != 0;
+        const KeyCode shiftKey = XKeysymToKeycode(display_, XK_Shift_L);
+        const KeyCode altGrKey = XKeysymToKeycode(display_, XK_ISO_Level3_Shift);
+        if (altGr && !altGrKey) {
+            qWarning() << "osm-keyboard: current layout has no AltGr key";
+            return;
+        }
+        if (altGr) XTestFakeKeyEvent(display_, altGrKey, True, CurrentTime);
+        if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, True, CurrentTime);
+        XTestFakeKeyEvent(display_, code, True, CurrentTime);
+        XTestFakeKeyEvent(display_, code, False, CurrentTime);
+        if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, False, CurrentTime);
+        if (altGr) XTestFakeKeyEvent(display_, altGrKey, False, CurrentTime);
+        XFlush(display_);
+    }
+private:
+    Display *display_ = nullptr;
+};
+
+class KeyboardWindow : public QWidget {
+public:
+    KeyboardWindow(X11KeySender &sender)
+        : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint |
+                            Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus),
+          sender_(sender), prefs_(OsmKeyboardSettings::load()) {
+        setObjectName(QStringLiteral("osmKeyboardWindow"));
+        setWindowTitle(QStringLiteral("osm-keyboard"));
+        setFocusPolicy(Qt::NoFocus);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_QuitOnClose, false);
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        keyboard_ = new OsmKeyboard(this);
+        layout->addWidget(keyboard_);
+        keyboard_->setSettings(prefs_);
+        keyboard_->setKeyHandler([this](int key, const QString &value) {
+            sender_.send(key, value);
+        });
+        keyboard_->setOnCustomiseRequested([this] { openSettings(); });
+        keyboard_->setOnVisibilityChanged([this](bool shown) {
+            // A Hide press hides only the child. The outer OS-level dock must
+            // also disappear so it stops reserving screen space.
+            if (!shown && isVisible() && !rebuilding_) hideWindow(true);
+        });
+        QTimer::singleShot(0, this, [this] { keyboard_->hide(); });
+        auto *displayTimer = new QTimer(this);
+        displayTimer->setInterval(1000);
+        connect(displayTimer, &QTimer::timeout, this, [this] {
+            if (isVisible()) {
+                reposition();
+                if (prefs_.docked && prefs_.reserveSpace) updateStrut(true);
+            }
+        });
+        displayTimer->start();
+    }
+
+    const OsmKeyboardSettings &preferences() const { return prefs_; }
+
+    void showWindow(bool explicitRequest = true) {
+        if (explicitRequest) {
+            manualShown_ = true;
+            keyboard_->clearUserHidden();
+        } else if (keyboard_->userHidden()) {
+            return;
+        }
+        if (!isVisible()) {
+            targetScreen_ = QGuiApplication::screenAt(QCursor::pos());
+            if (!targetScreen_) targetScreen_ = QGuiApplication::primaryScreen();
+        }
+        rebuilding_ = true;
+        if (!keyboard_->isVisible()) keyboard_->show();
+        reposition();
+        setWindowOpacity(prefs_.opacity / 100.0);
+        if (!isVisible()) {
+            // Set WM_HINTS InputHint=False before the window is mapped,
+            // otherwise some WMs briefly focus the keyboard on first show.
+            applyX11WindowHints();
+            show();
+        }
+        applyX11WindowHints();
+        if (prefs_.docked && prefs_.reserveSpace) updateStrut(true);
+        rebuilding_ = false;
+    }
+    void hideWindow(bool explicitRequest = true) {
+        if (explicitRequest) {
+            manualShown_ = false;
+            // Avoid reentering hideWindow from keyboard_->hideEvent().
+            rebuilding_ = true;
+            keyboard_->hideByUser();
+            rebuilding_ = false;
+        }
+        rebuilding_ = true;
+        updateStrut(false);
+        hide();
+        rebuilding_ = false;
+    }
+    void toggle() { if (isVisible()) hideWindow(true); else showWindow(true); }
+
+    void autoFocusChange(bool editable) {
+        ++focusSerial_;
+        if (!prefs_.autoShow || manualShown_ || settingsOpen_) return;
+        if (editable) {
+            // A deliberate Hide must persist until the taskbar reopens it.
+            if (keyboard_->userHidden()) return;
+            showWindow(false);
+        } else if (isVisible()) {
+            // Defer hides to avoid flicker when focus quickly changes widgets.
+            const int id = focusSerial_;
+            QTimer::singleShot(220, this, [this, id] {
+                if (id == focusSerial_ && !manualShown_ && !settingsOpen_)
+                    hideWindow(false);
+            });
+        }
+    }
+
+    void openSettings() {
+        if (settingsOpen_) return;
+        settingsOpen_ = true;
+        ++focusSerial_;
+        QDialog dialog(nullptr);
+        dialog.setWindowTitle(QStringLiteral("Customise osm-keyboard"));
+        dialog.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        dialog.resize(490, 520);
+
+        OsmKeyboardSettings editing = prefs_;
+        auto *outer = new QVBoxLayout(&dialog);
+        auto *tabs = new QTabWidget(&dialog);
+        outer->addWidget(tabs);
+        auto *appearance = new QWidget(tabs);
+        auto *form1 = new QFormLayout(appearance);
+        form1->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
+        auto *theme = new QComboBox(appearance);
+        theme->addItems({QStringLiteral("Dark"), QStringLiteral("Light"),
+                         QStringLiteral("Midnight"), QStringLiteral("Custom")});
+        theme->setCurrentText(editing.theme);
+        form1->addRow(QStringLiteral("Theme"), theme);
+        auto colorPicker = [&](const QString &name, QColor &current) {
+            auto *button = new QPushButton(appearance);
+            button->setMinimumHeight(36);
+            auto update = [button, &current] {
+                button->setText(current.name());
+                button->setStyleSheet(QStringLiteral("background:%1; color:%2; border:1px solid #888;"
+                              "padding:6px; border-radius:5px;")
+                              .arg(current.name(), current.lightness() < 128 ? "white" : "black"));
+            };
+            update();
+            connect(button, &QPushButton::clicked, &dialog, [&dialog, &current, update] {
+                const QColor next = QColorDialog::getColor(current, &dialog,
+                                                           QStringLiteral("Select keyboard colour"));
+                if (next.isValid()) { current = next; update(); }
+            });
+            form1->addRow(name, button);
+            return button;
+        };
+        colorPicker(QStringLiteral("Accent"), editing.accent);
+        auto *backgroundButton = colorPicker(QStringLiteral("Custom background"), editing.customBackground);
+        auto *keysButton = colorPicker(QStringLiteral("Custom key colour"), editing.customKeys);
+        auto *textButton = colorPicker(QStringLiteral("Custom key text"), editing.customText);
+        auto updateCustomEnabled = [=] {
+            const bool custom = theme->currentText() == QLatin1String("Custom");
+            backgroundButton->setEnabled(custom);
+            keysButton->setEnabled(custom);
+            textButton->setEnabled(custom);
+        };
+        connect(theme, &QComboBox::currentTextChanged, &dialog,
+                [updateCustomEnabled](const QString &) { updateCustomEnabled(); });
+        updateCustomEnabled();
+        auto *size = new QSpinBox(appearance);
+        size->setRange(36, 85);
+        size->setSuffix(QStringLiteral(" px"));
+        size->setValue(editing.keyHeight);
+        form1->addRow(QStringLiteral("Minimum key height"), size);
+        auto *font = new QSpinBox(appearance);
+        font->setRange(12, 28);
+        font->setSuffix(QStringLiteral(" px"));
+        font->setValue(editing.fontSize);
+        form1->addRow(QStringLiteral("Key label size"), font);
+        auto *opacity = new QSpinBox(appearance);
+        opacity->setRange(65, 100);
+        opacity->setSuffix(QStringLiteral(" %"));
+        opacity->setValue(editing.opacity);
+        form1->addRow(QStringLiteral("Opacity"), opacity);
+        tabs->addTab(appearance, QStringLiteral("Appearance"));
+
+        auto *behaviour = new QWidget(tabs);
+        auto *form2 = new QFormLayout(behaviour);
+        auto *pop = new QCheckBox(QStringLiteral("Show enlarged key while pressed"), behaviour);
+        pop->setChecked(editing.keyPopup);
+        form2->addRow(pop);
+        auto *popDelay = new QSpinBox(behaviour);
+        popDelay->setRange(0, 600);
+        popDelay->setSuffix(QStringLiteral(" ms"));
+        popDelay->setValue(editing.popupDuration);
+        popDelay->setEnabled(editing.keyPopup);
+        connect(pop, &QCheckBox::toggled, popDelay, &QWidget::setEnabled);
+        form2->addRow(QStringLiteral("Key preview hold time"), popDelay);
+        auto *autoShow = new QCheckBox(QStringLiteral("Automatically show for editable fields"), behaviour);
+        autoShow->setChecked(editing.autoShow);
+#ifndef OSM_USE_ATSPI
+        autoShow->setChecked(false);
+        autoShow->setEnabled(false);
+        autoShow->setToolTip(QStringLiteral("Requires build with libatspi2.0 (-DOSM_USE_ATSPI)."));
+#endif
+        form2->addRow(autoShow);
+        auto *dock = new QCheckBox(QStringLiteral("Dock across the bottom of the screen"), behaviour);
+        dock->setChecked(editing.docked);
+        form2->addRow(dock);
+        auto *reserve = new QCheckBox(QStringLiteral("Reserve desktop space when shown"), behaviour);
+        reserve->setChecked(editing.reserveSpace);
+        reserve->setEnabled(editing.docked);
+        connect(dock, &QCheckBox::toggled, reserve, &QWidget::setEnabled);
+        form2->addRow(reserve);
+        auto *tip = new QLabel(QStringLiteral("Use the taskbar command osm-keyboard --toggle "
+            "to show or hide the keyboard. Automatic detection depends on "
+            "applications exposing accessibility information."), behaviour);
+        tip->setWordWrap(true);
+        tip->setStyleSheet(QStringLiteral("color: palette(mid); margin-top: 16px;"));
+        form2->addRow(tip);
+        tabs->addTab(behaviour, QStringLiteral("Behaviour"));
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+        outer->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        const bool accepted = dialog.exec() == QDialog::Accepted;
+        if (accepted) {
+            editing.theme = theme->currentText();
+            editing.keyHeight = size->value();
+            editing.fontSize = font->value();
+            editing.opacity = opacity->value();
+            editing.keyPopup = pop->isChecked();
+            editing.popupDuration = popDelay->value();
+            editing.autoShow = autoShow->isChecked();
+            editing.docked = dock->isChecked();
+            editing.reserveSpace = reserve->isChecked();
+            prefs_ = editing;
+            prefs_.save();
+            rebuilding_ = true;
+            updateStrut(false);
+            keyboard_->setSettings(prefs_);
+            rebuilding_ = false;
+            if (isVisible()) {
+                reposition();
+                setWindowOpacity(prefs_.opacity / 100.0);
+                applyX11WindowHints();
+                updateStrut(prefs_.docked && prefs_.reserveSpace);
+            }
+        }
+        settingsOpen_ = false;
+    }
+
+private:
+    void reposition() {
+        QScreen *screen = targetScreen_;
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (!screen) return;
+        const QRect rect = screen->geometry();
+        const int margin = 4;
+        const int height = 5 * prefs_.keyHeight + 4 * 4 + 12 + 2;
+        if (prefs_.docked) {
+            const QRect proposed(rect.x(), rect.y() + rect.height() - height,
+                                 rect.width(), height);
+            if (geometry() != proposed) setGeometry(proposed);
+        } else {
+            const int width = qMin(1060, qMax(400, rect.width() - 2 * margin));
+            const QRect proposed(rect.center().x() - width/2,
+                                 rect.y() + rect.height() - height - 24,
+                                 width, height);
+            if (geometry() != proposed) setGeometry(proposed);
+        }
+    }
+
+    void applyX11WindowHints() {
+        Display *d = sender_.display();
+        if (!d) return;
+        const Window w = static_cast<Window>(winId());
+        XWMHints *hints = XGetWMHints(d, w);
+        if (!hints) hints = XAllocWMHints();
+        if (hints) {
+            hints->flags |= InputHint;
+            hints->input = False;
+            XSetWMHints(d, w, hints);
+            XFree(hints);
+        }
+        const Atom type = XInternAtom(d, "_NET_WM_WINDOW_TYPE", False);
+        const Atom dockType = XInternAtom(d, "_NET_WM_WINDOW_TYPE_DOCK", False);
+        const Atom utilityType = XInternAtom(d, "_NET_WM_WINDOW_TYPE_UTILITY", False);
+        const Atom use = prefs_.docked ? dockType : utilityType;
+        XChangeProperty(d, w, type, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<const unsigned char *>(&use), 1);
+        const Atom skipTaskbar = XInternAtom(d, "_NET_WM_STATE_SKIP_TASKBAR", False);
+        const Atom skipPager = XInternAtom(d, "_NET_WM_STATE_SKIP_PAGER", False);
+        const Atom state = XInternAtom(d, "_NET_WM_STATE", False);
+        Atom states[] = {skipTaskbar, skipPager};
+        XChangeProperty(d, w, state, XA_ATOM, 32, PropModeReplace,
+                        reinterpret_cast<const unsigned char *>(states), 2);
+        XFlush(d);
+    }
+
+    void updateStrut(bool active) {
+        Display *d = sender_.display();
+        if (!d) return;
+        const Window w = static_cast<Window>(winId());
+        const Atom strut = XInternAtom(d, "_NET_WM_STRUT", False);
+        const Atom partial = XInternAtom(d, "_NET_WM_STRUT_PARTIAL", False);
+        if (!active || !prefs_.docked || !isVisible()) {
+            XDeleteProperty(d, w, strut);
+            XDeleteProperty(d, w, partial);
+            XFlush(d);
+            return;
+        }
+        // EWMH bottom struts are root-screen-relative. Do not reserve an
+        // unrelated monitor's edge when the keyboard is on an upper monitor.
+        const int rootHeight = DisplayHeight(d, DefaultScreen(d));
+        if (geometry().bottom() != rootHeight - 1) {
+            XDeleteProperty(d, w, strut);
+            XDeleteProperty(d, w, partial);
+            XFlush(d);
+            return;
+        }
+        const unsigned long bottom = static_cast<unsigned long>(height());
+        unsigned long basic[4] = {0, 0, 0, bottom};
+        unsigned long extended[12] = {};
+        extended[3] = bottom;
+        extended[10] = static_cast<unsigned long>(qMax(0, x()));
+        extended[11] = static_cast<unsigned long>(qMax(0, x() + width() - 1));
+        XChangeProperty(d, w, strut, XA_CARDINAL, 32, PropModeReplace,
+                        reinterpret_cast<const unsigned char *>(basic), 4);
+        XChangeProperty(d, w, partial, XA_CARDINAL, 32, PropModeReplace,
+                        reinterpret_cast<const unsigned char *>(extended), 12);
+        XFlush(d);
+    }
+
+    X11KeySender &sender_;
+    OsmKeyboard *keyboard_ = nullptr;
+    OsmKeyboardSettings prefs_;
+    bool manualShown_ = false;
+    bool settingsOpen_ = false;
+    bool rebuilding_ = false;
+    int focusSerial_ = 0;
+    QPointer<QScreen> targetScreen_;
+};
+
+#ifdef OSM_USE_ATSPI
+class AccessibleFocusMonitor {
+public:
+    explicit AccessibleFocusMonitor(KeyboardWindow *window) : window_(window) {
+        if (atspi_init() != 0) {
+            qWarning() << "osm-keyboard: AT-SPI unavailable (manual toggle still works)";
+            return;
+        }
+        listener_ = atspi_event_listener_new(&AccessibleFocusMonitor::onEvent, this, nullptr);
+        if (!listener_ || !atspi_event_listener_register(
+                listener_, "object:state-changed:focused", nullptr)) {
+            qWarning() << "osm-keyboard: could not subscribe to accessibility focus";
+            if (listener_) { g_object_unref(listener_); listener_ = nullptr; }
+            return;
+        }
+        auto *pump = new QTimer(window_);
+        pump->setInterval(40);
+        QObject::connect(pump, &QTimer::timeout, window_, [] {
+            // Qt installations without the GLib dispatcher still receive AT-SPI.
+            for (int n = 0; n < 10 && g_main_context_pending(nullptr); ++n)
+                g_main_context_iteration(nullptr, FALSE);
+        });
+        pump->start();
+    }
+    ~AccessibleFocusMonitor() {
+        if (listener_) {
+            atspi_event_listener_deregister(listener_, "object:state-changed:focused", nullptr);
+            g_object_unref(listener_);
+        }
+    }
+private:
+    static void onEvent(AtspiEvent *e, void *ptr) {
+        auto *self = static_cast<AccessibleFocusMonitor *>(ptr);
+        if (!self || !self->window_ || !e || !e->source) return;
+        if (e->detail1 == 0) {
+            QTimer::singleShot(0, self->window_, [window = self->window_] {
+                if (window) window->autoFocusChange(false);
+            });
+            return;
+        }
+        const AtspiRole role = atspi_accessible_get_role(e->source, nullptr);
+        bool editable = role == ATSPI_ROLE_ENTRY || role == ATSPI_ROLE_PASSWORD_TEXT ||
+                        role == ATSPI_ROLE_TERMINAL || role == ATSPI_ROLE_EDITBAR;
+        AtspiStateSet *states = atspi_accessible_get_state_set(e->source, nullptr);
+        if (states) {
+            // Plain text views should open a keyboard only when editable.
+            editable = (editable && atspi_state_set_contains(states, ATSPI_STATE_EDITABLE)) ||
+                       (role == ATSPI_ROLE_TEXT && atspi_state_set_contains(states, ATSPI_STATE_EDITABLE));
+            g_object_unref(states);
+        }
+        QTimer::singleShot(0, self->window_, [window = self->window_, editable] {
+            if (window) window->autoFocusChange(editable);
+        });
+    }
+    QPointer<KeyboardWindow> window_;
+    AtspiEventListener *listener_ = nullptr;
+};
+#endif
+
+int main(int argc, char **argv) {
+    QApplication app(argc, argv);
+    app.setApplicationName(QStringLiteral("osm-keyboard"));
+    app.setOrganizationName(QStringLiteral("AlternixOS"));
+    app.setQuitOnLastWindowClosed(false);
+
+    const QStringList args = app.arguments();
+    QString command = QStringLiteral("show");
+    if (args.contains(QStringLiteral("--daemon"))) command = QStringLiteral("daemon");
+    if (args.contains(QStringLiteral("--show"))) command = QStringLiteral("show");
+    if (args.contains(QStringLiteral("--hide"))) command = QStringLiteral("hide");
+    if (args.contains(QStringLiteral("--toggle"))) command = QStringLiteral("toggle");
+    if (args.contains(QStringLiteral("--settings"))) command = QStringLiteral("settings");
+    if (args.contains(QStringLiteral("--quit"))) command = QStringLiteral("quit");
+
+    QString socketName = QStringLiteral("osm-keyboard-%1-%2")
+        .arg(static_cast<qulonglong>(getuid()))
+        .arg(qEnvironmentVariable("DISPLAY", QStringLiteral("default")));
+    socketName.replace(QRegularExpression(QStringLiteral("[^a-zA-Z0-9_-]")), QStringLiteral("_"));
+    QLocalSocket client;
+    client.connectToServer(socketName);
+    if (client.waitForConnected(180)) {
+        client.write(command.toUtf8() + '\n');
+        client.waitForBytesWritten(250);
+        client.disconnectFromServer();
+        return 0;
+    }
+    if (command == QLatin1String("hide") || command == QLatin1String("quit")) return 0;
+    QLocalServer server;
+    server.setSocketOptions(QLocalServer::UserAccessOption);
+    // If a previous instance crashed, the socket path may remain.
+    QLocalServer::removeServer(socketName);
+    if (!server.listen(socketName)) {
+        qCritical() << "osm-keyboard: cannot create local control socket:" << server.errorString();
+        return 2;
+    }
+
+    X11KeySender sender;
+    if (!sender.display()) return 3;
+    KeyboardWindow window(sender);
+#ifdef OSM_USE_ATSPI
+    AccessibleFocusMonitor monitor(&window);
+#endif
+    QObject::connect(&server, &QLocalServer::newConnection, &server, [&] {
+        while (server.hasPendingConnections()) {
+            QLocalSocket *peer = server.nextPendingConnection();
+            if (!peer) break;
+            QObject::connect(peer, &QLocalSocket::readyRead, peer, [&, peer] {
+                const QString cmd = QString::fromUtf8(peer->readAll()).trimmed();
+                if (cmd == QLatin1String("show")) window.showWindow(true);
+                else if (cmd == QLatin1String("hide")) window.hideWindow(true);
+                else if (cmd == QLatin1String("toggle")) window.toggle();
+                else if (cmd == QLatin1String("settings")) window.openSettings();
+                else if (cmd == QLatin1String("quit")) app.quit();
+                peer->disconnectFromServer();
+            });
+            QObject::connect(peer, &QLocalSocket::disconnected, peer, &QObject::deleteLater);
+        }
+    });
+    if (command == QLatin1String("settings")) {
+        QTimer::singleShot(0, &window, [&] { window.openSettings(); });
+    } else if (command != QLatin1String("daemon")) {
+        QTimer::singleShot(0, &window, [&] { window.showWindow(true); });
+    }
+    return app.exec();
+}
