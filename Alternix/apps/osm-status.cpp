@@ -7,6 +7,7 @@
 #include <QFrame>
 #include <QPushButton>
 #include <QScreen>
+#include <X11/Xlib.h>
 #include <QTimer>
 #include <QGraphicsDropShadowEffect>
 #include <QMouseEvent>
@@ -38,21 +39,6 @@
 #include <QtDBus/QDBusMetaType>
 
 #include <functional>
-
-// Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
-// None, Status and Unsorted that corrupt Qt5's QUrl/QTextStream/QDir enums
-// when Qt headers are parsed after Xlib (Devuan/XLibre build failure).
-#include <X11/Xlib.h>
-// These are not used by this overlay; don't leak them into Qt expressions.
-#ifdef None
-#  undef None
-#endif
-#ifdef Status
-#  undef Status
-#endif
-#ifdef Unsorted
-#  undef Unsorted
-#endif
 
 // XLibre/XRandR can change the X11 root size before Qt5 publishes the new
 // QScreen geometry.  Query the live server root for a single-display tablet;
@@ -167,9 +153,9 @@ static void logBoot(const QString &line) {
 // startDetached so a slow-to-init onboard/ulauncher can't stall the
 // boot-sound retry loop below.
 static void launchLoginApps() {
-    if (!QProcess::startDetached("onboard", QStringList()))
+    if (!QProcess::startDetached("onboard"))
         logBoot("launchLoginApps: failed to start onboard");
-    if (!QProcess::startDetached("ulauncher", QStringList()))
+    if (!QProcess::startDetached("ulauncher"))
         logBoot("launchLoginApps: failed to start ulauncher");
     if (!QProcess::startDetached("python3", QStringList() << "/usr/bin/rounded_corners"))
         logBoot("launchLoginApps: failed to start rounded_corners");
