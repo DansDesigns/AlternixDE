@@ -46,6 +46,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <functional>
+#include <memory>
 
 class X11KeySender {
 public:
@@ -203,6 +204,7 @@ public:
     }
 
     const OsmKeyboardSettings &preferences() const { return prefs_; }
+    bool isSettingsOpen() const { return settingsOpen_; }
 
     void showWindow(bool explicitRequest = true) {
         if (explicitRequest) {
@@ -267,17 +269,27 @@ public:
     }
 
     void openSettings() {
-        if (settingsOpen_) return;
+        // Modeless: no nested Qt/GLib event loop while the AT-SPI monitor runs.
+        // A second invocation raises the same window instead of creating another.
+        if (settingsDialog_) {
+            settingsDialog_->show();
+            settingsDialog_->raise();
+            settingsDialog_->activateWindow();
+            return;
+        }
         settingsOpen_ = true;
         ++focusSerial_;
-        QDialog dialog(nullptr);
-        dialog.setWindowTitle(QStringLiteral("Customise osm-keyboard"));
-        dialog.setWindowFlag(Qt::WindowStaysOnTopHint, true);
-        dialog.resize(490, 520);
+        auto *dialog = new QDialog(nullptr);
+        settingsDialog_ = dialog;
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        dialog->setWindowTitle(QStringLiteral("Customise osm-keyboard"));
+        dialog->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        dialog->resize(490, 520);
 
-        OsmKeyboardSettings editing = prefs_;
-        auto *outer = new QVBoxLayout(&dialog);
-        auto *tabs = new QTabWidget(&dialog);
+        // Persist the editing data until the nonblocking dialog is closed.
+        auto editing = std::make_shared<OsmKeyboardSettings>(prefs_);
+        auto *outer = new QVBoxLayout(dialog);
+        auto *tabs = new QTabWidget(dialog);
         outer->addWidget(tabs);
         auto *appearance = new QWidget(tabs);
         auto *form1 = new QFormLayout(appearance);
@@ -285,53 +297,61 @@ public:
         auto *theme = new QComboBox(appearance);
         theme->addItems({QStringLiteral("Dark"), QStringLiteral("Light"),
                          QStringLiteral("Midnight"), QStringLiteral("Custom")});
-        theme->setCurrentText(editing.theme);
+        theme->setCurrentText(editing->theme);
         form1->addRow(QStringLiteral("Theme"), theme);
-        auto colorPicker = [&](const QString &name, QColor &current) {
+
+        auto colorPicker = [&](const QString &name, QColor OsmKeyboardSettings::*member) {
             auto *button = new QPushButton(appearance);
             button->setMinimumHeight(36);
-            auto update = [button, &current] {
+            auto update = [button, editing, member] {
+                const QColor current = editing.get()->*member;
                 button->setText(current.name());
                 button->setStyleSheet(QStringLiteral("background:%1; color:%2; border:1px solid #888;"
-                              "padding:6px; border-radius:5px;")
-                              .arg(current.name(), current.lightness() < 128 ? "white" : "black"));
+                                      "padding:6px; border-radius:5px;")
+                                      .arg(current.name(), current.lightness() < 128 ? "white" : "black"));
             };
             update();
-            connect(button, &QPushButton::clicked, &dialog, [&dialog, &current, update] {
-                const QColor next = QColorDialog::getColor(current, &dialog,
-                                                           QStringLiteral("Select keyboard colour"));
-                if (next.isValid()) { current = next; update(); }
+            connect(button, &QPushButton::clicked, dialog, [dialog, editing, member, update] {
+                // Native portal-based colour pickers can block for seconds on
+                // Qtile. The Qt picker uses the existing Qt5 dependency.
+                const QColor next = QColorDialog::getColor(
+                    editing.get()->*member, dialog, QStringLiteral("Select keyboard colour"),
+                    QColorDialog::DontUseNativeDialog);
+                if (next.isValid()) { editing.get()->*member = next; update(); }
             });
             form1->addRow(name, button);
             return button;
         };
-        colorPicker(QStringLiteral("Accent"), editing.accent);
-        auto *backgroundButton = colorPicker(QStringLiteral("Custom background"), editing.customBackground);
-        auto *keysButton = colorPicker(QStringLiteral("Custom key colour"), editing.customKeys);
-        auto *textButton = colorPicker(QStringLiteral("Custom key text"), editing.customText);
+        colorPicker(QStringLiteral("Accent"), &OsmKeyboardSettings::accent);
+        auto *backgroundButton = colorPicker(QStringLiteral("Custom background"),
+                                             &OsmKeyboardSettings::customBackground);
+        auto *keysButton = colorPicker(QStringLiteral("Custom key colour"),
+                                       &OsmKeyboardSettings::customKeys);
+        auto *textButton = colorPicker(QStringLiteral("Custom key text"),
+                                       &OsmKeyboardSettings::customText);
         auto updateCustomEnabled = [=] {
             const bool custom = theme->currentText() == QLatin1String("Custom");
             backgroundButton->setEnabled(custom);
             keysButton->setEnabled(custom);
             textButton->setEnabled(custom);
         };
-        connect(theme, &QComboBox::currentTextChanged, &dialog,
+        connect(theme, &QComboBox::currentTextChanged, dialog,
                 [updateCustomEnabled](const QString &) { updateCustomEnabled(); });
         updateCustomEnabled();
         auto *size = new QSpinBox(appearance);
         size->setRange(36, 85);
         size->setSuffix(QStringLiteral(" px"));
-        size->setValue(editing.keyHeight);
+        size->setValue(editing->keyHeight);
         form1->addRow(QStringLiteral("Minimum key height"), size);
         auto *font = new QSpinBox(appearance);
         font->setRange(12, 28);
         font->setSuffix(QStringLiteral(" px"));
-        font->setValue(editing.fontSize);
+        font->setValue(editing->fontSize);
         form1->addRow(QStringLiteral("Key label size"), font);
         auto *opacity = new QSpinBox(appearance);
         opacity->setRange(65, 100);
         opacity->setSuffix(QStringLiteral(" %"));
-        opacity->setValue(editing.opacity);
+        opacity->setValue(editing->opacity);
         form1->addRow(QStringLiteral("Opacity"), opacity);
         tabs->addTab(appearance, QStringLiteral("Appearance"));
 
@@ -347,14 +367,14 @@ public:
         regional->addItem(QStringLiteral("Italian (QWERTY)"), "it");
         regional->addItem(QStringLiteral("Portuguese (QWERTY)"), "pt");
         regional->addItem(QStringLiteral("Swedish (QWERTY)"), "se");
-        const int currentLayout = regional->findData(editing.layout);
+        const int currentLayout = regional->findData(editing->layout);
         regional->setCurrentIndex(currentLayout < 0 ? 0 : currentLayout);
         layoutForm->addRow(QStringLiteral("Keyboard layout"), regional);
         auto *layoutNote = new QLabel(QStringLiteral(
-            "Changes the on-screen key arrangement only. Your physical keyboard "
-            "and system XKB layout are not changed. Accented characters not "
-            "in the active XKB layout use a Unicode input-method fallback, "
-            "which depends on the application."), layoutPage);
+            "Key labels and Shift characters follow the selected region "
+            "(for example UK Shift+7 is &). The physical keyboard and "
+            "system XKB layout are not changed. Unicode input in other "
+            "applications depends on their input-method support."), layoutPage);
         layoutNote->setWordWrap(true);
         layoutForm->addRow(layoutNote);
         tabs->addTab(layoutPage, QStringLiteral("Layouts"));
@@ -362,17 +382,17 @@ public:
         auto *behaviour = new QWidget(tabs);
         auto *form2 = new QFormLayout(behaviour);
         auto *pop = new QCheckBox(QStringLiteral("Show enlarged key while pressed"), behaviour);
-        pop->setChecked(editing.keyPopup);
+        pop->setChecked(editing->keyPopup);
         form2->addRow(pop);
         auto *popDelay = new QSpinBox(behaviour);
         popDelay->setRange(0, 600);
         popDelay->setSuffix(QStringLiteral(" ms"));
-        popDelay->setValue(editing.popupDuration);
-        popDelay->setEnabled(editing.keyPopup);
+        popDelay->setValue(editing->popupDuration);
+        popDelay->setEnabled(editing->keyPopup);
         connect(pop, &QCheckBox::toggled, popDelay, &QWidget::setEnabled);
         form2->addRow(QStringLiteral("Key preview hold time"), popDelay);
         auto *autoShow = new QCheckBox(QStringLiteral("Automatically show for editable fields"), behaviour);
-        autoShow->setChecked(editing.autoShow);
+        autoShow->setChecked(editing->autoShow);
 #ifndef OSM_USE_ATSPI
         autoShow->setChecked(false);
         autoShow->setEnabled(false);
@@ -380,55 +400,67 @@ public:
 #endif
         form2->addRow(autoShow);
         auto *dock = new QCheckBox(QStringLiteral("Dock across the bottom of the screen"), behaviour);
-        dock->setChecked(editing.docked);
+        dock->setChecked(editing->docked);
         form2->addRow(dock);
         auto *reserve = new QCheckBox(QStringLiteral("Reserve desktop space when shown"), behaviour);
-        reserve->setChecked(editing.reserveSpace);
-        reserve->setEnabled(editing.docked);
+        reserve->setChecked(editing->reserveSpace);
+        reserve->setEnabled(editing->docked);
         connect(dock, &QCheckBox::toggled, reserve, &QWidget::setEnabled);
         form2->addRow(reserve);
-        auto *tip = new QLabel(QStringLiteral("Use the taskbar command osm-keyboard --toggle "
-            "to show or hide the keyboard. Automatic detection depends on "
+        auto *tip = new QLabel(QStringLiteral("Use osm-keyboard --toggle from the taskbar "
+            "to show or hide the keyboard. Auto-detection depends on "
             "applications exposing accessibility information."), behaviour);
         tip->setWordWrap(true);
         tip->setStyleSheet(QStringLiteral("color: palette(mid); margin-top: 16px;"));
         form2->addRow(tip);
         tabs->addTab(behaviour, QStringLiteral("Behaviour"));
 
-        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dialog);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, dialog);
         outer->addWidget(buttons);
-        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-        const bool accepted = dialog.exec() == QDialog::Accepted;
-        if (accepted) {
-            editing.theme = theme->currentText();
-            editing.layout = regional->currentData().toString();
-            editing.keyHeight = size->value();
-            editing.fontSize = font->value();
-            editing.opacity = opacity->value();
-            editing.keyPopup = pop->isChecked();
-            editing.popupDuration = popDelay->value();
-            editing.autoShow = autoShow->isChecked();
-            editing.docked = dock->isChecked();
-            editing.reserveSpace = reserve->isChecked();
-            // Qtile reservations cannot safely be updated while a dock is
-            // mapped. Unmap first, then re-map with the new geometry/strut.
-            const bool reopen = isVisible();
-            if (reopen) hideWindow(false);
-            prefs_ = editing;
-            prefs_.save();
-            rebuilding_ = true;
-            keyboard_->setSettings(prefs_);
-            rebuilding_ = false;
-            if (reopen) {
-                remapping_ = true;
-                QTimer::singleShot(180, this, [this] {
-                    remapping_ = false;
-                    showWindow(false);
-                });
+        connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        connect(dialog, &QDialog::finished, this,
+                [this, editing, theme, regional, size, font, opacity, pop,
+                 popDelay, autoShow, dock, reserve](int result) {
+            if (result == QDialog::Accepted) {
+                editing->theme = theme->currentText();
+                editing->layout = regional->currentData().toString();
+                editing->keyHeight = size->value();
+                editing->fontSize = font->value();
+                editing->opacity = opacity->value();
+                editing->keyPopup = pop->isChecked();
+                editing->popupDuration = popDelay->value();
+                editing->autoShow = autoShow->isChecked();
+                editing->docked = dock->isChecked();
+                editing->reserveSpace = reserve->isChecked();
+                // Colour, font, layout and popup changes should NOT remap
+                // the Qtile dock or change its strut. Only these three
+                // geometry/reservation settings need an unmap/remap cycle.
+                const bool needRemap = prefs_.keyHeight != editing->keyHeight ||
+                                       prefs_.docked != editing->docked ||
+                                       prefs_.reserveSpace != editing->reserveSpace;
+                const bool reopen = needRemap && isVisible();
+                if (reopen) hideWindow(false);
+                prefs_ = *editing;
+                prefs_.save();
+                rebuilding_ = true;
+                keyboard_->setSettings(prefs_);
+                rebuilding_ = false;
+                setWindowOpacity(prefs_.opacity / 100.0);
+                if (reopen) {
+                    remapping_ = true;
+                    QTimer::singleShot(180, this, [this] {
+                        remapping_ = false;
+                        showWindow(false);
+                    });
+                }
             }
-        }
-        settingsOpen_ = false;
+            settingsOpen_ = false;
+            settingsDialog_.clear();
+        });
+        dialog->show();
+        dialog->raise();
+        dialog->activateWindow();
     }
 
 private:
@@ -525,6 +557,7 @@ private:
     OsmKeyboardSettings prefs_;
     bool manualShown_ = false;
     bool settingsOpen_ = false;
+    QPointer<QDialog> settingsDialog_;
     bool rebuilding_ = false;
     bool remapping_ = false;
     int focusSerial_ = 0;
@@ -548,10 +581,11 @@ public:
             return;
         }
         auto *pump = new QTimer(window_);
-        pump->setInterval(40);
+        pump->setInterval(100);
         QObject::connect(pump, &QTimer::timeout, window_, [] {
-            // Qt installations without the GLib dispatcher still receive AT-SPI.
-            for (int n = 0; n < 10 && g_main_context_pending(nullptr); ++n)
+            // Bound accessibility pumping to avoid stealing the UI thread
+            // during focus storms (especially when Customise is open).
+            for (int n = 0; n < 3 && g_main_context_pending(nullptr); ++n)
                 g_main_context_iteration(nullptr, FALSE);
         });
         pump->start();
@@ -566,6 +600,10 @@ private:
     static void onEvent(AtspiEvent *e, void *ptr) {
         auto *self = static_cast<AccessibleFocusMonitor *>(ptr);
         if (!self || !self->window_ || !e || !e->source) return;
+        // Never query accessible roles/states for our own settings window:
+        // these can cause synchronous cross-process DBus roundtrips on every
+        // focus event and make the Customise UI feel frozen.
+        if (self->window_->isSettingsOpen()) return;
         if (e->detail1 == 0) {
             QTimer::singleShot(0, self->window_, [window = self->window_] {
                 if (window) window->autoFocusChange(false);

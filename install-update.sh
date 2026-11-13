@@ -1445,6 +1445,8 @@ ALT_KEYBOARD_QTILE_USER_CONFIG="$ALT_VLC_HOME/.config/qtile/config.py"
 # the actual Qtile session (after dbus-launch has set up its D-Bus environment)
 # so AT-SPI focus notifications work without starting it as root.
 # Preserve all existing user Qtile settings and add/update only our own block.
+
+
 echo "• Enabling osm-keyboard in Qtile (existing settings preserved)..."
 if ! sudo python3 - "$ALT_KEYBOARD_QTILE_USER_CONFIG" /etc/skel/.config/qtile/config.py <<'ALT_OSM_KEYBOARD_QTILE'
 import ast

@@ -128,9 +128,11 @@ public:
 
     const OsmKeyboardSettings &settings() const { return m_style; }
     void setSettings(const OsmKeyboardSettings &settings) {
+        const bool rebuild = m_style.layout != settings.layout ||
+                             m_style.keyHeight != settings.keyHeight;
         m_style = settings;
         applyStyle();
-        buildLayout();
+        if (rebuild) buildLayout();
     }
 
     // External input backend (XTest for system-wide use). If not set, retains
@@ -178,7 +180,9 @@ protected:
 private:
     static bool raised(const OsmKeyDef &def, bool shift, bool caps) {
         // CapsLock affects letters, not punctuation/digits. Shift+Caps = lower.
-        if (def.lower.size() == 1 && def.lower.at(0).isLetter()) return shift != caps;
+        if (def.lower.size() == 1 && def.upper.size() == 1 &&
+            def.lower.at(0).isLetter() && def.upper.at(0).isLetter())
+            return shift != caps;
         return shift;
     }
     QString face(const OsmKeyDef &def) const {
@@ -248,6 +252,25 @@ private:
         } else {
             m_characterKeys.push_back({button, def});
             button->setText(face(def));
+            // Display the regional Shift symbol as a small second legend.
+            // E.g. UK 7/&; German 7/; French è/7. The selected layout
+            // determines BOTH what is shown and what is transmitted.
+            const bool punctuationOrNumber = def.lower.size() != 1 ||
+                def.upper.size() != 1 || !def.lower.at(0).isLetter() ||
+                !def.upper.at(0).isLetter();
+            if (punctuationOrNumber && !def.upper.isEmpty() && def.upper != def.lower) {
+                auto *legend = new QLabel(def.upper, button);
+                legend->setObjectName(QStringLiteral("osmShiftLegend"));
+                legend->setAttribute(Qt::WA_TransparentForMouseEvents);
+                legend->setFocusPolicy(Qt::NoFocus);
+                legend->setAlignment(Qt::AlignRight | Qt::AlignTop);
+                auto *overlay = new QVBoxLayout(button);
+                overlay->setContentsMargins(3, 2, 4, 2);
+                overlay->addWidget(legend, 0, Qt::AlignRight | Qt::AlignTop);
+                overlay->addStretch();
+                button->setToolTip(QStringLiteral("%1  /  Shift+%1: %2")
+                                   .arg(def.lower, def.upper));
+            }
             QObject::connect(button, &QPushButton::clicked, this, [this, def] {
                 emitKey(Qt::Key_unknown, face(def));
                 if (m_shift) { m_shift = false; refreshFaces(); }
@@ -357,12 +380,14 @@ private:
             "QWidget#osmKeyboard QPushButton:pressed { background:%4; color:#ffffff; }"
             "QWidget#osmKeyboard QPushButton#modKey { background:%5; color:%8; font-size:%9px; }"
             "QWidget#osmKeyboard QPushButton#modKeyOn { background:%4; color:#ffffff; font-size:%9px; }"
+            "QLabel#osmShiftLegend { background:transparent; color:%8; border:0;"
+            "font-size:%11px; padding:0; }"
             "QLabel#osmKeyboardPopup { background:%4; color:#ffffff; border:2px solid %6;"
             "border-radius:9px; font-size:%10px; font-weight:700; }")
             .arg(bg.name()).arg(key.name()).arg(text.name()).arg(m_style.accent.name())
             .arg(mod.name()).arg(border.name()).arg(m_style.fontSize)
             .arg(modText.name()).arg(qMax(12, m_style.fontSize-2))
-            .arg(m_style.fontSize+10);
+             .arg(m_style.fontSize+10).arg(qMax(9, m_style.fontSize-6));
         setStyleSheet(style);
     }
 
@@ -378,11 +403,15 @@ private:
             return OsmKeyDef{face, {}, span, key, rows};
         };
         using Pair = std::pair<QString, QString>;
+        // Region-specific number row pairs mirror the standard XKB level-1/
+        // Shift level-2 key legends (not generic uppercase transformations).
+        // This keeps Shift+7 as '&' for UK/US, '/' for German/Spanish/etc,
+        // and '7' for French AZERTY.
         std::vector<Pair> numbers{
             {"1", "!"}, {"2", "\""}, {"3", "£"}, {"4", "$"}, {"5", "%"},
             {"6", "^"}, {"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"}
         };
-        Pair numberExtra{"`", "¬"};
+        Pair numberExtra{"-", "_"};  // Replaces the former ` / ¬ key.
         Pair topExtra{"[", "{"};
         Pair homeExtra{"'", "@"};
         std::vector<Pair> punctuation{{",", "<"}, {".", ">"}, {"/", "?"}};
@@ -393,10 +422,8 @@ private:
         if (locale == QLatin1String("us") || locale == QLatin1String("intl")) {
             numbers[1].second = "@";
             numbers[2].second = "#";
-            numberExtra = {"`", "~"};
             homeExtra = {"'", "\""};
             if (locale == QLatin1String("intl")) {
-                numberExtra = {"ü", "Ü"};
                 topExtra = {"é", "É"};
                 homeExtra = {"ñ", "Ñ"};
             }
@@ -404,7 +431,6 @@ private:
             numbers = {{"&", "1"}, {"é", "2"}, {"\"", "3"}, {"'", "4"},
                        {"(", "5"}, {"-", "6"}, {"è", "7"}, {"_", "8"},
                        {"ç", "9"}, {"à", "0"}};
-            numberExtra = {"²", "³"};
             top = QStringLiteral("azertyuiop");
             home = QStringLiteral("qsdfghjkl");
             lower = QStringLiteral("wxcvbnm");
@@ -412,30 +438,39 @@ private:
             homeExtra = {"m", "M"};
             punctuation = {{",", "?"}, {";", "."}, {":", "/"}};
         } else if (locale == QLatin1String("de")) {
-            numbers[2].second = "§";
-            numberExtra = {"ö", "Ö"};
+            numbers = {{"1", "!"}, {"2", "\""}, {"3", "§"}, {"4", "$"},
+                       {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
+                       {"9", ")"}, {"0", "="}};
             top = QStringLiteral("qwertzuiop");
             lower = QStringLiteral("yxcvbnm");
             topExtra = {"ü", "Ü"};
             homeExtra = {"ä", "Ä"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("es")) {
-            numberExtra = {"¿", "¡"};
+            numbers = {{"1", "!"}, {"2", "\""}, {"3", "·"}, {"4", "$"},
+                       {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
+                       {"9", ")"}, {"0", "="}};
             topExtra = {"´", "¨"};
             homeExtra = {"ñ", "Ñ"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("it")) {
-            numberExtra = {"à", "À"};
+            numbers = {{"1", "!"}, {"2", "\""}, {"3", "£"}, {"4", "$"},
+                       {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
+                       {"9", ")"}, {"0", "="}};
             topExtra = {"è", "é"};
             homeExtra = {"ò", "ç"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("pt")) {
-            numberExtra = {"õ", "Õ"};
+            numbers = {{"1", "!"}, {"2", "\""}, {"3", "#"}, {"4", "$"},
+                       {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
+                       {"9", ")"}, {"0", "="}};
             topExtra = {"ã", "Ã"};
             homeExtra = {"ç", "Ç"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("se")) {
-            numberExtra = {"ä", "Ä"};
+            numbers = {{"1", "!"}, {"2", "\""}, {"3", "#"}, {"4", "¤"},
+                       {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
+                       {"9", ")"}, {"0", "="}};
             topExtra = {"å", "Å"};
             homeExtra = {"ö", "Ö"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
@@ -451,7 +486,10 @@ private:
             const QString c(letter);
             rows[1].push_back(k(c, c.toUpper()));
         }
-        rows[1].push_back(k(topExtra.first, topExtra.second));
+        // No '[' key in the alphabetic UK/US row. Other regions retain
+        // their useful national character key here.
+        if (locale != QLatin1String("uk") && locale != QLatin1String("us"))
+            rows[1].push_back(k(topExtra.first, topExtra.second));
 
         rows[2].push_back(s(QStringLiteral("Caps"), Qt::Key_CapsLock));
         for (const QChar letter : home) {
@@ -466,16 +504,20 @@ private:
             const QString c(letter);
             rows[3].push_back(k(c, c.toUpper()));
         }
-        for (const auto &pair : punctuation) rows[3].push_back(k(pair.first, pair.second));
+        // Former '/' key: Up arrow now sits at the right of the lower letters.
+        // Keep the first two region-specific punctuation keys.
+        for (size_t i = 0; i < punctuation.size() && i < 2; ++i)
+            rows[3].push_back(k(punctuation[i].first, punctuation[i].second));
+        rows[3].push_back(s(QStringLiteral("↑"), Qt::Key_Up));
 
-        // ?123 and Hide are each exactly the width of a normal letter key.
-        // Space takes 5 keys' width, and the four cursor keys have full width.
-        rows[4] = {s(QStringLiteral("?123"), Qt::Key_Mode_switch),
-                   s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+        // Hide first, then ?123; slash takes the former Left-arrow slot.
+        // Left moves into the former Up-arrow slot on the bottom row.
+        rows[4] = {s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+                   s(QStringLiteral("?123"), Qt::Key_Mode_switch),
                    s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
                    s(QStringLiteral("space"), Qt::Key_Space, 10),
+                   k("/", "?"),
                    s(QStringLiteral("←"), Qt::Key_Left),
-                   s(QStringLiteral("↑"), Qt::Key_Up),
                    s(QStringLiteral("↓"), Qt::Key_Down),
                    s(QStringLiteral("→"), Qt::Key_Right)};
         return rows;
@@ -500,14 +542,14 @@ private:
              k("}","}"), k("\\","\\"), k("'","\""),
              s(QStringLiteral("↵"), Qt::Key_Return, 2, 2)},
             {s(QStringLiteral("⇧"), Qt::Key_Shift), k(";",";"), k(":",":"),
-             k("'","'"), k("\"","\""), k(",",","), k(".","."), k("/","/"),
-             k("?","?"), k("<","<"), k(">",">")},
-            {s(QStringLiteral("abc"), Qt::Key_Mode_switch),
-             s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+             k("'","'"), k("\"","\""), k(",",","), k(".","."),
+             s(QStringLiteral("↑"), Qt::Key_Up), k("?","?"), k("<","<"), k(">",">")},
+            {s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+             s(QStringLiteral("abc"), Qt::Key_Mode_switch),
              s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
              s(QStringLiteral("space"), Qt::Key_Space, 10),
+             k("/", "?"),
              s(QStringLiteral("←"), Qt::Key_Left),
-             s(QStringLiteral("↑"), Qt::Key_Up),
              s(QStringLiteral("↓"), Qt::Key_Down),
              s(QStringLiteral("→"), Qt::Key_Right)}
         };
