@@ -1683,9 +1683,20 @@ public:
                         item.preview.append(lookup.value(key));
                 entries.append(item);
             }
-            std::sort(entries.begin(), entries.end(), [](const LauncherItem &a,
-                                                          const LauncherItem &b) {
-                return a.title.compare(b.title, Qt::CaseInsensitive) < 0;
+            // Pin every group ahead of individual apps. Within each section,
+            // sort A-Z by the actual group/app name (not the folder's count).
+            // Only sort the All Apps view; inside a group keep its manually
+            // arranged order intact.
+            std::stable_sort(entries.begin(), entries.end(),
+                             [](const LauncherItem &a, const LauncherItem &b) {
+                if (a.kind != b.kind)
+                    return a.kind == LauncherItem::Folder;
+                const QString aName = a.kind == LauncherItem::Folder
+                    ? a.title.section('\n', 0, 0) : a.app.name;
+                const QString bName = b.kind == LauncherItem::Folder
+                    ? b.title.section('\n', 0, 0) : b.app.name;
+                return QString::localeAwareCompare(aName.toCaseFolded(),
+                                                   bName.toCaseFolded()) < 0;
             });
             folderHeader->hide();
             hintLabel->setText("Drag an app onto another to create a group  •  "
