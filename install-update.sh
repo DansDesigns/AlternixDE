@@ -1261,12 +1261,12 @@ fi
 # binary uses XTest + AT-SPI and preserves per-user QSettings preferences.
 # ──────────────────────────────────────────────────────────────
 echo "• Building osm-keyboard (X11 keyboard with accessibility auto-show)..."
-if ! pkg-config --exists Qt5Widgets Qt5Network x11 xtst atspi-2; then
-    echo "ERROR: osm-keyboard build dependencies are unavailable (Qt5, XTest or AT-SPI)." >&2
+if ! pkg-config --exists Qt5Widgets Qt5Network x11 xtst atspi-2 gobject-2.0; then
+    echo "ERROR: osm-keyboard build dependencies are unavailable (Qt5, XTest, AT-SPI or GObject)." >&2
     exit 1
 fi
 if ! g++ -std=c++17 -O2 -fPIC -DOSM_USE_ATSPI apps/osm-keyboard.cpp \
-        -o osm-keyboard $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2); then
+        -o osm-keyboard $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2 gobject-2.0); then
     echo "ERROR: osm-keyboard failed to compile; existing keyboard binary was not replaced." >&2
     exit 1
 fi
