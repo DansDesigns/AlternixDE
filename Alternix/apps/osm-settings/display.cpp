@@ -947,9 +947,11 @@ private:
         v->addLayout(header);
 
         QLabel *hint = new QLabel(
-            "For Wacom AES and other X11-compatible pens: pressure response, "
-            "side buttons and screen mapping. Touch is configured separately "
-            "from the pen. Settings apply to the current user.");
+            "Barrel button 1 = lower button (nearest the pen tip); "
+            "barrel button 2 = upper button (nearest the end cap). "
+            "Wacom AES pens may expose the lower button as a separate eraser tool. "
+            "The third button on the end cap is a separate Bluetooth shortcut, "
+            "not an X11 barrel button. Settings apply to the current user.");
         hint->setWordWrap(true);
         hint->setStyleSheet("color:#dddddd; font-size:19px;");
         v->addWidget(hint);
@@ -980,8 +982,8 @@ private:
         m_penPressureCombo->addItem("Normal", "normal");
         m_penPressureCombo->addItem("Firm (more pressure)", "firm");
 
-        addCombo("Side button 1", m_penButton1Combo);
-        addCombo("Side button 2", m_penButton2Combo);
+        addCombo("Barrel button 1 (lower)", m_penButton1Combo);
+        addCombo("Barrel button 2 (upper)", m_penButton2Combo);
         for (QComboBox *combo : {m_penButton1Combo, m_penButton2Combo}) {
             combo->addItem("Right click", "right");
             combo->addItem("Middle click", "middle");
@@ -1060,6 +1062,7 @@ private:
         m_penOutputCombo->addItem("Built-in / automatic", "auto");
         QStringList penNames, touchNames;
         int wacomCount = 0;
+        int aesCount = 0;
         for (const QString &line : QString::fromUtf8(scan.readAllStandardOutput()).split('\n')) {
             const QStringList fields = line.trimmed().split('\t');
             if (fields.size() < 2) continue;
@@ -1075,6 +1078,8 @@ private:
                 if (fields.at(3) == "wacom") ++wacomCount;
             } else if (fields.at(0) == "TOUCH" && fields.size() >= 4) {
                 touchNames.append(fields.at(2));
+            } else if (fields.at(0) == "LAYOUT" && fields.size() >= 3) {
+                if (fields.at(2) == "aes-eraser") ++aesCount;
             } else if (fields.at(0) == "OUTPUT") {
                 m_penOutputCombo->addItem(fields.at(1), fields.at(1));
             }
@@ -1083,10 +1088,12 @@ private:
         if (penIndex >= 0) m_penCombo->setCurrentIndex(penIndex);
         const int outIndex = m_penOutputCombo->findData(savedOutput);
         if (outIndex >= 0) m_penOutputCombo->setCurrentIndex(outIndex);
-        m_penHardwareLabel->setText(QString("Detected %1 pen device(s), %2 touchscreen(s). %3")
+        m_penHardwareLabel->setText(QString("Detected %1 pen device(s), %2 touchscreen(s). %3 %4")
             .arg(penNames.size()).arg(touchNames.size())
             .arg(wacomCount ? "Wacom X11 controls available." :
-                 "libinput controls will be used where supported."));
+                 "libinput controls will be used where supported.")
+            .arg(aesCount ? QString("%1 pen(s) have a separate lower-barrel eraser switch.").arg(aesCount)
+                          : QString()));
         m_penStatusLabel->setText(penNames.isEmpty()
             ? "No compatible stylus currently detected. Touch may still work; check the kernel HID/Wacom device if a pen is expected."
             : QString());
@@ -1116,13 +1123,15 @@ private:
             const QString out = QString::fromUtf8(apply.readAllStandardOutput()).trimmed();
             m_penStatusLabel->setText("Could not apply settings: " + (error.isEmpty() ? out : error));
         } else {
-            QStringList warnings;
+            QStringList warnings, details;
             for (const QString &line : QString::fromUtf8(apply.readAllStandardOutput()).split('\n')) {
                 if (line.startsWith("WARNING=")) warnings << line.mid(8);
+                else if (line.startsWith("INFO=")) details << line.mid(5);
             }
-            m_penStatusLabel->setText(warnings.isEmpty()
-                ? "Pen and touch settings saved and applied."
-                : "Settings saved. Device limitations:\n" + warnings.join("\n"));
+            QString status = warnings.isEmpty() ? "Pen and touch settings saved and applied."
+                                                : "Settings saved with device limitations:\n" + warnings.join("\n");
+            if (!details.isEmpty()) status += "\n" + details.join("\n");
+            m_penStatusLabel->setText(status);
         }
         m_penApplyBtn->setEnabled(true);
     }
