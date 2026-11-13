@@ -649,7 +649,7 @@ screens = [
                 widget.Spacer(length=bar.STRETCH),
                 # COMMENT OUT THE NEXT 3 LINES TO REMOVE THE KEYBOARD BUTTON:
                 widget.Image(filename='~/.config/qtile/images/keyboard.png', margin=6,
-                             mouse_callbacks={'Button1': lazy.function(_launch_onboard)}),
+                             mouse_callbacks={'Button1': lazy.function(osm-keyboard --toggle)}),
                 widget.Spacer(length=15),
             ], size=40, margin=[0, 0, 0, 0], background=bg,
         ),
