@@ -7,6 +7,7 @@
 #include "osm-keyboard.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -47,6 +48,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <vector>
 
 class X11KeySender {
 public:
@@ -110,34 +112,55 @@ public:
             // when a character is not mapped. Supported by GTK and many Qt
             // editors; some applications do not implement this input method.
             if (qtKey == Qt::Key_unknown && !text.isEmpty() && !unicodeInProgress_ &&
-                mods == Qt::NoModifier) {
+                (mods == Qt::NoModifier || mods == Qt::ShiftModifier)) {
                 typeUnicode(text);
             } else {
                 qWarning() << "osm-keyboard: unmapped X11 key:" << qtKey << text;
             }
             return;
         }
-        const bool shift = (level & 1) != 0;
+        const bool withCtrl = (mods & Qt::ControlModifier) != Qt::NoModifier;
+        const bool withSuper = (mods & Qt::MetaModifier) != Qt::NoModifier;
+        // Preserve the regional character selected by the user: when typing
+        // ordinary symbols, the XKB level decides the physical Shift state.
+        // For arrows/Enter or shortcut chords, Shift must be sent explicitly.
+        const bool withShift = (level & 1) != 0 ||
+            ((mods & Qt::ShiftModifier) != Qt::NoModifier &&
+             (qtKey != Qt::Key_unknown || withCtrl || withSuper));
         const bool altGr = (level & 2) != 0;
         const KeyCode shiftKey = XKeysymToKeycode(display_, XK_Shift_L);
         const KeyCode ctrlKey = XKeysymToKeycode(display_, XK_Control_L);
-        const bool withCtrl = (mods & Qt::ControlModifier) != Qt::NoModifier;
+        KeyCode superKey = XKeysymToKeycode(display_, XK_Super_L);
+        if (!superKey) superKey = XKeysymToKeycode(display_, XK_Super_R);
         const KeyCode altGrKey = XKeysymToKeycode(display_, XK_ISO_Level3_Shift);
         if (withCtrl && !ctrlKey) {
             qWarning() << "osm-keyboard: Ctrl key is not mapped";
+            return;
+        }
+        if (withSuper && !superKey) {
+            qWarning() << "osm-keyboard: Super key is not mapped";
+            return;
+        }
+        if (withShift && !shiftKey) {
+            qWarning() << "osm-keyboard: Shift key is not mapped";
             return;
         }
         if (altGr && !altGrKey) {
             qWarning() << "osm-keyboard: current layout has no AltGr key";
             return;
         }
+        // Hold each requested modifier for the full key press, then release
+        // in reverse order. A locked virtual modifier is still scoped to a
+        // single XTest chord, avoiding stuck physical X11 modifier keys.
         if (withCtrl) XTestFakeKeyEvent(display_, ctrlKey, True, CurrentTime);
+        if (withSuper) XTestFakeKeyEvent(display_, superKey, True, CurrentTime);
         if (altGr) XTestFakeKeyEvent(display_, altGrKey, True, CurrentTime);
-        if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, True, CurrentTime);
+        if (withShift) XTestFakeKeyEvent(display_, shiftKey, True, CurrentTime);
         XTestFakeKeyEvent(display_, code, True, CurrentTime);
         XTestFakeKeyEvent(display_, code, False, CurrentTime);
-        if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, False, CurrentTime);
+        if (withShift) XTestFakeKeyEvent(display_, shiftKey, False, CurrentTime);
         if (altGr) XTestFakeKeyEvent(display_, altGrKey, False, CurrentTime);
+        if (withSuper) XTestFakeKeyEvent(display_, superKey, False, CurrentTime);
         if (withCtrl) XTestFakeKeyEvent(display_, ctrlKey, False, CurrentTime);
         XFlush(display_);
     }
@@ -274,20 +297,26 @@ public:
     }
     void toggle() { if (isVisible()) hideWindow(true); else showWindow(true); }
 
-    void autoFocusChange(bool editable) {
+    void autoFocusChange(bool editable, bool newFocusEvent = true) {
         ++focusSerial_;
         if (!prefs_.autoShow || manualShown_ || settingsOpen_ || remapping_) return;
         if (editable) {
-            // A deliberate Hide must persist until the taskbar reopens it.
-            if (keyboard_->userHidden()) return;
+            // Hide suppresses the CURRENT editor, not every future text field.
+            // A real new focus event re-arms automatic popups; caret movement
+            // inside the current field cannot undo a deliberate Hide.
+            if (keyboard_->userHidden() && !newFocusEvent) return;
+            if (newFocusEvent) keyboard_->clearUserHidden();
             showWindow(false);
-        } else if (isVisible()) {
-            // Defer hides to avoid flicker when focus quickly changes widgets.
-            const int id = focusSerial_;
-            QTimer::singleShot(220, this, [this, id] {
-                if (id == focusSerial_ && !manualShown_ && !settingsOpen_)
-                    hideWindow(false);
-            });
+        } else {
+            // Don't hide on an unrelated accessibility event for a noneditable
+            // widget until Qt/GTK has had time to send the next focus gained.
+            if (isVisible()) {
+                const int id = focusSerial_;
+                QTimer::singleShot(280, this, [this, id] {
+                    if (id == focusSerial_ && !manualShown_ && !settingsOpen_)
+                        hideWindow(false);
+                });
+            }
         }
     }
 
@@ -619,66 +648,131 @@ private:
 };
 
 #ifdef OSM_USE_ATSPI
+// Keep the AT-SPI registry connected to Qt's event loop. In a minimal Qtile
+// session the accessibility bus can start AFTER the desktop, so registration
+// must be retried rather than permanently disabled on the first failure.
 class AccessibleFocusMonitor {
 public:
     explicit AccessibleFocusMonitor(KeyboardWindow *window) : window_(window) {
-        if (atspi_init() != 0) {
-            qWarning() << "osm-keyboard: AT-SPI unavailable (manual toggle still works)";
-            return;
-        }
-        listener_ = atspi_event_listener_new(&AccessibleFocusMonitor::onEvent, this, nullptr);
-        if (!listener_ || !atspi_event_listener_register(
-                listener_, "object:state-changed:focused", nullptr)) {
-            qWarning() << "osm-keyboard: could not subscribe to accessibility focus";
-            if (listener_) { g_object_unref(listener_); listener_ = nullptr; }
-            return;
-        }
-        auto *pump = new QTimer(window_);
-        pump->setInterval(100);
-        QObject::connect(pump, &QTimer::timeout, window_, [] {
-            // Bound accessibility pumping to avoid stealing the UI thread
-            // during focus storms (especially when Customise is open).
-            for (int n = 0; n < 3 && g_main_context_pending(nullptr); ++n)
+        auto *pump = new QTimer(window);
+        pump->setInterval(75);
+        QObject::connect(pump, &QTimer::timeout, window, [this] {
+            if (!listener_) return;
+            // Process a bounded amount of GLib work on Qt's main thread. Do
+            // not run a nested GLib main loop: it stalls the Customise dialog.
+            for (int n = 0; n < 4 && g_main_context_pending(nullptr); ++n)
                 g_main_context_iteration(nullptr, FALSE);
         });
         pump->start();
+
+        auto *retry = new QTimer(window);
+        retry->setInterval(3000);
+        QObject::connect(retry, &QTimer::timeout, window, [this, retry] {
+            if (registerEvents()) retry->stop();
+        });
+        if (!registerEvents()) retry->start();
     }
+
     ~AccessibleFocusMonitor() {
-        if (listener_) {
-            atspi_event_listener_deregister(listener_, "object:state-changed:focused", nullptr);
-            g_object_unref(listener_);
-        }
+        if (!listener_) return;
+        for (const char *name : registeredEvents_)
+            atspi_event_listener_deregister(listener_, name, nullptr);
+        g_object_unref(listener_);
     }
+
 private:
-    static void onEvent(AtspiEvent *e, void *ptr) {
-        auto *self = static_cast<AccessibleFocusMonitor *>(ptr);
-        if (!self || !self->window_ || !e || !e->source) return;
-        // Never query accessible roles/states for our own settings window:
-        // these can cause synchronous cross-process DBus roundtrips on every
-        // focus event and make the Customise UI feel frozen.
-        if (self->window_->isSettingsOpen()) return;
-        if (e->detail1 == 0) {
-            QTimer::singleShot(0, self->window_, [window = self->window_] {
-                if (window) window->autoFocusChange(false);
-            });
+    bool registerEvents() {
+        if (listener_) return true;
+        if (atspi_init() != 0) {
+            if (!loggedBusFailure_) {
+                qWarning() << "osm-keyboard: accessibility bus not ready; retrying";
+                loggedBusFailure_ = true;
+            }
+            return false;
+        }
+        loggedBusFailure_ = false;
+        listener_ = atspi_event_listener_new(&AccessibleFocusMonitor::onEvent, this, nullptr);
+        if (!listener_) return false;
+        // GTK/Qt apps don't all emit the same focus signal. "focus:" is the
+        // general event, while object:state-changed:focused catches toolkits
+        // that announce only state transitions. Caret movement additionally
+        // covers clicking inside an already-focused editor.
+        static const char *types[] = {
+            "focus:", "object:state-changed:focused", "object:text-caret-moved"
+        };
+        for (const char *type : types) {
+            GError *error = nullptr;
+            if (atspi_event_listener_register(listener_, type, &error)) {
+                registeredEvents_.push_back(type);
+            } else {
+                qWarning() << "osm-keyboard: AT-SPI event registration failed:"
+                           << type << (error ? error->message : "unknown error");
+            }
+            if (error) g_error_free(error);
+        }
+        if (registeredEvents_.empty()) {
+            g_object_unref(listener_);
+            listener_ = nullptr;
+            return false;
+        }
+        qInfo() << "osm-keyboard: automatic text-field focus monitoring active";
+        return true;
+    }
+
+    static void onEvent(AtspiEvent *event, void *data) {
+        auto *self = static_cast<AccessibleFocusMonitor *>(data);
+        if (!self || !self->window_ || !event || !event->source ||
+            self->window_->isSettingsOpen()) return;
+
+        const QByteArray eventType(event->type ? event->type : "");
+        const bool stateFocus = eventType.contains("state-changed:focused");
+        const bool caretMove = eventType.contains("text-caret-moved");
+        // "focus:" events generally set detail1=0 even on focus gained.
+        // Checking detail1 for all event families discarded these focus events.
+        if (stateFocus && event->detail1 == 0) {
+            self->window_->autoFocusChange(false);
             return;
         }
-        const AtspiRole role = atspi_accessible_get_role(e->source, nullptr);
-        bool editable = role == ATSPI_ROLE_ENTRY || role == ATSPI_ROLE_PASSWORD_TEXT ||
-                        role == ATSPI_ROLE_TERMINAL || role == ATSPI_ROLE_EDITBAR;
-        AtspiStateSet *states = atspi_accessible_get_state_set(e->source);
-        if (states) {
-            // Plain text views should open a keyboard only when editable.
-            editable = (editable && atspi_state_set_contains(states, ATSPI_STATE_EDITABLE)) ||
-                       (role == ATSPI_ROLE_TEXT && atspi_state_set_contains(states, ATSPI_STATE_EDITABLE));
-            g_object_unref(states);
+        // Avoid expensive cross-process DBus calls on every keystroke while
+        // the on-screen keyboard is already displayed.
+        if (caretMove && self->window_->isVisible()) return;
+
+        const AtspiRole role = atspi_accessible_get_role(event->source, nullptr);
+        const bool editRole = role == ATSPI_ROLE_ENTRY ||
+                              role == ATSPI_ROLE_PASSWORD_TEXT ||
+                              role == ATSPI_ROLE_TERMINAL ||
+                              role == ATSPI_ROLE_EDITBAR;
+        // Some valid input controls expose ENTRY/PASSWORD_TEXT but omit the
+        // optional EDITABLE state. Never reject those just for that reason.
+        bool editable = editRole;
+        if (!editable || caretMove) {
+            AtspiStateSet *states = atspi_accessible_get_state_set(event->source);
+            if (states) {
+                const bool stateEditable = atspi_state_set_contains(states, ATSPI_STATE_EDITABLE);
+                const bool stateFocused = atspi_state_set_contains(states, ATSPI_STATE_FOCUSED);
+                if (caretMove && !stateFocused) {
+                    g_object_unref(states);
+                    return;  // Ignore caret changes in background documents.
+                }
+                editable = editRole || stateEditable;
+                g_object_unref(states);
+            } else if (caretMove) {
+                // Do not turn a transient inaccessible caret event into an
+                // automatic popup when the target's focus cannot be verified.
+                return;
+            }
         }
-        QTimer::singleShot(0, self->window_, [window = self->window_, editable] {
-            if (window) window->autoFocusChange(editable);
+        // The callbacks execute while draining GLib on Qt's main thread;
+        // defer layout/show actions until the current AT-SPI event completes.
+        QTimer::singleShot(0, self->window_, [window = self->window_, editable, caretMove] {
+            if (window) window->autoFocusChange(editable, !caretMove);
         });
     }
+
     QPointer<KeyboardWindow> window_;
     AtspiEventListener *listener_ = nullptr;
+    std::vector<const char *> registeredEvents_;
+    bool loggedBusFailure_ = false;
 };
 #endif
 
