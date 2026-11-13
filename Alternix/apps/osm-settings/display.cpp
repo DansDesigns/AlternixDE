@@ -3,6 +3,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QComboBox>
+#include <QStandardPaths>
 #include <QScrollArea>
 #include <QScroller>
 #include <QFrame>
@@ -294,7 +296,13 @@ static bool rotateMonitorRunning()
     if (!f.open(QIODevice::ReadOnly)) return false;
     bool ok = false;
     const qlonglong pid = QString::fromUtf8(f.readAll()).trimmed().toLongLong(&ok);
-    return ok && pid > 1 && QFileInfo(QString("/proc/%1").arg(pid)).isDir();
+    if (!ok || pid <= 1) return false;
+    const QString cmdlinePath = QString("/proc/%1/cmdline").arg(pid);
+    const QByteArray command = readSmallFile(cmdlinePath);
+    if (!command.contains("alternix-rotate-monitor.sh")) return false;
+    return QString::fromUtf8(readSmallFile(
+        QDir::homePath() + "/.config/Alternix/rotate-monitor.ready")).trimmed()
+        == QString::number(pid);
 }
 
 // A process' /proc/comm name is limited to 15 characters on Linux;
@@ -363,7 +371,8 @@ struct RotateCommandResult {
 // interprets paths and shell metacharacters). Retain stderr and exit status.
 static RotateCommandResult runRotateCmdAnimated(const QString &script,
                                                  int timeoutMs,
-                                                 const std::function<void()> &tick)
+                                                 const std::function<void()> &tick,
+                                                 bool elevated = false)
 {
     RotateCommandResult result;
     if (!QFileInfo::exists(script)) {
@@ -372,7 +381,16 @@ static RotateCommandResult runRotateCmdAnimated(const QString &script,
     }
 
     QProcess p;
-    p.start("bash", {script});
+    if (elevated) {
+        const QString osmSudo = QStandardPaths::findExecutable("osm-sudo");
+        if (osmSudo.isEmpty()) {
+            result.standardError = "osm-sudo was not found. Administrator setup requires Alternix pattern/PIN authorisation.";
+            return result;
+        }
+        p.start(osmSudo, {"bash", script});
+    } else {
+        p.start("bash", {script});
+    }
     if (!p.waitForStarted(2500)) {
         result.standardError = "Could not start rotation setup: " + p.errorString();
         return result;
@@ -402,16 +420,17 @@ static RotateCommandResult runRotateCmdAnimated(const QString &script,
 
 // The setup script supplies KEY=VALUE results. If it fails or is absent,
 // report the actual error instead of presenting 'no sensor' as a diagnosis.
-static QMap<QString, QString> runRotateScan(const std::function<void(int)> &tick = {})
+static QMap<QString, QString> runRotateScan(bool elevated,
+                                             const std::function<void(int)> &tick = {})
 {
     QMap<QString, QString> result;
     const QString script = rotateScriptDir() + "/alternix-rotate-setup.sh";
 
     int frame = 0;
-    const RotateCommandResult cmd = runRotateCmdAnimated(script, 45000, [&]() {
+    const RotateCommandResult cmd = runRotateCmdAnimated(script, elevated ? 90000 : 25000, [&]() {
         frame = (frame + 1) % ROTATE_SPIN_COUNT;
         if (tick) tick(frame);
-    });
+    }, elevated);
 
     for (const QString &raw : cmd.standardOutput.split('\n')) {
         const QString line = raw.trimmed();
@@ -425,7 +444,7 @@ static QMap<QString, QString> runRotateScan(const std::function<void(int)> &tick
     if (!cmd.started || cmd.timedOut || cmd.exitCode != 0 || result.isEmpty()) {
         QString problem;
         if (!cmd.started) problem = "Rotation setup could not start";
-        else if (cmd.timedOut) problem = "Rotation setup timed out after 45 seconds";
+        else if (cmd.timedOut) problem = elevated ? "Administrator setup timed out after 90 seconds" : "Sensor scan timed out after 25 seconds";
         else if (cmd.exitCode != 0)
             problem = QString("Rotation setup failed (exit code %1)").arg(cmd.exitCode);
         else problem = "Rotation setup returned no sensor information";
@@ -470,7 +489,9 @@ public:
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
+        // Keep pen and mouse clicks available for controls; touch gestures
+        // scroll the settings page without stealing stylus button events.
+        QScroller::grabGesture(scroll->viewport(), QScroller::TouchGesture);
 
         QWidget *wrap = new QWidget(scroll);
         QVBoxLayout *wrapLay = new QVBoxLayout(wrap);
@@ -498,6 +519,9 @@ public:
         // Auto-Rotate (BoolPill) + rotation sensor detection/setup
         outerLay->addWidget(makeAutoRotateRow());
         outerLay->addWidget(makeRotationSensorCard());
+
+        // Wacom AES, libinput stylus and integrated touchscreen settings.
+        outerLay->addWidget(makeTouchPenCard());
 
         // Screen Info (mini-cards)
         outerLay->addWidget(makeScreenInfoCard());
@@ -533,9 +557,22 @@ private:
     QLabel *m_sensorNameLabel   = nullptr;
     QLabel *m_sensorDriverLabel = nullptr;
     QLabel *m_sensorProxyLabel  = nullptr;
+    QLabel *m_sensorCapabilityLabel = nullptr;
     QLabel *m_sensorOrientLabel = nullptr;
     QLabel *m_sensorHintLabel   = nullptr;
     QPushButton *m_scanBtn      = nullptr;
+    QPushButton *m_adminSetupBtn = nullptr;
+
+    QComboBox *m_penCombo = nullptr;
+    QComboBox *m_penPressureCombo = nullptr;
+    QComboBox *m_penButton1Combo = nullptr;
+    QComboBox *m_penButton2Combo = nullptr;
+    QComboBox *m_penOutputCombo = nullptr;
+    BoolPillToggle *m_touchEnabledPill = nullptr;
+    QLabel *m_penStatusLabel = nullptr;
+    QLabel *m_penHardwareLabel = nullptr;
+    QPushButton *m_penScanBtn = nullptr;
+    QPushButton *m_penApplyBtn = nullptr;
 
     // ------------- config helpers (local) -------------
     QString readCfg(const QString &k, const QString &def = QString()) const
@@ -712,31 +749,51 @@ private:
                 return;
             }
 
-            // Keep the original detached launch contract: the toggle script
-            // might stay running while monitoring orientation. Never kill it
-            // simply because the UI command is still active.
-            const bool launched = QProcess::startDetached(
-                "bash", {script, desired ? "on" : "off"});
-            if (!launched) {
-                setRotationError("Could not start Auto-Rotate script: " + script);
+            // The controller starts the monitor detached itself. Wait for its
+            // short command to exit so missing commands and permissions errors
+            // are actually reported to the user.
+            QProcess controller;
+            controller.start("bash", {script, desired ? "on" : "off"});
+            if (!controller.waitForFinished(4500) || controller.exitCode() != 0) {
+                if (controller.state() != QProcess::NotRunning) controller.kill();
+                const QString detail = QString::fromUtf8(controller.readAllStandardError()).trimmed();
+                setRotationError(detail.isEmpty() ? "Auto-Rotate controller did not start successfully" : detail);
+                return;
+            }
+
+            if (!desired) {
+                m_autoRotatePill->setState(false);
+                writeCfg("display_auto_rotate", "false");
+                setRotationError(QString());
+                refreshSensorInfo();
                 return;
             }
 
             m_autoRotatePill->setEnabled(false);
-            // Allow the script to create/remove the monitor and its pidfile.
-            QTimer::singleShot(2000, this, [this, desired]() {
-                const bool running = rotateMonitorRunning();
-                m_autoRotatePill->setState(running);
-                m_autoRotatePill->setEnabled(true);
-                writeCfg("display_auto_rotate", running ? "true" : "false");
-                if (running != desired) {
-                    setRotationError("Auto-Rotate did not reach the requested state. "
-                                     "Check alternix-rotate-toggle.sh and its monitor log.");
-                } else {
-                    setRotationError(QString());
+            QTimer *check = new QTimer(this);
+            check->setInterval(1000);
+            int *attempts = new int(0);
+            connect(check, &QTimer::timeout, this, [this, check, attempts]() {
+                ++(*attempts);
+                const bool ready = rotateMonitorRunning();
+                if (ready || *attempts >= 18) {
+                    check->stop();
+                    check->deleteLater();
+                    delete attempts;
+                    m_autoRotatePill->setEnabled(true);
+                    m_autoRotatePill->setState(ready);
+                    writeCfg("display_auto_rotate", ready ? "true" : "false");
+                    if (!ready) {
+                        setRotationError("Sensor monitor has not reported a usable orientation. "
+                                         "Check ~/.config/Alternix/logs/rotate-monitor.log "
+                                         "and use Scan / Admin Setup below.");
+                    } else {
+                        setRotationError(QString());
+                    }
+                    refreshSensorInfo();
                 }
-                refreshSensorInfo();
             });
+            check->start();
         });
 
         return card;
@@ -757,9 +814,12 @@ private:
         hdrRow->addWidget(header);
         hdrRow->addStretch();
 
-        m_scanBtn = makeBtn("Scan / Setup", "white");
-        m_scanBtn->setMinimumSize(220, 54);
+        m_scanBtn = makeBtn("Scan", "white");
+        m_scanBtn->setMinimumSize(160, 54);
         hdrRow->addWidget(m_scanBtn);
+        m_adminSetupBtn = makeBtn("Admin Setup", "white");
+        m_adminSetupBtn->setMinimumSize(210, 54);
+        hdrRow->addWidget(m_adminSetupBtn);
         v->addLayout(hdrRow);
 
         auto addRow = [&](const QString &name, QLabel *&valueLabel) {
@@ -780,6 +840,7 @@ private:
         addRow("Sensor name",     m_sensorNameLabel);
         addRow("Driver / module", m_sensorDriverLabel);
         addRow("iio-sensor-proxy", m_sensorProxyLabel);
+        addRow("Accelerometer available", m_sensorCapabilityLabel);
         addRow("Orientation",     m_sensorOrientLabel);
 
         // Invert direction — some accelerometers are mounted the other
@@ -799,6 +860,7 @@ private:
         connect(m_invertPill, &QPushButton::clicked, this, [this]() {
             m_invertPill->toggle();
             writeSmallFile(rotateInvertPath(), m_invertPill->isOn() ? "yes" : "no");
+            QProcess::startDetached("bash", {rotateScriptDir() + "/alternix-rotate-toggle.sh", "refresh"});
         });
 
         // Only shown when the scan didn't find/start something — carries
@@ -810,30 +872,259 @@ private:
         m_sensorHintLabel->setVisible(false);
         v->addWidget(m_sensorHintLabel);
 
-        connect(m_scanBtn, &QPushButton::clicked, this, [this]() {
-            // Reentrancy guard — same reasoning as wifi.cpp's doScan():
-            // processEvents() during the animated wait lets the user tap
-            // the button again mid-scan.
+        const auto scan = [this](bool admin) {
             static bool scanning = false;
             if (scanning) return;
             scanning = true;
-
             m_scanBtn->setEnabled(false);
-            QMap<QString, QString> r = runRotateScan([this](int frame) {
-                m_scanBtn->setText(QString::fromUtf8(ROTATE_SPIN_FRAMES[frame]) + "  Scanning…");
+            m_adminSetupBtn->setEnabled(false);
+            QPushButton *active = admin ? m_adminSetupBtn : m_scanBtn;
+            const QString caption = admin ? "Admin Setup" : "Scan";
+            QMap<QString, QString> r = runRotateScan(admin, [active](int frame) {
+                active->setText(QString::fromUtf8(ROTATE_SPIN_FRAMES[frame]) + "  Working…");
             });
             applyScanResult(r);
-            m_scanBtn->setText("Scan / Setup");
+            active->setText(caption);
             m_scanBtn->setEnabled(true);
-
+            m_adminSetupBtn->setEnabled(true);
             scanning = false;
-        });
+        };
+        connect(m_scanBtn, &QPushButton::clicked, this, [scan]() { scan(false); });
+        connect(m_adminSetupBtn, &QPushButton::clicked, this, [scan]() { scan(true); });
 
         // Do an initial silent status read (no driver poking) so the
         // page isn't blank on first open.
         QTimer::singleShot(0, this, [this]() { refreshSensorInfo(); });
 
         return card;
+    }
+
+    // ------------- touch / stylus settings -----------------
+    static QString readPenSetting(const QString &key, const QString &def = QString())
+    {
+        QFile file(QDir::homePath() + "/.config/Alternix/stylus.conf");
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return def;
+        const QByteArray prefix = (key + "=").toUtf8();
+        while (!file.atEnd()) {
+            const QByteArray line = file.readLine().trimmed();
+            if (line.startsWith(prefix))
+                return QString::fromUtf8(line.mid(prefix.size()));
+        }
+        return def;
+    }
+
+    static QComboBox *makePenCombo(QWidget *parent)
+    {
+        QComboBox *combo = new QComboBox(parent);
+        combo->setMinimumHeight(54);
+        combo->setMinimumWidth(220);
+        combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        combo->setStyleSheet(
+            "QComboBox { background:#555555; color:white; border:1px solid #777777; "
+            "border-radius:16px; padding:5px 16px; font-size:21px; }"
+            "QComboBox::drop-down { border:0px; width:40px; }"
+            "QComboBox QAbstractItemView { background:#444444; color:white; "
+            "selection-background-color:#33aaff; font-size:21px; }");
+        return combo;
+    }
+
+    QWidget *makeTouchPenCard()
+    {
+        QFrame *card = new QFrame;
+        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+        QVBoxLayout *v = new QVBoxLayout(card);
+        v->setContentsMargins(30, 24, 30, 24);
+        v->setSpacing(14);
+
+        QHBoxLayout *header = new QHBoxLayout();
+        QLabel *title = new QLabel("Touchscreen & Stylus");
+        title->setStyleSheet("font-size:28px; font-weight:bold;");
+        header->addWidget(title);
+        header->addStretch();
+        m_penScanBtn = makeBtn("Detect", "white");
+        m_penScanBtn->setMinimumWidth(175);
+        header->addWidget(m_penScanBtn);
+        v->addLayout(header);
+
+        QLabel *hint = new QLabel(
+            "For Wacom AES and other X11-compatible pens: pressure response, "
+            "side buttons and screen mapping. Touch is configured separately "
+            "from the pen. Settings apply to the current user.");
+        hint->setWordWrap(true);
+        hint->setStyleSheet("color:#dddddd; font-size:19px;");
+        v->addWidget(hint);
+
+        m_penHardwareLabel = new QLabel("Detecting touchscreen and pen devices…");
+        m_penHardwareLabel->setWordWrap(true);
+        m_penHardwareLabel->setStyleSheet("font-size:20px; color:#e0e0e0;");
+        v->addWidget(m_penHardwareLabel);
+
+        const auto addCombo = [card, v](const QString &caption, QComboBox *&combo) {
+            QWidget *row = new QWidget(card);
+            row->setStyleSheet("background:transparent;");
+            QHBoxLayout *h = new QHBoxLayout(row);
+            h->setContentsMargins(0, 6, 0, 6);
+            QLabel *label = new QLabel(caption, row);
+            label->setMinimumWidth(215);
+            label->setStyleSheet("font-size:21px;");
+            h->addWidget(label);
+            combo = makePenCombo(row);
+            h->addWidget(combo, 1);
+            v->addWidget(row);
+        };
+        addCombo("Stylus", m_penCombo);
+        m_penCombo->addItem("All detected pens", QString());
+
+        addCombo("Pressure response", m_penPressureCombo);
+        m_penPressureCombo->addItem("Soft (lighter touch)", "soft");
+        m_penPressureCombo->addItem("Normal", "normal");
+        m_penPressureCombo->addItem("Firm (more pressure)", "firm");
+
+        addCombo("Side button 1", m_penButton1Combo);
+        addCombo("Side button 2", m_penButton2Combo);
+        for (QComboBox *combo : {m_penButton1Combo, m_penButton2Combo}) {
+            combo->addItem("Right click", "right");
+            combo->addItem("Middle click", "middle");
+            combo->addItem("Left click", "left");
+            combo->addItem("Back", "back");
+            combo->addItem("Forward", "forward");
+            combo->addItem("Disabled", "disabled");
+        }
+        addCombo("Map to display", m_penOutputCombo);
+        m_penOutputCombo->addItem("Built-in / automatic", "auto");
+
+        QWidget *touchRow = new QWidget(card);
+        touchRow->setStyleSheet("background:transparent;");
+        QHBoxLayout *touchLay = new QHBoxLayout(touchRow);
+        touchLay->setContentsMargins(0, 4, 0, 4);
+        QLabel *touchLabel = new QLabel("Touchscreen enabled");
+        touchLabel->setStyleSheet("font-size:21px;");
+        touchLay->addWidget(touchLabel);
+        touchLay->addStretch();
+        m_touchEnabledPill = new BoolPillToggle(readPenSetting("TOUCH_ENABLED", "yes") != "no", card);
+        touchLay->addWidget(m_touchEnabledPill);
+        v->addWidget(touchRow);
+        connect(m_touchEnabledPill, &QPushButton::clicked, this, [this]() {
+            m_touchEnabledPill->toggle();
+        });
+
+        const auto selectValue = [](QComboBox *combo, const QString &value) {
+            const int index = combo->findData(value);
+            if (index >= 0) combo->setCurrentIndex(index);
+        };
+        selectValue(m_penPressureCombo, readPenSetting("PRESSURE", "normal"));
+        selectValue(m_penButton1Combo, readPenSetting("BUTTON_1", "right"));
+        selectValue(m_penButton2Combo, readPenSetting("BUTTON_2", "middle"));
+
+        m_penApplyBtn = makeBtn("Apply & Save", "white");
+        m_penApplyBtn->setStyleSheet(altBtnBright());
+        v->addWidget(m_penApplyBtn, 0, Qt::AlignRight);
+
+        m_penStatusLabel = new QLabel;
+        m_penStatusLabel->setWordWrap(true);
+        m_penStatusLabel->setStyleSheet("font-size:19px; color:#ffcf80;");
+        v->addWidget(m_penStatusLabel);
+
+        connect(m_penScanBtn, &QPushButton::clicked, this, [this]() { scanPenHardware(); });
+        connect(m_penApplyBtn, &QPushButton::clicked, this, [this]() { applyPenSettings(); });
+        QTimer::singleShot(0, this, [this]() { scanPenHardware(); });
+        return card;
+    }
+
+    void scanPenHardware()
+    {
+        const QString backend = rotateScriptDir() + "/alternix-stylus-apply.sh";
+        if (!QFileInfo::exists(backend)) {
+            m_penHardwareLabel->setText("Pen backend missing: " + backend);
+            return;
+        }
+        m_penScanBtn->setEnabled(false);
+        QProcess scan;
+        scan.start("bash", {backend, "scan"});
+        if (!scan.waitForFinished(6500) || scan.exitStatus() != QProcess::NormalExit || scan.exitCode() != 0) {
+            if (scan.state() != QProcess::NotRunning) scan.kill();
+            const QString out = QString::fromUtf8(scan.readAllStandardOutput()).trimmed();
+            const QString err = QString::fromUtf8(scan.readAllStandardError()).trimmed();
+            m_penHardwareLabel->setText("Detection unavailable: " + (out.isEmpty() ? err : out));
+            m_penScanBtn->setEnabled(true);
+            return;
+        }
+
+        QString savedPen = m_penCombo->currentData().toString();
+        QString savedOutput = m_penOutputCombo->currentData().toString();
+        if (m_penCombo->count() <= 1) savedPen = readPenSetting("PEN_NAME");
+        if (m_penOutputCombo->count() <= 1) savedOutput = readPenSetting("OUTPUT", "auto");
+        m_penCombo->clear();
+        m_penCombo->addItem("All detected pens", QString());
+        m_penOutputCombo->clear();
+        m_penOutputCombo->addItem("Built-in / automatic", "auto");
+        QStringList penNames, touchNames;
+        int wacomCount = 0;
+        for (const QString &line : QString::fromUtf8(scan.readAllStandardOutput()).split('\n')) {
+            const QStringList fields = line.trimmed().split('\t');
+            if (fields.size() < 2) continue;
+            if (fields.at(0) == "PEN" && fields.size() >= 4) {
+                const QString name = fields.at(2);
+                // Eraser tool entries have their own XInput endpoints; avoid
+                // applying the tip button layout to a separate eraser.
+                if (name.contains("eraser", Qt::CaseInsensitive)) continue;
+                if (!penNames.contains(name)) {
+                    penNames.append(name);
+                    m_penCombo->addItem(name + (fields.at(3) == "wacom" ? " (Wacom)" : " (libinput)"), name);
+                }
+                if (fields.at(3) == "wacom") ++wacomCount;
+            } else if (fields.at(0) == "TOUCH" && fields.size() >= 4) {
+                touchNames.append(fields.at(2));
+            } else if (fields.at(0) == "OUTPUT") {
+                m_penOutputCombo->addItem(fields.at(1), fields.at(1));
+            }
+        }
+        const int penIndex = m_penCombo->findData(savedPen);
+        if (penIndex >= 0) m_penCombo->setCurrentIndex(penIndex);
+        const int outIndex = m_penOutputCombo->findData(savedOutput);
+        if (outIndex >= 0) m_penOutputCombo->setCurrentIndex(outIndex);
+        m_penHardwareLabel->setText(QString("Detected %1 pen device(s), %2 touchscreen(s). %3")
+            .arg(penNames.size()).arg(touchNames.size())
+            .arg(wacomCount ? "Wacom X11 controls available." :
+                 "libinput controls will be used where supported."));
+        m_penStatusLabel->setText(penNames.isEmpty()
+            ? "No compatible stylus currently detected. Touch may still work; check the kernel HID/Wacom device if a pen is expected."
+            : QString());
+        m_penScanBtn->setEnabled(true);
+    }
+
+    void applyPenSettings()
+    {
+        const QString backend = rotateScriptDir() + "/alternix-stylus-apply.sh";
+        if (!QFileInfo::exists(backend)) {
+            m_penStatusLabel->setText("Pen backend missing: " + backend);
+            return;
+        }
+        m_penApplyBtn->setEnabled(false);
+        QProcess apply;
+        apply.start("bash", {
+            backend, "save", m_penCombo->currentData().toString(),
+            m_penPressureCombo->currentData().toString(),
+            m_penButton1Combo->currentData().toString(),
+            m_penButton2Combo->currentData().toString(),
+            m_touchEnabledPill->isOn() ? "yes" : "no",
+            m_penOutputCombo->currentData().toString()
+        });
+        if (!apply.waitForFinished(8000) || apply.exitStatus() != QProcess::NormalExit || apply.exitCode() != 0) {
+            if (apply.state() != QProcess::NotRunning) apply.kill();
+            const QString error = QString::fromUtf8(apply.readAllStandardError()).trimmed();
+            const QString out = QString::fromUtf8(apply.readAllStandardOutput()).trimmed();
+            m_penStatusLabel->setText("Could not apply settings: " + (error.isEmpty() ? out : error));
+        } else {
+            QStringList warnings;
+            for (const QString &line : QString::fromUtf8(apply.readAllStandardOutput()).split('\n')) {
+                if (line.startsWith("WARNING=")) warnings << line.mid(8);
+            }
+            m_penStatusLabel->setText(warnings.isEmpty()
+                ? "Pen and touch settings saved and applied."
+                : "Settings saved. Device limitations:\n" + warnings.join("\n"));
+        }
+        m_penApplyBtn->setEnabled(true);
     }
 
     QWidget *makeScreenInfoCard()
@@ -959,7 +1250,20 @@ private:
         }
         if (m_sensorProxyLabel) {
             m_sensorProxyLabel->setText(sensorProxyOnBus || rotationProxyRunning()
-                ? "Running" : "Not running (use Scan / Setup)");
+                ? "Running" : "Not running (use Admin Setup)");
+        }
+        if (m_sensorCapabilityLabel) {
+            QProcess cap;
+            cap.start("dbus-send", {
+                "--system", "--print-reply", "--reply-timeout=1000",
+                "--dest=net.hadess.SensorProxy", "/net/hadess/SensorProxy",
+                "org.freedesktop.DBus.Properties.Get",
+                "string:net.hadess.SensorProxy", "string:HasAccelerometer"
+            });
+            if (!cap.waitForFinished(1400)) { cap.kill(); cap.waitForFinished(150); }
+            const QString resp = QString::fromUtf8(cap.readAllStandardOutput());
+            m_sensorCapabilityLabel->setText(resp.contains("boolean true") ? "Yes" :
+                (resp.contains("boolean false") ? "No" : "Unknown"));
         }
         if (m_autoRotatePill && m_autoRotatePill->isEnabled())
             m_autoRotatePill->setState(rotateMonitorRunning());
@@ -990,6 +1294,9 @@ private:
         if (m_sensorProxyLabel)
             m_sensorProxyLabel->setText(r.value("PROXY_RUNNING", "no") == "yes" ? "Running" : "Not running");
 
+        if (m_sensorCapabilityLabel)
+            m_sensorCapabilityLabel->setText(r.value("HAS_ACCELEROMETER", "unknown"));
+
         if (m_sensorOrientLabel) {
             QString o = r.value("ORIENTATION", "unknown");
             m_sensorOrientLabel->setText(o.isEmpty() ? "unknown" : o);
@@ -1006,7 +1313,7 @@ private:
             if (ranAsRoot == "no" && r.value("PROXY_RUNNING") != "yes" && r.value("PROXY_INSTALLED") == "yes") {
                 QString privNote = "The rotation setup was run without administrative "
                     "privileges. Kernel-module or system-service changes may require "
-                    "authorisation in the setup script; do not run the entire "
+                    "authorisation via Admin Setup; do not run the entire "
                     "settings application as root.";
                 reason = reason.isEmpty() ? "Insufficient privileges" : reason;
                 hint = hint.isEmpty() ? privNote : hint + "\n" + privNote;

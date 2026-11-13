@@ -62,6 +62,7 @@ scan_iio() {
         name=$(cat "$dev/name" 2>/dev/null)
 
         if [ -f "$dev/in_accel_x_raw" ] || [ -f "$dev/in_accel_x_input" ] || \
+            [ -f "$dev/scan_elements/in_accel_x_en" ] || \
            echo "$name" | grep -qiE 'accel|kxcj|kxsd|bmc150|bmi160|mxc4005|fxos|mma8|adxl|kionix|kiox|st_accel'; then
             SENSOR_FOUND="yes"
             SENSOR_PATH="$dev"
@@ -80,45 +81,22 @@ scan_iio() {
 scan_iio
 
 # ---------------------------------------------------------------------
-# Pass 2 — load every plausible driver stack and rescan. (modprobe on
-# something already loaded, built-in, or unavailable for this kernel is
-# a harmless no-op — safe to always run this even when Pass 1 succeeded,
-# since it costs nothing and covers hardware that needs a nudge.)
+# Pass 2 — only an explicitly authorised administrator may load modules.
+# Avoid probing dozens of unrelated chip drivers or unloading live drivers:
+# those operations are neither needed nor safe on an ordinary settings scan.
 # ---------------------------------------------------------------------
-if [ "$SENSOR_FOUND" = "no" ]; then
-    MODULES="
-        industrialio industrialio-triggered-buffer kfifo_buf
-        intel_ishtp intel_ishtp_hid intel_ishtp_loader
-        hid_sensor_hub hid_sensor_accel_3d hid_sensor_trigger hid_sensor_iio_common
-        cros_ec_accel_legacy cros_ec_sensors cros_ec_sensors_core cros_ec_sensorhub
-        kxcjk1013 kxsd9 kxsd9_i2c
-        bmc150_accel_i2c bmc150_accel_spi
-        bmi160_i2c bmi160_spi bmi160_core
-        mxc4005 fxos8700_i2c mma8452 adxl345_i2c st_accel_i2c st_accel_spi
-    "
-    for m in $MODULES; do
-        modprobe "$m" >/dev/null 2>&1
+if [ "$SENSOR_FOUND" = "no" ] && [ "$RAN_AS_ROOT" = "yes" ]; then
+    # Core Intel Sensor Hub / HID-IIO path (including many Miix devices).
+    for m in industrialio intel_ishtp intel_ishtp_hid hid_sensor_hub \
+             hid_sensor_trigger hid_sensor_iio_common hid_sensor_accel_3d; do
+        modprobe "$m" >/dev/null 2>&1 || true
     done
-    sleep 2
+    sleep 1
     scan_iio
 fi
 
-# ---------------------------------------------------------------------
-# Pass 3 — some ISH stacks fail silently for want of firmware blobs
-# rather than a missing module.
-# ---------------------------------------------------------------------
-if [ "$SENSOR_FOUND" = "no" ]; then
-    # Avoid a silent, guaranteed-to-fail APT attempt from osm-settings.
-    # Firmware installation requires administrative privileges and should
-    # not be treated as successful merely because APT was invoked.
-    if [ "$RAN_AS_ROOT" = "yes" ] && command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y linux-firmware firmware-misc-nonfree >/dev/null 2>&1 || true
-    fi
-    modprobe -r intel_ishtp_hid intel_ishtp >/dev/null 2>&1
-    modprobe intel_ishtp intel_ishtp_hid >/dev/null 2>&1
-    sleep 2
-    scan_iio
-fi
+# Do not install guessed firmware packages or remove/reload a working sensor
+# hub. Firmware and ACPI quirks need device-specific diagnosis instead.
 
 # ---------------------------------------------------------------------
 # Kernel log capture, with fallbacks for when the ring buffer itself is
@@ -149,7 +127,7 @@ if [ "$SENSOR_FOUND" = "no" ]; then
         HINT="Check which firmware package supplies this device on AlternixOS/Devuan. If firmware was installed by an administrator, reboot and scan again."
     elif [ ! -s "$DMESG_LOG" ]; then
         REASON="No sensor-related kernel messages found"
-        HINT="If this is unexpected, the kernel ring buffer may be restricted (dmesg needs root) — re-run this scan as root/sudo to be sure. Otherwise this device may not have a rotation sensor fitted, or it's disabled in BIOS/UEFI settings."
+        HINT="If this is unexpected, the kernel ring buffer may be restricted (dmesg needs root) — re-run this scan with Alternix administrator authorisation to be sure. Otherwise this device may not have a rotation sensor fitted, or it's disabled in BIOS/UEFI settings."
     else
         REASON="No accelerometer detected after trying known driver stacks"
         HINT="See $DMESG_LOG for the sensor-related kernel log lines captured during this scan."
@@ -164,6 +142,7 @@ fi
 # ---------------------------------------------------------------------
 PROXY_BINARY=""
 PROXY_ACCESSIBLE="no"
+HAS_ACCELEROMETER="unknown"
 
 find_proxy_binary() {
     local candidate
@@ -393,13 +372,13 @@ elif [ "$PROXY_RUNNING" != "yes" ]; then
         PROXY_FIX="Check 'dpkg -L iio-sensor-proxy' and reinstall the package if necessary."
     elif grep -qiE 'ServiceUnknown|was not provided by any|not.*activat|Unit.*not found|org.freedesktop.systemd1' "$ACTIVATE_ERR_LOG" 2>/dev/null; then
         PROXY_ISSUE="iio-sensor-proxy is installed, but D-Bus could not activate it"
-        PROXY_FIX="On AlternixOS/SysVinit run: sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. This configures an /etc/init.d/ service. See $ACTIVATE_ERR_LOG."
+        PROXY_FIX="On AlternixOS/SysVinit run: osm-sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. This configures an /etc/init.d/ service. See $ACTIVATE_ERR_LOG."
     elif grep -qiE 'AccessDenied|not authorized|denied' "$ACTIVATE_ERR_LOG" "$PROXY_LOG" 2>/dev/null; then
         PROXY_ISSUE="iio-sensor-proxy is installed, but D-Bus denied its startup"
         PROXY_FIX="Check the D-Bus policy/service configuration. Do not grant ordinary users ownership of net.hadess.SensorProxy. See $ACTIVATE_ERR_LOG."
     else
         PROXY_ISSUE="iio-sensor-proxy is installed, but its D-Bus service is not running"
-        PROXY_FIX="AlternixOS uses SysVinit. The proxy is at $PROXY_BINARY. Run the setup script once with administrator privileges to install/start the SysV service: sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. See $ACTIVATE_ERR_LOG and $PROXY_LOG."
+        PROXY_FIX="AlternixOS uses SysVinit. The proxy is at $PROXY_BINARY. Run the setup script once with administrator privileges to install/start the SysV service: osm-sudo bash ~/.config/Alternix/scripts/alternix-rotate-setup.sh. See $ACTIVATE_ERR_LOG and $PROXY_LOG."
     fi
     if [ -z "$REASON" ]; then
         REASON="$PROXY_ISSUE"
@@ -411,6 +390,24 @@ fi
 
 if [ -n "$SERVICE_ERROR" ]; then
     HINT="${HINT:+$HINT }$SERVICE_ERROR"
+fi
+
+
+# Check actual accelerometer capability, not merely whether the D-Bus daemon
+# answers Ping. A healthy proxy may have no supported orientation sensor.
+if [ "$PROXY_RUNNING" = "yes" ]; then
+    has_accel=$(dbus-send --system --print-reply --reply-timeout=2000 \
+        --dest=net.hadess.SensorProxy /net/hadess/SensorProxy \
+        org.freedesktop.DBus.Properties.Get \
+        string:net.hadess.SensorProxy string:HasAccelerometer 2>/dev/null || true)
+    case "$has_accel" in
+        *'boolean true'*) HAS_ACCELEROMETER="yes" ;;
+        *'boolean false'*) HAS_ACCELEROMETER="no" ;;
+    esac
+    if [ "$HAS_ACCELEROMETER" = "no" ] && [ -z "$REASON" ]; then
+        REASON="Sensor proxy is running but reports no usable accelerometer"
+        HINT="Check the IIO sensor name, driver and kernel log: $DMESG_LOG"
+    fi
 fi
 
 if [ "$PROXY_RUNNING" = "yes" ]; then
@@ -429,6 +426,7 @@ echo "SENSOR_NAME=$SENSOR_NAME"
 echo "DRIVER_LOADED=$DRIVER_LOADED"
 echo "PROXY_INSTALLED=$PROXY_INSTALLED"
 echo "PROXY_RUNNING=$PROXY_RUNNING"
+echo "HAS_ACCELEROMETER=$HAS_ACCELEROMETER"
 echo "PROXY_BINARY=$PROXY_BINARY"
 echo "PROXY_ACCESSIBLE=$PROXY_ACCESSIBLE"
 echo "PROXY_SERVICE=$PROXY_SERVICE"
