@@ -1328,6 +1328,27 @@ if [ ! -x /usr/local/bin/osm-keyboard ] || \
     exit 1
 fi
 
+# Retire Onboard only after the replacement keyboard is installed and verified.
+echo "• Removing legacy Onboard keyboard and launchers..."
+if dpkg-query -W -f='${Status}' onboard 2>/dev/null | grep -qx 'install ok installed'; then
+    sudo apt-get purge -y onboard || { echo "ERROR: Could not remove superseded Onboard package." >&2; exit 1; }
+fi
+sudo rm -rf -- /usr/share/onboard
+for alt_old_keyboard_entry in \
+    /etc/xdg/autostart/*[Oo]nboard*.desktop \
+    /usr/share/applications/*[Oo]nboard*.desktop \
+    "$ALT_VLC_HOME"/.config/autostart/*[Oo]nboard*.desktop \
+    "$ALT_VLC_HOME"/.local/share/applications/*[Oo]nboard*.desktop; do
+    if [ -e "$alt_old_keyboard_entry" ] || [ -L "$alt_old_keyboard_entry" ]; then
+        sudo rm -f -- "$alt_old_keyboard_entry" || exit 1
+    fi
+done
+if [ "${ALT_CLAMAV_BUILD_CHROOT:-0}" != 1 ]; then
+    # Stop the former keyboard in running desktop sessions; Qtile will launch
+    # osm-keyboard through the existing dedicated startup hook.
+    sudo pkill -u "$ALT_VLC_USER" -x onboard 2>/dev/null || true
+fi
+
 echo "• Building welcome (responsive fullscreen onboarding)..."
 g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome $(pkg-config --cflags --libs Qt5Widgets) || exit 1
 sudo install -m 0755 welcome /usr/local/bin/welcome || exit 1
@@ -1445,8 +1466,6 @@ ALT_KEYBOARD_QTILE_USER_CONFIG="$ALT_VLC_HOME/.config/qtile/config.py"
 # the actual Qtile session (after dbus-launch has set up its D-Bus environment)
 # so AT-SPI focus notifications work without starting it as root.
 # Preserve all existing user Qtile settings and add/update only our own block.
-
-
 echo "• Enabling osm-keyboard in Qtile (existing settings preserved)..."
 if ! sudo python3 - "$ALT_KEYBOARD_QTILE_USER_CONFIG" /etc/skel/.config/qtile/config.py <<'ALT_OSM_KEYBOARD_QTILE'
 import ast
@@ -1474,6 +1493,21 @@ for name in sys.argv[1:]:
     if not path.is_file() or path.is_symlink():
         raise RuntimeError(f'Cannot safely install Qtile keyboard startup: {path}')
     previous = path.read_text(encoding='utf-8')
+    # Retire the previous embedded keyboard's Qtile hooks, if present.
+    legacy_begin = 'def _configure_onboard_workarea():'
+    legacy_end = '@hook.subscribe.startup\ndef autostart():'
+    if legacy_begin in previous:
+        before = previous.index(legacy_begin)
+        after = previous.find(legacy_end, before)
+        if after < 0:
+            raise RuntimeError(f'Unrecognized legacy keyboard startup block: {path}')
+        previous = previous[:before] + previous[after:]
+    previous = previous.replace(
+        '    # Apply for keyboard launches from any source, not only our bottom bar.\n'
+        '    _configure_onboard_workarea()\n', '')
+    previous = previous.replace(
+        'lazy.function(osm-keyboard --toggle)',
+        'lazy.spawn("osm-keyboard --toggle")')
     if previous.count(start) != previous.count(end) or previous.count(start) > 1:
         raise RuntimeError(f'Malformed/duplicate Qtile keyboard startup markers: {path}')
     if start in previous:

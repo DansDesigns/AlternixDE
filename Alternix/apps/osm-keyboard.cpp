@@ -65,7 +65,8 @@ public:
     ~X11KeySender() { if (display_) XCloseDisplay(display_); }
     Display *display() const { return display_; }
 
-    void send(int qtKey, const QString &text) {
+    void send(int qtKey, const QString &text,
+              Qt::KeyboardModifiers mods = Qt::NoModifier) {
         if (!display_) return;
         KeySym sym = NoSymbol;
         switch (qtKey) {
@@ -108,7 +109,8 @@ public:
             // regional virtual presets, use Unicode hex entry as a fallback
             // when a character is not mapped. Supported by GTK and many Qt
             // editors; some applications do not implement this input method.
-            if (qtKey == Qt::Key_unknown && !text.isEmpty() && !unicodeInProgress_) {
+            if (qtKey == Qt::Key_unknown && !text.isEmpty() && !unicodeInProgress_ &&
+                mods == Qt::NoModifier) {
                 typeUnicode(text);
             } else {
                 qWarning() << "osm-keyboard: unmapped X11 key:" << qtKey << text;
@@ -118,17 +120,25 @@ public:
         const bool shift = (level & 1) != 0;
         const bool altGr = (level & 2) != 0;
         const KeyCode shiftKey = XKeysymToKeycode(display_, XK_Shift_L);
+        const KeyCode ctrlKey = XKeysymToKeycode(display_, XK_Control_L);
+        const bool withCtrl = (mods & Qt::ControlModifier) != Qt::NoModifier;
         const KeyCode altGrKey = XKeysymToKeycode(display_, XK_ISO_Level3_Shift);
+        if (withCtrl && !ctrlKey) {
+            qWarning() << "osm-keyboard: Ctrl key is not mapped";
+            return;
+        }
         if (altGr && !altGrKey) {
             qWarning() << "osm-keyboard: current layout has no AltGr key";
             return;
         }
+        if (withCtrl) XTestFakeKeyEvent(display_, ctrlKey, True, CurrentTime);
         if (altGr) XTestFakeKeyEvent(display_, altGrKey, True, CurrentTime);
         if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, True, CurrentTime);
         XTestFakeKeyEvent(display_, code, True, CurrentTime);
         XTestFakeKeyEvent(display_, code, False, CurrentTime);
         if (shift && shiftKey) XTestFakeKeyEvent(display_, shiftKey, False, CurrentTime);
         if (altGr) XTestFakeKeyEvent(display_, altGrKey, False, CurrentTime);
+        if (withCtrl) XTestFakeKeyEvent(display_, ctrlKey, False, CurrentTime);
         XFlush(display_);
     }
 private:
@@ -176,11 +186,23 @@ public:
         auto *layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
-        keyboard_ = new OsmKeyboard(this);
-        layout->addWidget(keyboard_);
+        // On very narrow/short screens there may not be room for all 60px
+        // touch targets at once. Scroll the keyboard instead of shrinking keys
+        // or letting the dock cover the entire desktop.
+        auto *scroll = new QScrollArea(this);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setFocusPolicy(Qt::NoFocus);
+        scroll->setWidgetResizable(true);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        scroll->setStyleSheet(QStringLiteral("QScrollArea { border:0; background:transparent; }"));
+        keyboard_ = new OsmKeyboard(scroll);
+        scroll->setWidget(keyboard_);
+        layout->addWidget(scroll);
         keyboard_->setSettings(prefs_);
-        keyboard_->setKeyHandler([this](int key, const QString &value) {
-            sender_.send(key, value);
+        keyboard_->setModifiedKeyHandler(
+                [this](int key, const QString &value, Qt::KeyboardModifiers mods) {
+            sender_.send(key, value, mods);
         });
         keyboard_->setOnCustomiseRequested([this] { openSettings(); });
         keyboard_->setOnVisibilityChanged([this](bool shown) {
@@ -224,6 +246,7 @@ public:
             if (!targetScreen_) targetScreen_ = QGuiApplication::primaryScreen();
         }
         rebuilding_ = true;
+        configureKeyboardLayout();
         if (!keyboard_->isVisible()) keyboard_->show();
         reposition();
         setWindowOpacity(prefs_.opacity / 100.0);
@@ -339,10 +362,10 @@ public:
                 [updateCustomEnabled](const QString &) { updateCustomEnabled(); });
         updateCustomEnabled();
         auto *size = new QSpinBox(appearance);
-        size->setRange(36, 85);
+        size->setRange(60, 100);
         size->setSuffix(QStringLiteral(" px"));
         size->setValue(editing->keyHeight);
-        form1->addRow(QStringLiteral("Minimum key height"), size);
+        form1->addRow(QStringLiteral("Minimum key height (60 px minimum)"), size);
         auto *font = new QSpinBox(appearance);
         font->setRange(12, 28);
         font->setSuffix(QStringLiteral(" px"));
@@ -370,11 +393,19 @@ public:
         const int currentLayout = regional->findData(editing->layout);
         regional->setCurrentIndex(currentLayout < 0 ? 0 : currentLayout);
         layoutForm->addRow(QStringLiteral("Keyboard layout"), regional);
+        auto *mode = new QComboBox(layoutPage);
+        mode->addItem(QStringLiteral("Automatic (compact on small displays)"), "auto");
+        mode->addItem(QStringLiteral("Full keyboard"), "full");
+        mode->addItem(QStringLiteral("Compact keyboard (letters only)"), "compact");
+        const int currentMode = mode->findData(editing->mode);
+        mode->setCurrentIndex(currentMode < 0 ? 0 : currentMode);
+        layoutForm->addRow(QStringLiteral("Keyboard size/layout mode"), mode);
         auto *layoutNote = new QLabel(QStringLiteral(
             "Key labels and Shift characters follow the selected region "
             "(for example UK Shift+7 is &). The physical keyboard and "
-            "system XKB layout are not changed. Unicode input in other "
-            "applications depends on their input-method support."), layoutPage);
+            "system XKB layout are not changed. Compact mode keeps letters, "
+            "Shift, Settings, Hide, Enter, Backspace and Space with 60px keys. "
+            "Unicode input in other applications depends on their input-method support."), layoutPage);
         layoutNote->setWordWrap(true);
         layoutForm->addRow(layoutNote);
         tabs->addTab(layoutPage, QStringLiteral("Layouts"));
@@ -420,11 +451,12 @@ public:
         connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         connect(dialog, &QDialog::finished, this,
-                [this, editing, theme, regional, size, font, opacity, pop,
+                [this, editing, theme, regional, mode, size, font, opacity, pop,
                  popDelay, autoShow, dock, reserve](int result) {
             if (result == QDialog::Accepted) {
                 editing->theme = theme->currentText();
                 editing->layout = regional->currentData().toString();
+                editing->mode = mode->currentData().toString();
                 editing->keyHeight = size->value();
                 editing->fontSize = font->value();
                 editing->opacity = opacity->value();
@@ -437,6 +469,7 @@ public:
                 // the Qtile dock or change its strut. Only these three
                 // geometry/reservation settings need an unmap/remap cycle.
                 const bool needRemap = prefs_.keyHeight != editing->keyHeight ||
+                                       prefs_.mode != editing->mode ||
                                        prefs_.docked != editing->docked ||
                                        prefs_.reserveSpace != editing->reserveSpace;
                 const bool reopen = needRemap && isVisible();
@@ -464,6 +497,21 @@ public:
     }
 
 private:
+    void configureKeyboardLayout() {
+        QScreen *screen = targetScreen_;
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (!screen) return;
+        const QRect rect = screen->geometry();
+        // 12 regular keys across, each >=60px, plus layout gutters.
+        const int fullMinWidth = 12 * 60 + 11 * 4 + 12;
+        const bool compact = prefs_.mode == QLatin1String("compact") ||
+              (prefs_.mode == QLatin1String("auto") &&
+               (rect.width() < fullMinWidth || rect.height() < 560));
+        const int available = rect.width() - 12;
+        const int columns = qBound(4, (available + 4) / 64, 10);
+        keyboard_->setCompactLayout(compact, columns);
+    }
+
     void reposition() {
         QScreen *screen = targetScreen_;
         if (!screen) screen = QGuiApplication::primaryScreen();
@@ -471,7 +519,12 @@ private:
         const QRect rect = screen->geometry();
         lastScreenGeometry_ = rect;
         const int margin = 4;
-        const int height = 5 * prefs_.keyHeight + 4 * 4 + 12 + 2;
+        const int rowCount = keyboard_->rowCount();
+        const int preferredHeight = rowCount * prefs_.keyHeight +
+                                    qMax(0, rowCount - 1) * 4 + 12 + 2;
+        // Leave at least 90px for Qtile's top/bottom bars even on a small
+        // landscape screen. Extra rows remain reachable by touch scrolling.
+        const int height = qMin(preferredHeight, qMax(80, rect.height() - 90));
         if (prefs_.docked) {
             const QRect proposed(rect.x(), rect.y() + rect.height() - height,
                                  rect.width(), height);

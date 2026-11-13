@@ -42,11 +42,12 @@ struct OsmKeyDef {
 struct OsmKeyboardSettings {
     QString theme = QStringLiteral("Dark");
     QString layout = QStringLiteral("uk"); // On-screen arrangement, not host XKB setting.
+    QString mode = QStringLiteral("auto"); // Auto, Full, Compact (UI-only, no XKB changes).
     QColor accent = QColor(QStringLiteral("#4a90d9"));
     QColor customBackground = QColor(QStringLiteral("#1e1e1e"));
     QColor customKeys = QColor(QStringLiteral("#383838"));
     QColor customText = QColor(QStringLiteral("#ededed"));
-    int keyHeight = 48;
+    int keyHeight = 60;
     int fontSize = 17;
     int opacity = 100;
     bool keyPopup = true;
@@ -60,6 +61,9 @@ struct OsmKeyboardSettings {
         OsmKeyboardSettings p;
         p.theme = s.value(QStringLiteral("theme"), p.theme).toString();
         p.layout = s.value(QStringLiteral("layout"), p.layout).toString().toLower();
+        p.mode = s.value(QStringLiteral("mode"), p.mode).toString().toLower();
+        if (p.mode != QLatin1String("auto") && p.mode != QLatin1String("full") &&
+            p.mode != QLatin1String("compact")) p.mode = QStringLiteral("auto");
         if (!QStringList{QStringLiteral("uk"), QStringLiteral("us"), QStringLiteral("intl"),
                          QStringLiteral("fr"), QStringLiteral("de"), QStringLiteral("es"),
                          QStringLiteral("it"), QStringLiteral("pt"), QStringLiteral("se")}.contains(p.layout))
@@ -76,7 +80,7 @@ struct OsmKeyboardSettings {
         if (!p.customBackground.isValid()) p.customBackground = QColor("#1e1e1e");
         if (!p.customKeys.isValid()) p.customKeys = QColor("#383838");
         if (!p.customText.isValid()) p.customText = QColor("#ededed");
-        p.keyHeight = qBound(36, s.value(QStringLiteral("keyHeight"), p.keyHeight).toInt(), 85);
+        p.keyHeight = qBound(60, s.value(QStringLiteral("keyHeight"), p.keyHeight).toInt(), 100);
         p.fontSize = qBound(12, s.value(QStringLiteral("fontSize"), p.fontSize).toInt(), 28);
         p.opacity = qBound(65, s.value(QStringLiteral("opacity"), p.opacity).toInt(), 100);
         p.keyPopup = s.value(QStringLiteral("keyPopup"), p.keyPopup).toBool();
@@ -91,6 +95,7 @@ struct OsmKeyboardSettings {
         QSettings s(QStringLiteral("AlternixOS"), QStringLiteral("osm-keyboard"));
         s.setValue(QStringLiteral("theme"), theme);
         s.setValue(QStringLiteral("layout"), layout);
+        s.setValue(QStringLiteral("mode"), mode);
         s.setValue(QStringLiteral("accent"), accent);
         s.setValue(QStringLiteral("customBackground"), customBackground);
         s.setValue(QStringLiteral("customKeys"), customKeys);
@@ -127,6 +132,18 @@ public:
     }
 
     const OsmKeyboardSettings &settings() const { return m_style; }
+    // The shell computes this from the physical screen, not Qtile's workarea.
+    // Keep the keyboard minimum touch target at 60 x 60 logical pixels.
+    void setCompactLayout(bool compact, int columns = 10) {
+        columns = qBound(4, columns, 10);
+        if (m_compact == compact && (!compact || m_compactColumns == columns)) return;
+        m_compact = compact;
+        m_compactColumns = columns;
+        if (compact) m_symbols = false;
+        buildLayout();
+    }
+    int rowCount() const { return m_rowCount; }
+    bool isCompactLayout() const { return m_compact; }
     void setSettings(const OsmKeyboardSettings &settings) {
         const bool rebuild = m_style.layout != settings.layout ||
                              m_style.keyHeight != settings.keyHeight;
@@ -139,6 +156,10 @@ public:
     // the original local Qt-widget key handling.
     void setKeyHandler(std::function<void(int, const QString &)> handler) {
         m_keyHandler = std::move(handler);
+    }
+    void setModifiedKeyHandler(
+            std::function<void(int, const QString &, Qt::KeyboardModifiers)> handler) {
+        m_modifiedKeyHandler = std::move(handler);
     }
     void setOnCustomiseRequested(std::function<void()> handler) {
         m_onCustomise = std::move(handler);
@@ -190,12 +211,15 @@ private:
     }
 
     void emitKey(int qtKey, const QString &text) {
+        const Qt::KeyboardModifiers mods = m_ctrl ? Qt::ControlModifier : Qt::NoModifier;
+        if (m_ctrl) { m_ctrl = false; refreshFaces(); } // Ctrl is one-shot.
+        if (m_modifiedKeyHandler) { m_modifiedKeyHandler(qtKey, text, mods); return; }
         if (m_keyHandler) { m_keyHandler(qtKey, text); return; }
         QWidget *target = QApplication::focusWidget();
         auto *edit = qobject_cast<QLineEdit *>(target);
         if (!edit && m_lastLineEdit && m_lastLineEdit->isVisible() &&
             m_lastLineEdit->isEnabled()) edit = m_lastLineEdit.data();
-        if (edit && edit->isVisible() && !edit->isReadOnly()) {
+        if (mods == Qt::NoModifier && edit && edit->isVisible() && !edit->isReadOnly()) {
             if (qtKey == Qt::Key_Backspace) {
                 if (!edit->hasSelectedText() && edit->cursorPosition() == 0 &&
                     !edit->text().isEmpty()) edit->setCursorPosition(edit->text().size());
@@ -209,9 +233,12 @@ private:
             target = edit;
         }
         if (!target || isAncestorOf(target)) return;
-        QKeyEvent press(QEvent::KeyPress, qtKey, Qt::NoModifier, text);
+        const int eventKey = (qtKey == Qt::Key_unknown && text.size() == 1 &&
+                              text.at(0).isLetter())
+                ? int(text.at(0).toUpper().unicode()) : qtKey;
+        QKeyEvent press(QEvent::KeyPress, eventKey, mods, text);
         QApplication::sendEvent(target, &press);
-        QKeyEvent release(QEvent::KeyRelease, qtKey, Qt::NoModifier, text);
+        QKeyEvent release(QEvent::KeyRelease, eventKey, mods, text);
         QApplication::sendEvent(target, &release);
     }
 
@@ -240,7 +267,7 @@ private:
     QPushButton *makeKey(const OsmKeyDef &def) {
         auto *button = new QPushButton(this);
         button->setFocusPolicy(Qt::NoFocus);
-        button->setMinimumHeight(m_style.keyHeight);
+        button->setMinimumSize(60, qMax(60, m_style.keyHeight));
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         if (def.special) {
             button->setObjectName(QStringLiteral("modKey"));
@@ -301,8 +328,11 @@ private:
             refreshFaces();
             break;
         case Qt::Key_Mode_switch:
-            m_symbols = !m_symbols;
-            buildLayout();
+            if (!m_compact) { m_symbols = !m_symbols; buildLayout(); }
+            break;
+        case Qt::Key_Control:
+            m_ctrl = !m_ctrl;
+            refreshFaces();
             break;
         case Qt::Key_Backspace: emitKey(Qt::Key_Backspace, {}); break;
         case Qt::Key_Return: emitKey(Qt::Key_Return, {}); break;
@@ -326,8 +356,10 @@ private:
         // Switching keyboard modes recreates modifier keys; keep them illuminated.
         for (auto *button : findChildren<QPushButton *>(QString(), Qt::FindDirectChildrenOnly)) {
             if (button->text() == QStringLiteral("⇧") ||
-                button->text() == QStringLiteral("Caps")) {
-                const bool active = button->text() == QStringLiteral("Caps") ? m_caps : m_shift;
+                button->text() == QStringLiteral("Caps") ||
+                button->text() == QStringLiteral("Ctrl")) {
+                const bool active = button->text() == QStringLiteral("Caps") ? m_caps :
+                                    button->text() == QStringLiteral("Ctrl") ? m_ctrl : m_shift;
                 button->setObjectName(active ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
                 restyle(button);
             }
@@ -344,9 +376,11 @@ private:
     }
     void buildLayout() {
         clearGrid();
-        const auto rows = m_symbols ? symbolRows() : letterRows(m_style.layout);
-        // 24 columns = 12 ordinary keys. Enter begins on row 2 and occupies
-        // the same final two columns of rows 2 and 3.
+        const auto rows = m_compact ? compactRows(m_style.layout, m_compactColumns) :
+                          m_symbols ? symbolRows(m_style.layout) : letterRows(m_style.layout);
+        m_rowCount = static_cast<int>(rows.size());
+        // Full: 24 grid columns; compact: one column per 60px key.
+        const int gridColumns = m_compact ? m_compactColumns : 24;
         for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
             int column = 0;
             for (const OsmKeyDef &def : rows[row]) {
@@ -354,7 +388,8 @@ private:
                 column += def.span;
             }
         }
-        for (int col = 0; col < 24; ++col) m_grid->setColumnStretch(col, 1);
+        for (int col = 0; col < 24; ++col)
+            m_grid->setColumnStretch(col, col < gridColumns ? 1 : 0);
         refreshFaces();
     }
     void applyStyle() {
@@ -412,7 +447,6 @@ private:
             {"6", "^"}, {"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"}
         };
         Pair numberExtra{"-", "_"};  // Replaces the former ` / ¬ key.
-        Pair topExtra{"[", "{"};
         Pair homeExtra{"'", "@"};
         std::vector<Pair> punctuation{{",", "<"}, {".", ">"}, {"/", "?"}};
         QString top = QStringLiteral("qwertyuiop");
@@ -424,7 +458,6 @@ private:
             numbers[2].second = "#";
             homeExtra = {"'", "\""};
             if (locale == QLatin1String("intl")) {
-                topExtra = {"é", "É"};
                 homeExtra = {"ñ", "Ñ"};
             }
         } else if (locale == QLatin1String("fr")) {
@@ -434,7 +467,6 @@ private:
             top = QStringLiteral("azertyuiop");
             home = QStringLiteral("qsdfghjkl");
             lower = QStringLiteral("wxcvbnm");
-            topExtra = {"^", "¨"};
             homeExtra = {"m", "M"};
             punctuation = {{",", "?"}, {";", "."}, {":", "/"}};
         } else if (locale == QLatin1String("de")) {
@@ -443,35 +475,30 @@ private:
                        {"9", ")"}, {"0", "="}};
             top = QStringLiteral("qwertzuiop");
             lower = QStringLiteral("yxcvbnm");
-            topExtra = {"ü", "Ü"};
             homeExtra = {"ä", "Ä"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("es")) {
             numbers = {{"1", "!"}, {"2", "\""}, {"3", "·"}, {"4", "$"},
                        {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
                        {"9", ")"}, {"0", "="}};
-            topExtra = {"´", "¨"};
             homeExtra = {"ñ", "Ñ"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("it")) {
             numbers = {{"1", "!"}, {"2", "\""}, {"3", "£"}, {"4", "$"},
                        {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
                        {"9", ")"}, {"0", "="}};
-            topExtra = {"è", "é"};
             homeExtra = {"ò", "ç"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("pt")) {
             numbers = {{"1", "!"}, {"2", "\""}, {"3", "#"}, {"4", "$"},
                        {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
                        {"9", ")"}, {"0", "="}};
-            topExtra = {"ã", "Ã"};
             homeExtra = {"ç", "Ç"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         } else if (locale == QLatin1String("se")) {
             numbers = {{"1", "!"}, {"2", "\""}, {"3", "#"}, {"4", "¤"},
                        {"5", "%"}, {"6", "&"}, {"7", "/"}, {"8", "("},
                        {"9", ")"}, {"0", "="}};
-            topExtra = {"å", "Å"};
             homeExtra = {"ö", "Ö"};
             punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
         }
@@ -486,10 +513,9 @@ private:
             const QString c(letter);
             rows[1].push_back(k(c, c.toUpper()));
         }
-        // No '[' key in the alphabetic UK/US row. Other regions retain
-        // their useful national character key here.
-        if (locale != QLatin1String("uk") && locale != QLatin1String("us"))
-            rows[1].push_back(k(topExtra.first, topExtra.second));
+        // Backspace is row 0/col 11. Settings is directly beneath it on row 1.
+        // Regional extras remain accessible from the ?123 symbol layer.
+        rows[1].push_back(s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE));
 
         rows[2].push_back(s(QStringLiteral("Caps"), Qt::Key_CapsLock));
         for (const QChar letter : home) {
@@ -510,11 +536,10 @@ private:
             rows[3].push_back(k(punctuation[i].first, punctuation[i].second));
         rows[3].push_back(s(QStringLiteral("↑"), Qt::Key_Up));
 
-        // Hide first, then ?123; slash takes the former Left-arrow slot.
-        // Left moves into the former Up-arrow slot on the bottom row.
-        rows[4] = {s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+        // Ctrl takes the former Hide position; Hide moves to Settings' slot.
+        rows[4] = {s(QStringLiteral("Ctrl"), Qt::Key_Control),
                    s(QStringLiteral("?123"), Qt::Key_Mode_switch),
-                   s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
+                   s(QStringLiteral("Hide"), OSM_KEY_HIDE),
                    s(QStringLiteral("space"), Qt::Key_Space, 10),
                    k("/", "?"),
                    s(QStringLiteral("←"), Qt::Key_Left),
@@ -523,36 +548,111 @@ private:
         return rows;
     }
 
-    static std::vector<std::vector<OsmKeyDef>> symbolRows() {
+    static std::vector<std::vector<OsmKeyDef>> symbolRows(const QString &locale) {
         auto k = [](const QString &lo, const QString &up) {
             return OsmKeyDef{lo, up, 2, 0};
         };
         auto s = [](const QString &face, int key, int span = 2, int rows = 1) {
             return OsmKeyDef{face, {}, span, key, rows};
         };
+        OsmKeyDef extra = k("[", "{");
+        if (locale == QLatin1String("intl")) extra = k("é", "É");
+        else if (locale == QLatin1String("fr")) extra = k("^", "¨");
+        else if (locale == QLatin1String("de")) extra = k("ü", "Ü");
+        else if (locale == QLatin1String("es")) extra = k("´", "¨");
+        else if (locale == QLatin1String("it")) extra = k("è", "é");
+        else if (locale == QLatin1String("pt")) extra = k("ã", "Ã");
+        else if (locale == QLatin1String("se")) extra = k("å", "Å");
         return {
             {k("1","1"), k("2","2"), k("3","3"), k("4","4"), k("5","5"),
              k("6","6"), k("7","7"), k("8","8"), k("9","9"), k("0","0"),
              k("=","+"), s(QStringLiteral("⌫"), Qt::Key_Backspace)},
             {s(QStringLiteral("Tab"), Qt::Key_Tab), k("!","!"), k("@","@"), k("#","#"),
              k("$","$"), k("%","%"), k("^","^"), k("&","&"),
-             k("*","*"), k("(","("), k(")",")"), k("[","{")},
+             k("*","*"), k("(","("), k(")",")"), s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE)},
             {s(QStringLiteral("Caps"), Qt::Key_CapsLock), k("-","-"), k("_","_"),
              k("=","="), k("+","+"), k("[","["), k("]","]"), k("{","{"),
-             k("}","}"), k("\\","\\"), k("'","\""),
+             k("}","}"), extra, k("'","\""),
              s(QStringLiteral("↵"), Qt::Key_Return, 2, 2)},
             {s(QStringLiteral("⇧"), Qt::Key_Shift), k(";",";"), k(":",":"),
              k("'","'"), k("\"","\""), k(",",","), k(".","."),
              s(QStringLiteral("↑"), Qt::Key_Up), k("?","?"), k("<","<"), k(">",">")},
-            {s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+            {s(QStringLiteral("Ctrl"), Qt::Key_Control),
              s(QStringLiteral("abc"), Qt::Key_Mode_switch),
-             s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
+             s(QStringLiteral("Hide"), OSM_KEY_HIDE),
              s(QStringLiteral("space"), Qt::Key_Space, 10),
              k("/", "?"),
              s(QStringLiteral("←"), Qt::Key_Left),
              s(QStringLiteral("↓"), Qt::Key_Down),
              s(QStringLiteral("→"), Qt::Key_Right)}
         };
+    }
+
+    // Touch-first compact keyboard: just letters, Shift, Backspace, Settings,
+    // Hide, Enter and Space. It deliberately omits numbers/symbols/navigation.
+    // Letter arrangement still follows the selected region (AZERTY/QWERTZ).
+    static std::vector<std::vector<OsmKeyDef>> compactRows(const QString &locale,
+                                                             int columns) {
+        columns = qBound(4, columns, 10);
+        auto k = [](QChar ch) {
+            const QString low(ch);
+            return OsmKeyDef{low, low.toUpper(), 1, 0};
+        };
+        auto s = [](const QString &face, int key, int span = 1) {
+            return OsmKeyDef{face, {}, span, key};
+        };
+        QString top = QStringLiteral("qwertyuiop");
+        QString home = QStringLiteral("asdfghjkl");
+        QString lower = QStringLiteral("zxcvbnm");
+        if (locale == QLatin1String("fr")) {
+            top = QStringLiteral("azertyuiop");
+            home = QStringLiteral("qsdfghjkl");
+            lower = QStringLiteral("wxcvbnm");
+        } else if (locale == QLatin1String("de")) {
+            top = QStringLiteral("qwertzuiop");
+            lower = QStringLiteral("yxcvbnm");
+        }
+        std::vector<std::vector<OsmKeyDef>> rows;
+        if (columns == 10) {
+            rows.resize(4);
+            for (const QChar ch : top) rows[0].push_back(k(ch));
+            for (const QChar ch : home) rows[1].push_back(k(ch));
+            rows[2].push_back(s(QStringLiteral("⇧"), Qt::Key_Shift));
+            for (const QChar ch : lower) rows[2].push_back(k(ch));
+            rows[2].push_back(s(QStringLiteral("⌫"), Qt::Key_Backspace));
+        } else {
+            // At 320-600px widths, reflow rather than making 60px keys overlap.
+            rows.emplace_back();
+            for (const QChar ch : top + home + lower) {
+                if (int(rows.back().size()) == columns) rows.emplace_back();
+                rows.back().push_back(k(ch));
+            }
+            rows.emplace_back(); // Dedicated action row, even when letters exactly fill a row.
+        }
+        if (columns >= 6) {
+            if (columns == 10) {
+                rows.back().push_back(s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE));
+                rows.back().push_back(s(QStringLiteral("Hide"), OSM_KEY_HIDE));
+                rows.back().push_back(s(QStringLiteral("space"), Qt::Key_Space, columns - 3));
+                rows.back().push_back(s(QStringLiteral("↵"), Qt::Key_Return));
+                return rows;
+            }
+            rows.back().push_back(s(QStringLiteral("⇧"), Qt::Key_Shift));
+            rows.back().push_back(s(QStringLiteral("⌫"), Qt::Key_Backspace));
+            rows.back().push_back(s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE));
+            rows.back().push_back(s(QStringLiteral("Hide"), OSM_KEY_HIDE));
+            rows.back().push_back(s(QStringLiteral("space"), Qt::Key_Space, columns - 5));
+            rows.back().push_back(s(QStringLiteral("↵"), Qt::Key_Return));
+        } else {
+            rows.back().push_back(s(QStringLiteral("⇧"), Qt::Key_Shift));
+            rows.back().push_back(s(QStringLiteral("⌫"), Qt::Key_Backspace));
+            rows.back().push_back(s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE));
+            rows.back().push_back(s(QStringLiteral("Hide"), OSM_KEY_HIDE));
+            rows.emplace_back();
+            rows.back().push_back(s(QStringLiteral("space"), Qt::Key_Space, columns - 1));
+            rows.back().push_back(s(QStringLiteral("↵"), Qt::Key_Return));
+        }
+        return rows;
     }
 
     QGridLayout *m_grid = nullptr;
@@ -562,12 +662,17 @@ private:
     OsmKeyboardSettings m_style;
     int m_popupSerial = 0;
     bool m_shift = false;
+    bool m_ctrl = false;
     bool m_caps = false;
+    bool m_compact = false;
+    int m_compactColumns = 10;
+    int m_rowCount = 5;
     bool m_symbols = false;
     bool m_autoShow = false;
     bool m_embeddedConnected = false;
     bool m_userHidden = false;
     std::function<void(int, const QString &)> m_keyHandler;
+    std::function<void(int, const QString &, Qt::KeyboardModifiers)> m_modifiedKeyHandler;
     std::function<void()> m_onCustomise;
     std::function<void(bool)> m_onVisibilityChanged;
 };

@@ -376,7 +376,7 @@ sudo apt install -y \
     build-essential libssl-dev git qtbase5-dev qt5-qmake qtdeclarative5-dev xdg-utils cmake g++\
     fonts-noto-color-emoji libxcomposite-dev libxrender-dev libxfixes-dev fonts-freefont-ttf \
     xwallpaper pkg-config libpoppler-qt5-dev htop python3-pip python3-lxml fonts-urw-base35 \
-    python3-venv qtile python3-cffi python3-xcffib fonts-comfortaa picom redshift onboard fake-hwclock libcamera-ipa\
+    python3-venv qtile python3-cffi python3-xcffib fonts-comfortaa picom redshift fake-hwclock libcamera-ipa\
     samba xdotool alacritty sqlite3 fuse libmbim-utils libqmi-utils modemmanager libcamera-tools \
     synaptic brightnessctl pavucontrol pulseaudio alsa-utils mpg123 flatpak libevdev-dev \
     elogind libpam-elogind xserver-xlibre-input-libinput ssh mobile-broadband-provider-info \
@@ -1089,9 +1089,6 @@ if [ -d "$CONFIG_SRC" ]; then
 else
     echo "• No configs folder found, skipping."
 fi
-
-sudo cp -r "$ALT_ROOT/Alternix/onboard" /usr/share/onboard
-
 
 
 # ────────────────────────────────────────────────
