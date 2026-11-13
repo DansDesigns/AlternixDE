@@ -77,6 +77,47 @@ discover() {
     done < <(xinput --list --short 2>/dev/null)
 }
 
+# Wacom AES pens can expose the lower barrel button as an "eraser" tool,
+# even though the eraser switch is on the barrel, not at the back of the pen.
+# Match endpoints by their common device name; never mix unrelated tablets.
+pen_base_name() {
+    local name="${1,,}"
+    case "$name" in
+        *' stylus') name="${name% stylus}" ;;
+        *' eraser') name="${name% eraser}" ;;
+    esac
+    printf '%s' "$name"
+}
+
+eraser_for_stylus() {
+    local stylus_index="$1" i base
+    base=$(pen_base_name "${NAMES[stylus_index]}")
+    ERASER_ID=''; ERASER_DRIVER=''
+    for (( i=0; i<${#IDS[@]}; i++ )); do
+        [[ "${NAMES[i],,}" == *' eraser' ]] || continue
+        [[ "${DRIVERS[i]}" == "${DRIVERS[stylus_index]}" ]] || continue
+        [[ "$(pen_base_name "${NAMES[i]}")" == "$base" ]] || continue
+        ERASER_ID="${IDS[i]}"
+        ERASER_DRIVER="${DRIVERS[i]}"
+        return 0
+    done
+    return 1
+}
+
+# For an integrated Lenovo/Wacom AES device, the matching eraser endpoint
+# is the lower barrel's erase switch. A traditional external drawing tablet
+# may instead have a physical eraser on the back of its stylus; don't
+# automatically repurpose that tool unless it looks like an integrated pen.
+uses_eraser_barrel() {
+    local index="$1" name
+    name="${NAMES[index],,}"
+    [[ -n "$ERASER_ID" ]] || return 1
+    case "$name" in
+        *lenovo*|*aes*|*hid*|*isdv*|*'pen and multitouch'*|*'pen tablet/digitizer'*) return 0 ;;
+    esac
+    return 1
+}
+
 outputs() {
     command -v xrandr >/dev/null 2>&1 || return 0
     xrandr --query | awk '$2=="connected"{print "OUTPUT\t" $1}'
@@ -89,6 +130,14 @@ scan() {
     local i
     for (( i=0; i<${#IDS[@]}; i++ )); do
         printf '%s\t%s\t%s\t%s\n' "${KINDS[i]}" "${IDS[i]}" "${NAMES[i]}" "${DRIVERS[i]}"
+        if [[ "${KINDS[i]}" == PEN && "${NAMES[i],,}" != *' eraser' ]]; then
+            eraser_for_stylus "$i" || :
+            if uses_eraser_barrel "$i"; then
+                printf 'LAYOUT\t%s\taes-eraser\n' "${IDS[i]}"
+            else
+                printf 'LAYOUT\t%s\tstandard\n' "${IDS[i]}"
+            fi
+        fi
     done
     outputs
     printf 'CURRENT_PEN=%s\nCURRENT_PRESSURE=%s\nCURRENT_BUTTON_1=%s\nCURRENT_BUTTON_2=%s\nCURRENT_TOUCH=%s\nCURRENT_OUTPUT=%s\n' \
@@ -104,17 +153,22 @@ button_number() {
     esac
 }
 
+# Physical barrel numbering (from nib towards the end cap):
+#   Button 1 = lower, nearest tip; Button 2 = upper, nearest end cap.
+# On integrated Wacom AES the LOWER barrel changes to a separate eraser
+# XInput tool, so writing stylus Button 2/3 ignores the lower button.
+# The end-cap Bluetooth shortcut is a different HID device and must not be
+# mistaken for a third stylus button or for the eraser endpoint.
 apply_pen() {
-    local id="$1" driver="$2" pressure="$3" b1="$4" b2="$5"
+    local id="$1" driver="$2" pressure="$3" b1="$4" b2="$5" eraser_id="$6" aes="$7"
     local curve number1 number2 props buttonmap
-    local -a buttons=()
+    local -a buttons=() erase_buttons=()
     case "$pressure" in
         soft)   curve='0 25 65 100' ;;
         firm)   curve='30 0 100 75' ;;
         *)      curve='0 0 100 100' ;;
     esac
     if [ "$driver" = wacom ]; then
-        # Keep stylus in absolute (screen-coordinate) mode on tablets.
         xsetwacom set "$id" Mode Absolute 2>/dev/null || :
         # shellcheck disable=SC2086
         xsetwacom set "$id" PressureCurve $curve 2>/dev/null || echo "WARNING=Pressure curve not supported by pen $id"
@@ -133,17 +187,53 @@ apply_pen() {
             echo "WARNING=Pen $id does not expose configurable pressure via its X11 driver"
         fi
     fi
+
     number1=$(button_number "$b1") || return 1
     number2=$(button_number "$b2") || return 1
     if [ "$driver" = wacom ]; then
-        xsetwacom set "$id" Button 2 "$number1" 2>/dev/null || echo "WARNING=Pen $id has no programmable side button 1"
-        xsetwacom set "$id" Button 3 "$number2" 2>/dev/null || echo "WARNING=Pen $id has no programmable side button 2"
+        if [ "$aes" = yes ] && [ -n "$eraser_id" ]; then
+            # Wacom AES lower barrel -> eraser tool, button 1 (requires a tip
+            # tap while held on some firmware). Upper barrel -> stylus button 2.
+            # Use xsetwacom action syntax (+N) for presses on the AES tools.
+            local lower="$number1" upper="$number2"
+            [ "$lower" = 0 ] || lower="+$lower"
+            [ "$upper" = 0 ] || upper="+$upper"
+            xsetwacom set "$eraser_id" Button 1 "$lower" 2>/dev/null || \
+                echo "WARNING=Lower barrel (eraser tool $eraser_id) could not be mapped"
+            xsetwacom set "$id" Button 2 "$upper" 2>/dev/null || \
+                echo "WARNING=Upper barrel (stylus $id) could not be mapped"
+            echo "INFO=Lower barrel is on the Wacom AES eraser endpoint; hold it and tap the screen to activate the assigned click."
+        else
+            # Regular pen with both barrel switches on the stylus endpoint.
+            xsetwacom set "$id" Button 2 "$number1" 2>/dev/null || \
+                echo "WARNING=Pen $id has no programmable lower barrel button"
+            xsetwacom set "$id" Button 3 "$number2" 2>/dev/null || \
+                echo "WARNING=Pen $id has no programmable upper barrel button"
+        fi
     else
-        # Preserve the entire XInput button map (including pen tip) and only
-        # change physical side-button positions 2 and 3 if they exist.
         buttonmap=$(xinput --get-button-map "$id" 2>/dev/null) || buttonmap=''
         read -r -a buttons <<< "$buttonmap"
-        if (( ${#buttons[@]} >= 3 )); then
+        if [ "$aes" = yes ] && [ -n "$eraser_id" ]; then
+            # libinput equivalent where the side switch is a separate tool.
+            if (( ${#buttons[@]} >= 2 )); then
+                buttons[1]="$number2"
+                xinput --set-button-map "$id" "${buttons[@]}" 2>/dev/null || \
+                    echo "WARNING=Upper barrel mapping unsupported for pen $id"
+            else
+                echo "WARNING=Pen $id lacks a programmable upper barrel button"
+            fi
+            buttonmap=$(xinput --get-button-map "$eraser_id" 2>/dev/null) || buttonmap=''
+            read -r -a erase_buttons <<< "$buttonmap"
+            if (( ${#erase_buttons[@]} >= 1 )); then
+                erase_buttons[0]="$number1"
+                xinput --set-button-map "$eraser_id" "${erase_buttons[@]}" 2>/dev/null || \
+                    echo "WARNING=Lower barrel mapping unsupported for eraser tool $eraser_id"
+            else
+                echo "WARNING=Lower barrel eraser tool $eraser_id has no configurable button map"
+            fi
+            echo "INFO=Lower barrel is handled by a separate eraser device and may require a tip tap."
+        elif (( ${#buttons[@]} >= 3 )); then
+            # Preserve tip mapping and unrelated buttons.
             buttons[1]="$number1"; buttons[2]="$number2"
             xinput --set-button-map "$id" "${buttons[@]}" 2>/dev/null || \
                 echo "WARNING=Side-button remapping not supported for pen $id"
@@ -177,7 +267,10 @@ apply() {
             # standalone erasers. A saved selection matches by stable name.
             case "${NAMES[i],,}" in *eraser*) continue ;; esac
             if [ -z "$selected" ] || [ "${NAMES[i]}" = "$selected" ]; then
-                apply_pen "${IDS[i]}" "${DRIVERS[i]}" "$pressure" "$button1" "$button2"
+                eraser_for_stylus "$i" || :
+                local aes=no
+                if uses_eraser_barrel "$i"; then aes=yes; fi
+                apply_pen "${IDS[i]}" "${DRIVERS[i]}" "$pressure" "$button1" "$button2" "$ERASER_ID" "$aes"
                 (( count += 1 ))
             fi
         fi
