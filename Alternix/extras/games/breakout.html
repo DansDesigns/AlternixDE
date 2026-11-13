@@ -37,18 +37,29 @@
     max-height: min(70vh, calc(100dvh - 230px));
     display: block;
   }
+  .game-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    max-width: calc(100vw - 20px);
+    white-space: nowrap;
+  }
   .hud {
     display: flex;
-    gap: 18px;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(6px, 1.2vw, 18px);
     font-size: 15px;
     font-weight: 600;
     background: #1e293b;
-    padding: 8px 20px;
+    padding: 8px 14px;
     border-radius: 8px;
     border: 1px solid #334155;
+    white-space: nowrap;
   }
-  .hud span { min-width: 78px; text-align: center; }
-  .hud .hidden { display: none; }
+  .hud > span { text-align: center; }
+  .hud > .hidden { display: none; }
   .controls-hint {
     position: fixed;
     left: 10px;
@@ -69,6 +80,26 @@
   }
   .playfield { position: relative; width: fit-content; max-width: 100%; }
   .playfield canvas { max-width: 100%; }
+  .game-action {
+    display: inline-flex;
+    flex: none;
+    justify-content: center;
+    align-items: center;
+    gap: 7px;
+    min-height: 40px;
+    padding: 7px 12px;
+    color: #e2e8f0;
+    background: #1e293b;
+    border: 1px solid #386176;
+    border-radius: 8px;
+    font: 600 13px 'Segoe UI', system-ui, sans-serif;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .game-action:hover { background: #263449; border-color: #38bdf8; }
+  .game-action:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+  .game-action .action-icon { font-size: 17px; line-height: 1; }
   .touch-area {
     display: flex;
     align-items: center;
@@ -100,9 +131,17 @@
     letter-spacing: 3px;
     text-shadow: 0 0 12px rgba(56,189,248,0.3);
   }
+  @media (max-width: 780px) {
+    .game-action { width: 39px; padding: 6px; }
+    .game-action .action-text { display: none; }
+    .game-header { gap: 6px; }
+    .hud { gap: 8px; padding: 8px 10px; font-size: 13px; }
+  }
   @media (max-width: 540px) {
-    .hud { flex-wrap: wrap; justify-content: center; gap: 5px 12px; padding: 6px 10px; }
-    .hud span { min-width: auto; }
+    .game-header { gap: 4px; }
+    .game-action { width: 32px; min-height: 36px; padding: 4px; }
+    .game-action .action-icon { font-size: 17px; }
+    .hud { gap: 4px; padding: 9px 5px; font-size: clamp(9px, 2.7vw, 12px); }
     .controls-hint { font-size: 11px; }
     body { padding-bottom: 70px; }
   }
@@ -282,12 +321,16 @@
 </head>
 <body>
 <div class="game-container">
-  <div class="hud">
-    <span id="hud-score1">Score: 0</span>
-    <span id="hud-score2" class="hidden">P2: 0</span>
-    <span>Lives: <span id="lives">3</span></span>
-    <span>Level: <span id="level">1</span></span>
-    <span>Best: <span id="best">0</span></span>
+  <div class="game-header" role="group" aria-label="Game controls and statistics">
+    <button type="button" class="game-action" id="btn-game-menu" title="Open game menu" aria-label="Open game menu"><span class="action-icon" aria-hidden="true">&#9776;</span><span class="action-text">Menu</span></button>
+    <div class="hud">
+      <span id="hud-score1">Score: 0</span>
+      <span id="hud-score2" class="hidden">P2: 0</span>
+      <span>Lives: <span id="lives">3</span></span>
+      <span>Level: <span id="level">1</span></span>
+      <span>Best: <span id="best">0</span></span>
+    </div>
+    <button type="button" class="game-action" id="btn-game-fullscreen" title="Enter fullscreen" aria-label="Enter fullscreen"><span class="action-icon" id="fullscreen-action-icon" aria-hidden="true">&#x26F6;</span><span class="action-text" id="fullscreen-action-label">Fullscreen</span></button>
   </div>
 
   <div class="canvas-wrap">
@@ -302,6 +345,7 @@
         <button class="btn" id="btn-new">New Game</button>
         <button class="btn" id="btn-settings">Settings</button>
         <button class="btn" id="btn-scores">High Scores</button>
+        <button class="btn" id="btn-exit">Exit</button>
         <p class="hint">P1: arrows, mouse or touch &middot; Space to fire<br>P2: A and D &middot; W to fire<br>Esc or P to pause &middot; F for fullscreen</p>
       </div>
 
@@ -1796,6 +1840,36 @@
 
   function closeMenu() { menuEl.classList.add('hidden'); }
 
+  function updateFullscreenControls() {
+    var isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    var button = document.getElementById('btn-game-fullscreen');
+    var label = isFullscreen ? 'Exit Fullscreen' : 'Fullscreen';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    document.getElementById('fullscreen-action-label').textContent = label;
+    document.getElementById('fullscreen-action-icon').textContent = isFullscreen ? '\u2921' : '\u26F6';
+  }
+
+  // Save progress and leave the game. Browsers generally cannot close tabs
+  // they did not open, so show a blank page if closing is disallowed.
+  function exitGame() {
+    saveGame();
+    keysDown = {};
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      var leaveFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
+      if (leaveFullscreen) {
+        try {
+          var result = leaveFullscreen.call(document);
+          if (result && result.catch) result.catch(function () {});
+        } catch (e) {}
+      }
+    }
+    try { window.close(); } catch (e) {}
+    window.setTimeout(function () {
+      if (!window.closed) window.location.replace('about:blank');
+    }, 150);
+  }
+
   function goFullscreenIfWanted() {
     if (!settings.startFullscreen || document.fullscreenElement) return;
     var el = document.documentElement;
@@ -2016,6 +2090,11 @@
   }
 
   /* ================= events ============================================== */
+  document.getElementById('btn-game-menu').addEventListener('click', openMenu);
+  document.getElementById('btn-game-fullscreen').addEventListener('click', toggleFullscreen);
+  document.getElementById('btn-exit').addEventListener('click', exitGame);
+  document.addEventListener('fullscreenchange', updateFullscreenControls);
+  document.addEventListener('webkitfullscreenchange', updateFullscreenControls);
   document.getElementById('btn-resume').addEventListener('click', doResume);
   document.getElementById('btn-new').addEventListener('click', function () { showPanel('mode'); });
   document.getElementById('btn-mode-1').addEventListener('click', function () { startNewGame(1); });
@@ -2195,6 +2274,7 @@
   updateHUD();
   refreshMain();
   showPanel('main');
+  updateFullscreenControls();
   requestAnimationFrame(loop);
 })();
 </script>
