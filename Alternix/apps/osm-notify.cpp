@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <QPainter>
 #include <QMouseEvent>
+#include <QTouchEvent>
 #include <QProcess>
 #include <QDir>
 #include <QFile>
@@ -384,6 +385,9 @@ public:
     QLabel *batteryIconLabel;
 
     QList<QWidget*> orderedWidgets;
+    QList<QWidget*> systemCards;
+    QGridLayout *systemGrid = nullptr;
+    QRect lastScreenGeo;
     QMap<QWidget*, QRect> finalGeomMap;
     QMap<QWidget*, QGraphicsOpacityEffect*> opacityMap;
     bool closing;
@@ -520,6 +524,7 @@ public:
         {
             QWidget *row = new QWidget(this);
             QGridLayout *grid = new QGridLayout(row);
+            systemGrid = grid;
             grid->setSpacing(12);
             grid->setContentsMargins(0,0,0,0);
 
@@ -549,6 +554,7 @@ public:
                 });
                 deviceLabels.insert(key, info);
                 deviceFrames.insert(key, card);
+                systemCards.append(card);
 
                 const int r = toggleIndex / sysCols;
                 const int c = toggleIndex % sysCols;
@@ -625,6 +631,7 @@ public:
 
                 QFrame *batCard = createCard(this, inner, true, onClick);
                 batteryCardWidget = batCard;
+                systemCards.append(batCard);
 
                 int r = toggleIndex / sysCols;
                 int c = toggleIndex % sysCols;
@@ -1160,7 +1167,23 @@ public:
         }
     }
 
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        if (lastScreenGeo == g && geometry() == g) return;
+        lastScreenGeo = g;
+        if (geometry() != g) setGeometry(g);
+        if (!systemGrid) return;
+        // A portrait display needs a different card layout from landscape.
+        const int cols = g.width() < 520 ? 2 : (g.width() < 900 ? 3 : 5);
+        for (QWidget *card : systemCards) systemGrid->removeWidget(card);
+        for (int i = 0; i < systemCards.size(); ++i)
+            systemGrid->addWidget(systemCards.at(i), i / cols, i % cols);
+        if (layout()) layout()->invalidate();
+        updateGeometry();
+    }
+
     void openPanel() {
+        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
         if (closing) return;
 
         if (refreshTimer) {
@@ -1468,6 +1491,7 @@ public:
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_NoSystemBackground);
         setMouseTracking(true);
+        setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         setGeometry(x, y, w, h);
         setStyleSheet("background: rgba(0,0,0,0);");
@@ -1476,7 +1500,38 @@ public:
         raise();
     }
 
+    void syncEdgeGeometry(int x, int y, int w, int h) {
+        const QRect target(x, y, qMax(1, w), qMax(1, h));
+        if (geometry() != target) setGeometry(target);
+    }
+
 protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::TouchBegin ||
+            event->type() == QEvent::TouchUpdate ||
+            event->type() == QEvent::TouchEnd ||
+            event->type() == QEvent::TouchCancel) {
+            auto *touch = static_cast<QTouchEvent *>(event);
+            if (event->type() == QEvent::TouchBegin) {
+                if (!touch->touchPoints().isEmpty()) {
+                    pressPos = touch->touchPoints().first().screenPos().toPoint();
+                    dragging = true;
+                }
+            } else if (event->type() == QEvent::TouchUpdate && dragging &&
+                       !touch->touchPoints().isEmpty()) {
+                if (touch->touchPoints().first().screenPos().y() - pressPos.y() > 12) {
+                    if (overlay) overlay->openPanel();
+                    dragging = false;
+                }
+            } else if (event->type() != QEvent::TouchUpdate) {
+                dragging = false;
+            }
+            event->accept();
+            return true;
+        }
+        return QWidget::event(event);
+    }
+
     void mousePressEvent(QMouseEvent *e) override {
         if (e->button() == Qt::LeftButton) {
             dragging = true;
@@ -1607,35 +1662,40 @@ int main(int argc, char **argv) {
     if (forceShow)
         QTimer::singleShot(0, &overlay, [&overlay]() { overlay.openPanel(); });
 
-    QRect g = QApplication::primaryScreen()->geometry();
-    int W = g.width();
-    int barHeight = 50;
-
-    double edgeFrac   = 0.18;  // left & right exclusion
-    double centerFrac = 0.14;  // center (clock) exclusion
-
-    int edgeExclusion   = static_cast<int>(W * edgeFrac);
-    int centerExclusion = static_cast<int>(W * centerFrac);
-
-    int maxExcl = W / 3;
-    edgeExclusion   = qMin(edgeExclusion,   maxExcl);
-    centerExclusion = qMin(centerExclusion, maxExcl);
-
-    int usableWidth = W - 2 * edgeExclusion - centerExclusion;
-
-    if (usableWidth <= 20) {
-        int barWidth = W * 0.5;
-        int x = g.x() + (W - barWidth) / 2;
-        new ActivationEdgeBar(&overlay, x, g.y(), barWidth, barHeight);
-    } else {
-        int swipeWidth = usableWidth / 2;
-
-        int leftSwipeX = g.x() + edgeExclusion;
-        new ActivationEdgeBar(&overlay, leftSwipeX, g.y(), swipeWidth, barHeight);
-
-        int rightSwipeX = leftSwipeX + swipeWidth + centerExclusion;
-        new ActivationEdgeBar(&overlay, rightSwipeX, g.y(), swipeWidth, barHeight);
-    }
+    QScreen *screen = QApplication::primaryScreen();
+    // Two distinct strips keep the existing top-left/top-right swipe behavior.
+    // They must be repositioned when XRandR rotates or resizes the display.
+    ActivationEdgeBar leftBar(&overlay, 0, 0, 1, 1);
+    ActivationEdgeBar rightBar(&overlay, 0, 0, 1, 1);
+    auto updateScreen = [&overlay, &leftBar, &rightBar](const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        overlay.syncScreenGeometry(g);
+        const int W = g.width();
+        int edgeExclusion = qMin(int(W * 0.18), W / 3);
+        int centerExclusion = qMin(int(W * 0.14), W / 3);
+        int usable = W - 2 * edgeExclusion - centerExclusion;
+        if (usable < 24) {
+            edgeExclusion = 0;
+            centerExclusion = 0;
+            usable = W;
+        }
+        const int leftWidth = qMax(1, usable / 2);
+        const int rightWidth = qMax(1, usable - leftWidth);
+        const int barHeight = qMin(50, g.height());
+        leftBar.syncEdgeGeometry(g.x() + edgeExclusion, g.y(),
+                                 leftWidth, barHeight);
+        rightBar.syncEdgeGeometry(g.x() + edgeExclusion + leftWidth + centerExclusion,
+                                  g.y(), rightWidth, barHeight);
+    };
+    QObject::connect(screen, &QScreen::geometryChanged, &overlay, updateScreen);
+    QTimer geometryPoll(&a);
+    geometryPoll.setInterval(750);
+    QObject::connect(&geometryPoll, &QTimer::timeout, &overlay, [updateScreen]() {
+        if (QScreen *current = QGuiApplication::primaryScreen())
+            updateScreen(current->geometry());
+    });
+    geometryPoll.start();
+    updateScreen(screen->geometry());
 
     return a.exec();
 }

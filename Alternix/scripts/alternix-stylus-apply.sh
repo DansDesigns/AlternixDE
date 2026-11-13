@@ -27,10 +27,15 @@ classify() {
     if [[ "$node" == /dev/input/event* ]] && command -v udevadm >/dev/null 2>&1; then
         udev=$(udevadm info --query=property --name="$node" 2>/dev/null) || :
     fi
-    case "${name,,}" in *touchpad*|*trackpoint*|*mouse*|*\ pad*) return ;; esac
-    if grep -qx 'ID_INPUT_TOUCHPAD=1' <<< "$udev"; then return; fi
     if grep -qx 'ID_INPUT_TOUCHSCREEN=1' <<< "$udev"; then echo TOUCH; return; fi
-    if grep -qx 'ID_INPUT_TABLET=1' <<< "$udev"; then echo PEN; return; fi
+    if grep -qxE 'ID_INPUT_(TABLET|TABLET_TOOL|PEN|STYLUS)=1' <<< "$udev"; then echo PEN; return; fi
+    if grep -qxE 'ID_INPUT_(TOUCHPAD|MOUSE|POINTINGSTICK|TABLET_PAD)=1' <<< "$udev"; then return; fi
+    case "${name,,}" in *touchpad*|*trackpoint*|*mouse*|*\ pad*) return ;; esac
+    local props
+    props=$(xinput list-props "$id" 2>/dev/null) || props=''
+    if [[ "$props" == *'libinput Tablet Tool Pressurecurve'* ]] ||
+       [[ "$props" == *'Wacom Tool Type'* ]]; then echo PEN; return; fi
+    if [[ "$props" == *'libinput Calibration Matrix'* ]]; then echo TOUCH; return; fi
     case "${name,,}" in
         *touchpad*|*trackpoint*|*mouse*|*virtual\ core*|*keyboard*|*\ pad*) return ;;
         *touchscreen*|*touch\ screen*|*\ finger*|*multitouch*|*multi-touch*) echo TOUCH ;;

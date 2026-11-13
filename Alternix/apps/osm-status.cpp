@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QGraphicsDropShadowEffect>
 #include <QMouseEvent>
+#include <QTouchEvent>
 #include <QLockFile>
 #include <QDir>
 #include <QDebug>
@@ -196,6 +197,7 @@ public:
     void refreshNotifications();
     void removeNotification(const QString &path);
     void resizeToItems(int count);
+    void syncScreenGeometry(const QRect &screen);
 
     // overlay width from edge of screen
     int computeRequiredWidth(const QStringList &titles) {
@@ -256,6 +258,7 @@ public:
     explicit NotificationBadge(OverlayRoot *overlay, QWidget *parent=nullptr);
 
     void setCount(int c);
+    void syncScreenGeometry(const QRect &screen);
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -376,12 +379,21 @@ void StatusPanel::resizeToItems(int count) {
 
     // inner + outer margins overhead (approx), similar to osm-running
     int h = totalH + 72;
-    h = qBound(120, h, m_maxH);
-
     QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
-    int top = int(screenGeo.height() * 0.15);
+    const int top = int(screenGeo.height() * 0.15);
+    const int available = qMax(1, screenGeo.height() - top);
+    const int maximum = qMax(1, qMin(m_maxH, available));
+    h = qBound(qMin(120, maximum), h, maximum);
+    m_width = qMin(m_width, screenGeo.width());
 
+    // Panel is a child of OverlayRoot: use relative coordinates.
     setGeometry(screenGeo.width() - m_width, top, m_width, h);
+}
+
+void StatusPanel::syncScreenGeometry(const QRect &screen) {
+    m_maxH = qMax(1, int(screen.height() * 0.9));
+    m_width = qMin(m_width, screen.width());
+    resizeToItems(m_list ? m_list->count() : 0);
 }
 
 void StatusPanel::refreshNotifications() {
@@ -605,12 +617,7 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
 
-    QRect g = QGuiApplication::primaryScreen()->geometry();
-    int stubWidth  = 22;
-    int stubHeight = 54;
-    int x = g.x() + g.width() - stubWidth - 4; // 4px inset from edge
-    int y = g.y() + int(g.height() * 0.15);    // ~15% from top
-    setGeometry(x, y, stubWidth + 8, stubHeight + 32); // extra for circle
+    syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
 
     hide();
 
@@ -621,6 +628,15 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
             this->raise();
     });
     m_raiseTimer->start();
+}
+
+void NotificationBadge::syncScreenGeometry(const QRect &g) {
+    if (!g.isValid() || g.isEmpty()) return;
+    const int stubWidth = 22;
+    const QRect target(g.x() + g.width() - stubWidth - 4,
+                       g.y() + int(g.height() * 0.15),
+                       stubWidth + 8, 54 + 32);
+    if (geometry() != target) setGeometry(target);
 }
 
 void NotificationBadge::setCount(int c) {
@@ -727,7 +743,21 @@ public:
         hide(); // start hidden
     }
 
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        if (m_screenGeo == g && geometry() == g) return;
+        m_screenGeo = g;
+        setGeometry(g);
+        if (m_panel) {
+            m_panel->syncScreenGeometry(g);
+            if (m_panelVisible) m_panel->move(g.width() - m_panel->width(), m_panel->y());
+            else m_panel->move(g.width(), m_panel->y());
+        }
+        if (m_badge) m_badge->syncScreenGeometry(g);
+    }
+
     void showPanel() {
+        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
         if (m_panelVisible) return;
         m_panelVisible = true;
 
@@ -823,11 +853,10 @@ public:
         setAttribute(Qt::WA_NoSystemBackground);
         setAttribute(Qt::WA_ShowWithoutActivating);
         setMouseTracking(true);
+        setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         QRect g = QGuiApplication::primaryScreen()->geometry();
-        int barWidth = 10;
-        int x = g.x() + g.width() - barWidth;
-        setGeometry(x, g.y(), barWidth, g.height());
+        syncScreenGeometry(g);
         setStyleSheet("background: rgba(0,0,0,0);");
 
         show();
@@ -842,7 +871,40 @@ public:
         m_raiseTimer->start();
     }
 
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        const int w = qMin(25, g.width());
+        const QRect target(g.x() + g.width() - w, g.y(), w, g.height());
+        if (geometry() != target) setGeometry(target);
+    }
+
 protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::TouchBegin ||
+            event->type() == QEvent::TouchUpdate ||
+            event->type() == QEvent::TouchEnd ||
+            event->type() == QEvent::TouchCancel) {
+            auto *touch = static_cast<QTouchEvent *>(event);
+            if (event->type() == QEvent::TouchBegin) {
+                if (!touch->touchPoints().isEmpty()) {
+                    m_pressPos = touch->touchPoints().first().screenPos().toPoint();
+                    m_dragging = true;
+                }
+            } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
+                       !touch->touchPoints().isEmpty()) {
+                if (m_pressPos.x() - touch->touchPoints().first().screenPos().x() > 12) {
+                    if (m_overlay) m_overlay->showPanel();
+                    m_dragging = false;
+                }
+            } else if (event->type() != QEvent::TouchUpdate) {
+                m_dragging = false;
+            }
+            event->accept();
+            return true;
+        }
+        return QWidget::event(event);
+    }
+
     void mousePressEvent(QMouseEvent *e) override {
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
@@ -1243,6 +1305,21 @@ int main(int argc,char**argv) {
 
     OverlayRoot root;          // overlay window
     ActivationEdgeBar bar(&root);   // always-on-top gesture edge
+
+    auto updateScreen = [&root, &bar](const QRect &g) {
+        root.syncScreenGeometry(g);
+        bar.syncScreenGeometry(g);
+    };
+    QScreen *screen = QGuiApplication::primaryScreen();
+    QObject::connect(screen, &QScreen::geometryChanged, &root, updateScreen);
+    QTimer geometryPoll(&app);
+    geometryPoll.setInterval(750);
+    QObject::connect(&geometryPoll, &QTimer::timeout, &root, [updateScreen]() {
+        if (QScreen *current = QGuiApplication::primaryScreen())
+            updateScreen(current->geometry());
+    });
+    geometryPoll.start();
+    updateScreen(screen->geometry());
 
     // ensure the default sound folders exist — boot/ and notifications/
     QDir().mkpath(soundDirPath() + "/boot");

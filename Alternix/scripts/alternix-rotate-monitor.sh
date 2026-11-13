@@ -62,42 +62,76 @@ output_rotation() {
 # The output location/size must be included for multi-monitor layouts.
 make_matrix() {
     local rot="$1" geometry="$2" desktop="$3"
-    awk -v rot="$rot" -v g="$geometry" -v d="$desktop" 'BEGIN {
-        split(g, a, /[x+]/); split(d, b, /x/)
-        if (a[4]=="" || b[1]<=0 || b[2]<=0) exit 1
-        sx=a[1]/b[1]; sy=a[2]/b[2]; ox=a[3]/b[1]; oy=a[4]/b[2]
-        if (rot=="left")       { A=0; B=-1; C=1; D=1; E=0; F=0 }
-        else if (rot=="right") { A=0; B=1; C=0; D=-1; E=0; F=1 }
-        else if (rot=="inverted") { A=-1; B=0; C=1; D=0; E=-1; F=1 }
-        else { A=1; B=0; C=0; D=0; E=1; F=0 }
+    local width height x y dw dh
+    # XRandR geometry is WxH+X+Y (or WxH-X+Y with translated layouts).
+    # Parse with bash rather than splitting on +: negative coordinates matter
+    # when the user places a secondary monitor to the left of the tablet.
+    if [[ ! "$geometry" =~ ^([0-9]+)x([0-9]+)([+-][0-9]+)([+-][0-9]+)$ ]]; then
+        log "Unrecognized output geometry: $geometry"
+        return 1
+    fi
+    width="${BASH_REMATCH[1]}"; height="${BASH_REMATCH[2]}"
+    x="${BASH_REMATCH[3]}"; y="${BASH_REMATCH[4]}"
+    if [[ ! "$desktop" =~ ^([0-9]+)x([0-9]+)$ ]]; then
+        log "Unrecognized desktop geometry: $desktop"
+        return 1
+    fi
+    dw="${BASH_REMATCH[1]}"; dh="${BASH_REMATCH[2]}"
+    awk -v rot="$rot" -v w="$width" -v h="$height" -v x="$x" -v y="$y" \
+        -v dw="$dw" -v dh="$dh" 'BEGIN {
+        if (w<=0 || h<=0 || dw<=0 || dh<=0) exit 1
+        sx=w/dw; sy=h/dh; ox=x/dw; oy=y/dh
+        # CTM maps physical, unrotated absolute touch/pen coordinates into
+        # the logical desktop. The inverted case is a FULL 180-degree turn.
+        if (rot=="left")             { A=0; B=-1; C=1; D=1; E=0; F=0 }
+        else if (rot=="right")       { A=0; B=1; C=0; D=-1; E=0; F=1 }
+        else if (rot=="inverted")    { A=-1; B=0; C=1; D=0; E=-1; F=1 }
+        else if (rot=="normal")      { A=1; B=0; C=0; D=0; E=1; F=0 }
+        else exit 1
         printf "%.8f %.8f %.8f %.8f %.8f %.8f 0 0 1\n", sx*A,sx*B,sx*C+ox,sy*D,sy*E,sy*F+oy
     }'
 }
 
-# Identify only absolute-position touch/tablet input; never remap touchpads,
-# mice, trackpoints or keyboards. udev properties cover ambiguous device names.
+# Device names alone are not reliable (the Miix 520 may show a vendor HID
+# identifier rather than 'touchscreen' or 'pen'). Prefer udev classification;
+# fall back to XInput properties and the device's name. Never remap relative
+# mice or touchpads. Their on-screen pointer already follows display geometry.
 input_kind() {
-    local id="$1" name="$2" node udev
-    node=$(xinput list-props "$id" 2>/dev/null | sed -n 's/.*Device Node.*"\([^"]*\)".*/\1/p' | head -n1)
-    udev=""
+    local id="$1" name="$2" props node udev=''
+    props=$(xinput list-props "$id" 2>/dev/null) || props=''
+    node=$(printf '%s\n' "$props" | sed -n 's/.*Device Node.*"\([^"]*\)".*/\1/p' | head -n1)
     if [[ "$node" == /dev/input/event* ]] && command -v udevadm >/dev/null 2>&1; then
         udev=$(udevadm info --query=property --name="$node" 2>/dev/null) || :
     fi
-    case "${name,,}" in *touchpad*|*trackpoint*|*mouse*|*\ pad*) return ;; esac
-    if grep -qx 'ID_INPUT_TOUCHPAD=1' <<< "$udev"; then return; fi
     if grep -qx 'ID_INPUT_TOUCHSCREEN=1' <<< "$udev"; then printf 'touch'; return; fi
-    if grep -qx 'ID_INPUT_TABLET=1' <<< "$udev"; then printf 'pen'; return; fi
+    if grep -qxE 'ID_INPUT_(TABLET|TABLET_TOOL|STYLUS|PEN)=1' <<< "$udev"; then printf 'pen'; return; fi
+    if grep -qxE 'ID_INPUT_(TOUCHPAD|MOUSE|POINTINGSTICK|TABLET_PAD)=1' <<< "$udev"; then
+        return
+    fi
     case "${name,,}" in
-        *touchpad*|*trackpoint*|*mouse*|*virtual\ core*|*keyboard*|*pad\ pad*) return ;;
-        *touchscreen*|*touch\ screen*|*\ finger*|*multitouch*|*multi-touch*) printf 'touch' ;;
-        *stylus*|*eraser*|*digitizer*|*\ pen*|*pen\ *) printf 'pen' ;;
+        *touchpad*|*trackpoint*|*mouse*|*virtual\ core*|*xtest*|*keyboard*|*tablet\ pad*|*pad\ pad*) return ;;
+    esac
+    if [[ "$props" == *'libinput Tablet Tool Pressurecurve'* ]] ||
+       [[ "$props" == *'Wacom Tool Type'* ]]; then
+        printf 'pen'; return
+    fi
+    # Absolute-position libinput devices export a calibration matrix, even
+    # when their vendor-specific XInput name omits 'touchscreen'.
+    if [[ "$props" == *'libinput Calibration Matrix'* ]]; then
+        printf 'touch'; return
+    fi
+    case "${name,,}" in
+        *touchscreen*|*touch\ screen*|*finger*|*multitouch*|*multi-touch*|*touch\ input*) printf 'touch' ;;
+        *stylus*|*eraser*|*digitizer*|*pen*|*tablet\ tool*) printf 'pen' ;;
     esac
 }
 
 sync_input() {
     command -v xrandr >/dev/null 2>&1 || { log 'xrandr unavailable'; return 1; }
-    local output rot geometry desktop matrix wrot line id name kind
-    local wacom_ids=' '
+    command -v xinput >/dev/null 2>&1 || { log 'xinput unavailable'; return 1; }
+    local output rot geometry desktop matrix wrot line id name kind type
+    local -A wacom_processed=()
+    local total=0 failures=0
     output=$(select_output)
     [ -n "$output" ] || { log 'No connected X11 display output'; return 1; }
     geometry=$(output_geometry "$output")
@@ -108,44 +142,68 @@ sync_input() {
     matrix=$(make_matrix "$rot" "$geometry" "$desktop") || return 1
     [[ -n "$matrix" ]] || return 1
 
-    # The Wacom Xorg driver rotates the hardware axes itself. Do not also
-    # apply a rotation CTM to these devices (that would rotate them twice).
     case "$rot" in
-        left) wrot=ccw ;; right) wrot=cw ;; inverted) wrot=half ;; *) wrot=none ;;
+        left) wrot=ccw ;; right) wrot=cw ;;
+        inverted) wrot=half ;; *) wrot=none ;;
     esac
     if command -v xsetwacom >/dev/null 2>&1; then
         while IFS= read -r line; do
-            if [[ "$line" =~ id:[[:space:]]*([0-9]+) ]]; then
-                id="${BASH_REMATCH[1]}"
-                wacom_ids+="$id "
-                if ! xsetwacom set "$id" Rotate "$wrot" 2>/dev/null; then
-                    log "Wacom rotation unsupported on XInput device $id; attempting CTM"
-                    wacom_ids="${wacom_ids/ $id / }"
-                    continue
-                fi
-                xsetwacom set "$id" MapToOutput "$output" 2>/dev/null || log "MapToOutput failed for Wacom $id"
+            [[ "$line" =~ id:[[:space:]]*([0-9]+) ]] || continue
+            id="${BASH_REMATCH[1]}"
+            type="${line##*type:}"
+            type="${type,,}"
+            case "$type" in
+                *stylus*|*eraser*|*touch*|*cursor*) ;;
+                *) continue ;;    # Wacom pad buttons are not screen coordinates.
+            esac
+            # For the xf86-input-wacom driver, use its native Rotate plus
+            # MapToOutput. Do NOT add a second XInput rotation CTM on top.
+            if xsetwacom set "$id" Rotate "$wrot" >/dev/null 2>&1 && \
+               xsetwacom set "$id" MapToOutput "$output" >/dev/null 2>&1; then
+                wacom_processed[$id]=1
+                ((total+=1))
+            else
+                # If either native operation fails, reset native rotation
+                # BEFORE applying the generic CTM (avoids double-rotation).
+                xsetwacom set "$id" Rotate none >/dev/null 2>&1 || :
+                log "Wacom native orientation unavailable for ID $id; using CTM"
             fi
         done < <(xsetwacom --list devices 2>/dev/null)
     fi
 
-    if command -v xinput >/dev/null 2>&1; then
-        while IFS= read -r line; do
-            if [[ "$line" =~ id=([0-9]+) ]]; then
-                id="${BASH_REMATCH[1]}"
-                [[ "$wacom_ids" == *" $id "* ]] && continue
-                name="${line%%id=*}"
-                kind=$(input_kind "$id" "$name")
-                [ -n "$kind" ] || continue
-                # shellcheck disable=SC2086
-                xinput set-prop "$id" 'Coordinate Transformation Matrix' $matrix 2>/dev/null || log "CTM unsupported: $name ($id)"
-            fi
-        done < <(xinput --list --short 2>/dev/null)
+    while IFS= read -r line; do
+        [[ "$line" =~ id=([0-9]+) ]] || continue
+        id="${BASH_REMATCH[1]}"
+        [ -z "${wacom_processed[$id]+set}" ] || continue
+        name="${line%%id=*}"
+        kind=$(input_kind "$id" "$name")
+        [ -n "$kind" ] || continue
+        # All libinput/XInput touchscreen and tablet tools use the complete
+        # 3x3 matrix (including 180 degrees and multi-monitor offsets).
+        # An explicit float type avoids XInput interpreting 0/1 as integers.
+        # shellcheck disable=SC2086
+        if xinput set-prop --type=float "$id" 'Coordinate Transformation Matrix' $matrix 2>/dev/null; then
+            ((total+=1))
+        else
+            log "Input CTM failed for $kind $id: $name"
+            ((failures+=1))
+        fi
+    done < <(xinput --list --short 2>/dev/null)
+
+    # Explicit commands can be run in the user's own X11 session to inspect
+    # which devices actually got mapped without needing root permissions.
+    if [ "${1:-}" = verbose ]; then
+        printf 'OUTPUT=%s\nROTATION=%s\nGEOMETRY=%s\nDESKTOP=%s\nMATRIX=%s\nMAPPED=%s\nFAILED=%s\n' \
+            "$output" "$rot" "$geometry" "$desktop" "$matrix" "$total" "$failures"
     fi
-    return 0
+    if (( total == 0 )); then
+        log "No touch/pen absolute devices mapped (output $output, rotation $rot); check xinput --list"
+    fi
+    (( failures == 0 ))
 }
 
 if [ "${1:-}" = '--sync-input' ]; then
-    sync_input
+    sync_input verbose
     exit $?
 fi
 

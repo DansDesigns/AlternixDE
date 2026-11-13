@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QGraphicsDropShadowEffect>
 #include <QMouseEvent>
+#include <QTouchEvent>
 #include <QLockFile>
 #include <QDir>
 #include <QDebug>
@@ -154,6 +155,7 @@ public:
     void closeAppWindow(Window w);
     void handleEntryActivateAndClose(Window w);
     void resizeToItems(int count);
+    void syncScreenGeometry(const QRect &screen);
 
     int computeRequiredWidth(const QStringList &titles) {
         int base = 160;
@@ -306,12 +308,20 @@ void SidePanel::resizeToItems(int count) {
     const int cardH = 120;
     int h = count * cardH + 60;
 
-    h = qBound(120, h, m_maxH);
-
-    QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
-    int top = int(screenGeo.height() * 0.15);
-
+    const QRect screenGeo = QGuiApplication::primaryScreen()->geometry();
+    const int top = int(screenGeo.height() * 0.15);
+    const int available = qMax(1, screenGeo.height() - top);
+    const int maximum = qMax(1, qMin(m_maxH, available));
+    h = qBound(qMin(120, maximum), h, maximum);
+    m_width = qMin(m_width, screenGeo.width());
+    // Coordinates here are local to OverlayRoot, not global screen coordinates.
     setGeometry(0, top, m_width, h);
+}
+
+void SidePanel::syncScreenGeometry(const QRect &screen) {
+    m_maxH = qMax(1, int(screen.height() * 0.9));
+    m_width = qMin(m_width, screen.width());
+    resizeToItems(m_list ? m_list->count() : 0);
 }
 
 void SidePanel::refreshWindows() {
@@ -380,7 +390,7 @@ void SidePanel::refreshWindows() {
 
     // compute and apply width
     int needed = computeRequiredWidth(titles);
-    m_width = qMin(needed, 1080);
+    m_width = qMin(needed, qMin(1080, QGuiApplication::primaryScreen()->geometry().width()));
 
     QRect g = geometry();
     if (g.width() != m_width)
@@ -495,7 +505,20 @@ public:
         hide(); // start hidden
     }
 
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        if (m_screenGeo == g && geometry() == g) return;
+        m_screenGeo = g;
+        setGeometry(g);
+        if (!m_panel) return;
+        m_panel->syncScreenGeometry(g);
+        // The panel always enters from the *current* logical left edge.
+        if (m_panelVisible) m_panel->move(0, m_panel->y());
+        else m_panel->move(-m_panel->width(), m_panel->y());
+    }
+
     void showPanel() {
+        syncScreenGeometry(QGuiApplication::primaryScreen()->geometry());
         if (m_panelVisible) return;
         m_panelVisible = true;
 
@@ -571,9 +594,10 @@ public:
         setAttribute(Qt::WA_NoSystemBackground);
         setAttribute(Qt::WA_ShowWithoutActivating);
         setMouseTracking(true);
+        setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         QRect g = QGuiApplication::primaryScreen()->geometry();
-        setGeometry(g.x(), g.y(), 25, g.height());
+        syncScreenGeometry(g);
         setStyleSheet("background: rgba(0,0,0,0);");
 
         show();
@@ -588,7 +612,40 @@ public:
         m_raiseTimer->start();
     }
 
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        const QRect target(g.x(), g.y(), qMin(25, g.width()), g.height());
+        if (geometry() != target) setGeometry(target);
+    }
+
 protected:
+    // Native touchscreen events are not guaranteed to synthesize mouse drags.
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::TouchBegin ||
+            event->type() == QEvent::TouchUpdate ||
+            event->type() == QEvent::TouchEnd ||
+            event->type() == QEvent::TouchCancel) {
+            auto *touch = static_cast<QTouchEvent *>(event);
+            if (event->type() == QEvent::TouchBegin) {
+                if (!touch->touchPoints().isEmpty()) {
+                    m_pressPos = touch->touchPoints().first().screenPos().toPoint();
+                    m_dragging = true;
+                }
+            } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
+                       !touch->touchPoints().isEmpty()) {
+                if (touch->touchPoints().first().screenPos().x() - m_pressPos.x() > 12) {
+                    if (m_overlay) m_overlay->showPanel();
+                    m_dragging = false;
+                }
+            } else if (event->type() != QEvent::TouchUpdate) {
+                m_dragging = false;
+            }
+            event->accept();
+            return true;
+        }
+        return QWidget::event(event);
+    }
+
     void mousePressEvent(QMouseEvent *e) override {
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
@@ -646,6 +703,22 @@ int main(int argc,char**argv) {
 
     OverlayRoot root(dpy);          // overlay window
     ActivationEdgeBar bar(&root);   // always-on-top gesture edge
+
+    auto updateScreen = [&root, &bar](const QRect &g) {
+        root.syncScreenGeometry(g);
+        bar.syncScreenGeometry(g);
+    };
+    QScreen *screen = QGuiApplication::primaryScreen();
+    QObject::connect(screen, &QScreen::geometryChanged, &root, updateScreen);
+    // Fallback for X11 screen updates whose geometryChanged event was missed.
+    QTimer geometryPoll(&app);
+    geometryPoll.setInterval(750);
+    QObject::connect(&geometryPoll, &QTimer::timeout, &root, [updateScreen]() {
+        if (QScreen *current = QGuiApplication::primaryScreen())
+            updateScreen(current->geometry());
+    });
+    geometryPoll.start();
+    updateScreen(screen->geometry());
 
     int r=app.exec();
     XCloseDisplay(dpy);

@@ -1157,9 +1157,20 @@ echo "• Updating osm-launcher..."
 g++ -O3 -fPIC apps/osm-launcher.cpp -o osm-launcher $(pkg-config --cflags --libs Qt5Widgets)
 sudo install -m 755 osm-launcher /usr/local/bin/
 
-echo "• Updating osm-notify..."
-g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst
-chmod +x osm-notify && sudo mv osm-notify /usr/local/bin/
+# Keep the long-running edge-gesture services in sync with rotated screens.
+# The previous updater omitted osm-running and osm-status entirely, leaving
+# their old fixed-geometry swipe bars active even after a successful update.
+echo "• Updating osm-running (rotation-aware left edge)..."
+g++ -fPIC apps/osm-running.cpp -o osm-running -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11 || exit 1
+sudo install -m 755 osm-running /usr/local/bin/ || exit 1
+
+echo "• Updating osm-status (rotation-aware right edge)..."
+g++ -fPIC apps/osm-status.cpp -o osm-status -ldl $(pkg-config --cflags --libs Qt5Widgets Qt5DBus) -lX11 || exit 1
+sudo install -m 755 osm-status /usr/local/bin/ || exit 1
+
+echo "• Updating osm-notify (rotation-aware top swipe)..."
+g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst || exit 1
+sudo install -m 755 osm-notify /usr/local/bin/ || exit 1
 
 echo "• Updating osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
