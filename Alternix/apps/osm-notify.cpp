@@ -6,7 +6,6 @@
 #include <QLabel>
 #include <QFrame>
 #include <QScreen>
-#include <X11/Xlib.h>
 #include <QTimer>
 #include <QSocketNotifier>
 #include <QCryptographicHash>
@@ -52,6 +51,21 @@
 #include <algorithm>
 #include <QPropertyAnimation>
 
+
+// Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
+// None, Status and Unsorted that corrupt Qt5's QUrl/QTextStream/QDir enums
+// when Qt headers are parsed after Xlib (Devuan/XLibre build failure).
+#include <X11/Xlib.h>
+// These are not used by this overlay; don't leak them into Qt expressions.
+#ifdef None
+#  undef None
+#endif
+#ifdef Status
+#  undef Status
+#endif
+#ifdef Unsorted
+#  undef Unsorted
+#endif
 
 // XLibre/XRandR can change the X11 root size before Qt5 publishes the new
 // QScreen geometry.  Query the live server root for a single-display tablet;

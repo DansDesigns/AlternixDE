@@ -88,6 +88,18 @@ if ! grep -Fq 'The active rotation follows the geometry' \
     echo 'ERROR: Install the latest complete rotation monitor and controller in Alternix/scripts.' >&2
     exit 1
 fi
+# Qt/Xlib compatibility: the overlay sources must import Xlib only AFTER
+# Qt headers. Xlib's Status/None macros otherwise cause hundreds of Qt5
+# compile errors on Devuan Excalibur. Detect stale source BEFORE building.
+for alt_x11_overlay in osm-status.cpp osm-notify.cpp; do
+    alt_x11_src="$ALT_ROOT/Alternix/apps/$alt_x11_overlay"
+    if [ -s "$alt_x11_src" ] && ! grep -Fq '#  undef Status' "$alt_x11_src"; then
+        echo "ERROR: $alt_x11_src is the old Xlib/Qt header-conflicting version." >&2
+        echo "Replace it with the supplied rotation-aware source before building." >&2
+        exit 1
+    fi
+done
+
 for alt_input_ui in osm-running.cpp osm-status.cpp osm-notify.cpp; do
     if [ ! -s "$ALT_ROOT/Alternix/apps/$alt_input_ui" ] || \
        ! grep -Fq 'alternixActiveScreenGeometry' "$ALT_ROOT/Alternix/apps/$alt_input_ui"; then
