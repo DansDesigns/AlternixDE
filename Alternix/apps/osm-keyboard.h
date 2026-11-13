@@ -23,6 +23,7 @@
 #include <QWidget>
 
 #include <functional>
+#include <initializer_list>
 #include <utility>
 #include <vector>
 
@@ -139,7 +140,11 @@ public:
         if (m_compact == compact && (!compact || m_compactColumns == columns)) return;
         m_compact = compact;
         m_compactColumns = columns;
-        if (compact) m_symbols = false;
+        if (compact) {
+            m_symbols = false;
+            m_ctrl = ModifierState::Off;
+            m_super = ModifierState::Off;
+        }
         buildLayout();
     }
     int rowCount() const { return m_rowCount; }
@@ -199,6 +204,18 @@ protected:
     }
 
 private:
+    // Tap a modifier once for the next key, again to lock it, and again to
+    // release it. A different modifier does not consume the first one.
+    enum class ModifierState { Off, OneShot, Locked };
+    static bool enabled(ModifierState state) { return state != ModifierState::Off; }
+    static void advance(ModifierState &state) {
+        switch (state) {
+        case ModifierState::Off:     state = ModifierState::OneShot; break;
+        case ModifierState::OneShot: state = ModifierState::Locked;  break;
+        case ModifierState::Locked:  state = ModifierState::Off;     break;
+        }
+    }
+
     static bool raised(const OsmKeyDef &def, bool shift, bool caps) {
         // CapsLock affects letters, not punctuation/digits. Shift+Caps = lower.
         if (def.lower.size() == 1 && def.upper.size() == 1 &&
@@ -207,12 +224,24 @@ private:
         return shift;
     }
     QString face(const OsmKeyDef &def) const {
-        return raised(def, m_shift, m_caps) ? def.upper : def.lower;
+        return raised(def, enabled(m_shift), m_caps) ? def.upper : def.lower;
     }
 
     void emitKey(int qtKey, const QString &text) {
-        const Qt::KeyboardModifiers mods = m_ctrl ? Qt::ControlModifier : Qt::NoModifier;
-        if (m_ctrl) { m_ctrl = false; refreshFaces(); } // Ctrl is one-shot.
+        Qt::KeyboardModifiers mods = Qt::NoModifier;
+        if (enabled(m_shift)) mods |= Qt::ShiftModifier;
+        if (enabled(m_ctrl)) mods |= Qt::ControlModifier;
+        if (enabled(m_super)) mods |= Qt::MetaModifier;
+        // Only one-shot modifiers are consumed by a non-modifier key.
+        // Locked modifiers persist across characters, arrows, Enter, etc.
+        bool consumed = false;
+        for (ModifierState *state : {&m_shift, &m_ctrl, &m_super}) {
+            if (*state == ModifierState::OneShot) {
+                *state = ModifierState::Off;
+                consumed = true;
+            }
+        }
+        if (consumed) refreshFaces();
         if (m_modifiedKeyHandler) { m_modifiedKeyHandler(qtKey, text, mods); return; }
         if (m_keyHandler) { m_keyHandler(qtKey, text); return; }
         QWidget *target = QApplication::focusWidget();
@@ -272,6 +301,11 @@ private:
         if (def.special) {
             button->setObjectName(QStringLiteral("modKey"));
             button->setText(def.lower);
+            if (def.special == Qt::Key_Shift || def.special == Qt::Key_Control ||
+                def.special == Qt::Key_Meta || def.special == Qt::Key_CapsLock) {
+                button->setProperty("osmModifierKey", def.special);
+                button->setProperty("osmModifierLabel", def.lower);
+            }
             const int special = def.special;
             QObject::connect(button, &QPushButton::clicked, this, [this, special, button] {
                 handleSpecial(special, button);
@@ -300,7 +334,6 @@ private:
             }
             QObject::connect(button, &QPushButton::clicked, this, [this, def] {
                 emitKey(Qt::Key_unknown, face(def));
-                if (m_shift) { m_shift = false; refreshFaces(); }
             });
         }
         QObject::connect(button, &QPushButton::pressed, this, [this, button, def] {
@@ -314,11 +347,10 @@ private:
     }
 
     void handleSpecial(int key, QPushButton *button) {
+        Q_UNUSED(button);
         switch (key) {
         case Qt::Key_Shift:
-            m_shift = !m_shift;
-            button->setObjectName(m_shift ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
-            restyle(button);
+            advance(m_shift);
             refreshFaces();
             break;
         case Qt::Key_CapsLock:
@@ -331,7 +363,11 @@ private:
             if (!m_compact) { m_symbols = !m_symbols; buildLayout(); }
             break;
         case Qt::Key_Control:
-            m_ctrl = !m_ctrl;
+            advance(m_ctrl);
+            refreshFaces();
+            break;
+        case Qt::Key_Meta:
+            advance(m_super);
             refreshFaces();
             break;
         case Qt::Key_Backspace: emitKey(Qt::Key_Backspace, {}); break;
@@ -353,16 +389,28 @@ private:
     }
     void refreshFaces() {
         for (auto &pair : m_characterKeys) pair.first->setText(face(pair.second));
-        // Switching keyboard modes recreates modifier keys; keep them illuminated.
+        // Keys are re-created when switching between letter/symbol layouts.
+        // Identify modifiers by property, not by their displayed/locked text.
         for (auto *button : findChildren<QPushButton *>(QString(), Qt::FindDirectChildrenOnly)) {
-            if (button->text() == QStringLiteral("⇧") ||
-                button->text() == QStringLiteral("Caps") ||
-                button->text() == QStringLiteral("Ctrl")) {
-                const bool active = button->text() == QStringLiteral("Caps") ? m_caps :
-                                    button->text() == QStringLiteral("Ctrl") ? m_ctrl : m_shift;
-                button->setObjectName(active ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
-                restyle(button);
-            }
+            const int key = button->property("osmModifierKey").toInt();
+            const ModifierState state = key == Qt::Key_Shift ? m_shift :
+                                        key == Qt::Key_Control ? m_ctrl :
+                                        key == Qt::Key_Meta ? m_super : ModifierState::Off;
+            if (key != Qt::Key_Shift && key != Qt::Key_Control &&
+                key != Qt::Key_Meta && key != Qt::Key_CapsLock) continue;
+            const bool locked = state == ModifierState::Locked;
+            const bool oneShot = state == ModifierState::OneShot;
+            const bool active = key == Qt::Key_CapsLock ? m_caps : enabled(state);
+            const QString label = button->property("osmModifierLabel").toString();
+            button->setText(locked ? label + QStringLiteral("\n🔒") : label);
+            button->setObjectName(locked ? QStringLiteral("modKeyLocked") :
+                                  active ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
+            button->setToolTip(key == Qt::Key_CapsLock ?
+                (active ? QStringLiteral("Caps Lock on") : QStringLiteral("Caps Lock off")) :
+                (locked ? QStringLiteral("Locked — tap again to release") :
+                 oneShot ? QStringLiteral("Next key only — tap again to lock") :
+                           QStringLiteral("Tap once for next key; twice to lock")));
+            restyle(button);
         }
     }
     void clearGrid() {
@@ -415,6 +463,8 @@ private:
             "QWidget#osmKeyboard QPushButton:pressed { background:%4; color:#ffffff; }"
             "QWidget#osmKeyboard QPushButton#modKey { background:%5; color:%8; font-size:%9px; }"
             "QWidget#osmKeyboard QPushButton#modKeyOn { background:%4; color:#ffffff; font-size:%9px; }"
+            "QWidget#osmKeyboard QPushButton#modKeyLocked { background:%4; color:#ffffff;"
+            "border:3px solid %3; font-size:%9px; font-weight:700; }"
             "QLabel#osmShiftLegend { background:transparent; color:%8; border:0;"
             "font-size:%11px; padding:0; }"
             "QLabel#osmKeyboardPopup { background:%4; color:#ffffff; border:2px solid %6;"
@@ -446,7 +496,6 @@ private:
             {"1", "!"}, {"2", "\""}, {"3", "£"}, {"4", "$"}, {"5", "%"},
             {"6", "^"}, {"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"}
         };
-        Pair numberExtra{"-", "_"};  // Replaces the former ` / ¬ key.
         Pair homeExtra{"'", "@"};
         std::vector<Pair> punctuation{{",", "<"}, {".", ">"}, {"/", "?"}};
         QString top = QStringLiteral("qwertyuiop");
@@ -504,8 +553,10 @@ private:
         }
 
         std::vector<std::vector<OsmKeyDef>> rows(5);
+        // ?123 moves into the first position; the ten regional numbers move
+        // right one place; '-' remains available on the symbol page only.
+        rows[0].push_back(s(QStringLiteral("?123"), Qt::Key_Mode_switch));
         for (const auto &pair : numbers) rows[0].push_back(k(pair.first, pair.second));
-        rows[0].push_back(k(numberExtra.first, numberExtra.second));
         rows[0].push_back(s(QStringLiteral("⌫"), Qt::Key_Backspace));
 
         rows[1].push_back(s(QStringLiteral("Tab"), Qt::Key_Tab));
@@ -536,9 +587,9 @@ private:
             rows[3].push_back(k(punctuation[i].first, punctuation[i].second));
         rows[3].push_back(s(QStringLiteral("↑"), Qt::Key_Up));
 
-        // Ctrl takes the former Hide position; Hide moves to Settings' slot.
+        // Ctrl and Super sit together at the left; ?123 is now on row 0.
         rows[4] = {s(QStringLiteral("Ctrl"), Qt::Key_Control),
-                   s(QStringLiteral("?123"), Qt::Key_Mode_switch),
+                   s(QStringLiteral("Win"), Qt::Key_Meta),
                    s(QStringLiteral("Hide"), OSM_KEY_HIDE),
                    s(QStringLiteral("space"), Qt::Key_Space, 10),
                    k("/", "?"),
@@ -564,9 +615,10 @@ private:
         else if (locale == QLatin1String("pt")) extra = k("ã", "Ã");
         else if (locale == QLatin1String("se")) extra = k("å", "Å");
         return {
-            {k("1","1"), k("2","2"), k("3","3"), k("4","4"), k("5","5"),
+            {s(QStringLiteral("abc"), Qt::Key_Mode_switch),
+             k("1","1"), k("2","2"), k("3","3"), k("4","4"), k("5","5"),
              k("6","6"), k("7","7"), k("8","8"), k("9","9"), k("0","0"),
-             k("=","+"), s(QStringLiteral("⌫"), Qt::Key_Backspace)},
+             s(QStringLiteral("⌫"), Qt::Key_Backspace)},
             {s(QStringLiteral("Tab"), Qt::Key_Tab), k("!","!"), k("@","@"), k("#","#"),
              k("$","$"), k("%","%"), k("^","^"), k("&","&"),
              k("*","*"), k("(","("), k(")",")"), s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE)},
@@ -578,7 +630,7 @@ private:
              k("'","'"), k("\"","\""), k(",",","), k(".","."),
              s(QStringLiteral("↑"), Qt::Key_Up), k("?","?"), k("<","<"), k(">",">")},
             {s(QStringLiteral("Ctrl"), Qt::Key_Control),
-             s(QStringLiteral("abc"), Qt::Key_Mode_switch),
+             s(QStringLiteral("Win"), Qt::Key_Meta),
              s(QStringLiteral("Hide"), OSM_KEY_HIDE),
              s(QStringLiteral("space"), Qt::Key_Space, 10),
              k("/", "?"),
@@ -661,8 +713,9 @@ private:
     std::vector<std::pair<QPushButton *, OsmKeyDef>> m_characterKeys;
     OsmKeyboardSettings m_style;
     int m_popupSerial = 0;
-    bool m_shift = false;
-    bool m_ctrl = false;
+    ModifierState m_shift = ModifierState::Off;
+    ModifierState m_ctrl = ModifierState::Off;
+    ModifierState m_super = ModifierState::Off;
     bool m_caps = false;
     bool m_compact = false;
     int m_compactColumns = 10;
