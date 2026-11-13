@@ -1,7 +1,7 @@
 // AlternixOS — standalone OS-wide osm-keyboard for Qtile/X11.
 // Build with AT-SPI (automatic text-field detection):
 //   g++ -std=c++17 -O2 -fPIC -DOSM_USE_ATSPI osm-keyboard.cpp -o osm-keyboard \
-//       $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2)
+//       $(pkg-config --cflags --libs Qt5Widgets Qt5Network x11 xtst atspi-2 gobject-2.0)
 // Without AT-SPI, omit -DOSM_USE_ATSPI and atspi-2: --toggle/--show still work.
 // No root, no moc, no helper scripts.
 #include "osm-keyboard.h"
@@ -73,6 +73,8 @@ public:
         case Qt::Key_Tab: sym = XK_Tab; break;
         case Qt::Key_Space: sym = XK_space; break;
         case Qt::Key_Left: sym = XK_Left; break;
+        case Qt::Key_Up: sym = XK_Up; break;
+        case Qt::Key_Down: sym = XK_Down; break;
         case Qt::Key_Right: sym = XK_Right; break;
         default:
             if (text.size() != 1) return;
@@ -101,7 +103,15 @@ public:
             }
         }
         if (!code) {
-            qWarning() << "osm-keyboard: symbol not available in current XKB layout:" << text;
+            // OS-wide XTest can only press keys exposed by XKB. For the
+            // regional virtual presets, use Unicode hex entry as a fallback
+            // when a character is not mapped. Supported by GTK and many Qt
+            // editors; some applications do not implement this input method.
+            if (qtKey == Qt::Key_unknown && !text.isEmpty() && !unicodeInProgress_) {
+                typeUnicode(text);
+            } else {
+                qWarning() << "osm-keyboard: unmapped X11 key:" << qtKey << text;
+            }
             return;
         }
         const bool shift = (level & 1) != 0;
@@ -121,7 +131,34 @@ public:
         XFlush(display_);
     }
 private:
+    void typeUnicode(const QString &value) {
+        const KeyCode ctrl = XKeysymToKeycode(display_, XK_Control_L);
+        const KeyCode shift = XKeysymToKeycode(display_, XK_Shift_L);
+        const KeyCode u = XKeysymToKeycode(display_, XK_u);
+        if (!ctrl || !shift || !u) {
+            qWarning() << "osm-keyboard: Unicode input method unavailable:" << value;
+            return;
+        }
+        // X11 itself does not insert arbitrary Unicode text using XTest.
+        // Ctrl+Shift+U is the standard GTK Unicode composition sequence and
+        // works in many, but not every, X11 text editor. Prevent recursive
+        // fallback if a hexadecimal key is missing on an unusual XKB map.
+        unicodeInProgress_ = true;
+        for (const QChar ch : value) {
+            XTestFakeKeyEvent(display_, ctrl, True, CurrentTime);
+            XTestFakeKeyEvent(display_, shift, True, CurrentTime);
+            XTestFakeKeyEvent(display_, u, True, CurrentTime);
+            XTestFakeKeyEvent(display_, u, False, CurrentTime);
+            XTestFakeKeyEvent(display_, shift, False, CurrentTime);
+            XTestFakeKeyEvent(display_, ctrl, False, CurrentTime);
+            for (const QChar digit : QString::number(ch.unicode(), 16))
+                send(Qt::Key_unknown, QString(digit));
+            send(Qt::Key_Return, {});
+        }
+        unicodeInProgress_ = false;
+    }
     Display *display_ = nullptr;
+    bool unicodeInProgress_ = false;
 };
 
 class KeyboardWindow : public QWidget {
@@ -151,12 +188,15 @@ public:
             if (!shown && isVisible() && !rebuilding_) hideWindow(true);
         });
         QTimer::singleShot(0, this, [this] { keyboard_->hide(); });
+        // Detect physical screen geometry changes (e.g. auto-rotation), NOT
+        // Qtile's availableGeometry: the latter includes our own reservation.
+        // Never re-publish a strut periodically: Qtile accumulates each update.
         auto *displayTimer = new QTimer(this);
         displayTimer->setInterval(1000);
         connect(displayTimer, &QTimer::timeout, this, [this] {
-            if (isVisible()) {
-                reposition();
-                if (prefs_.docked && prefs_.reserveSpace) updateStrut(true);
+            if (isVisible() && !remapping_ && targetScreen_ &&
+                targetScreen_->geometry() != lastScreenGeometry_) {
+                remapForGeometryChange();
             }
         });
         displayTimer->start();
@@ -171,7 +211,13 @@ public:
         } else if (keyboard_->userHidden()) {
             return;
         }
-        if (!isVisible()) {
+        // Focus events may ask us to show repeatedly; do not re-map or re-send
+        // _NET_WM_STRUT_PARTIAL for an already mapped Qtile dock.
+        if (isVisible()) {
+            if (!keyboard_->isVisible()) keyboard_->show();
+            return;
+        }
+        if (!targetScreen_ || explicitRequest) {
             targetScreen_ = QGuiApplication::screenAt(QCursor::pos());
             if (!targetScreen_) targetScreen_ = QGuiApplication::primaryScreen();
         }
@@ -179,26 +225,25 @@ public:
         if (!keyboard_->isVisible()) keyboard_->show();
         reposition();
         setWindowOpacity(prefs_.opacity / 100.0);
-        if (!isVisible()) {
-            // Set WM_HINTS InputHint=False before the window is mapped,
-            // otherwise some WMs briefly focus the keyboard on first show.
-            applyX11WindowHints();
-            show();
-        }
         applyX11WindowHints();
-        if (prefs_.docked && prefs_.reserveSpace) updateStrut(true);
+        // Publish the strut BEFORE mapping so Qtile reads it once when managing
+        // the window. Never mutate the strut while Qtile is managing this dock.
+        prepareStrutBeforeMap();
+        show();
         rebuilding_ = false;
     }
     void hideWindow(bool explicitRequest = true) {
         if (explicitRequest) {
             manualShown_ = false;
-            // Avoid reentering hideWindow from keyboard_->hideEvent().
             rebuilding_ = true;
             keyboard_->hideByUser();
             rebuilding_ = false;
         }
+        if (!isVisible()) return;
         rebuilding_ = true;
-        updateStrut(false);
+        // Important: leave strut properties in place until the UnmapNotify.
+        // Qtile frees the dock's reserved space when it unmanages the window;
+        // deleting the property before unmapping can lose that accounting.
         hide();
         rebuilding_ = false;
     }
@@ -206,7 +251,7 @@ public:
 
     void autoFocusChange(bool editable) {
         ++focusSerial_;
-        if (!prefs_.autoShow || manualShown_ || settingsOpen_) return;
+        if (!prefs_.autoShow || manualShown_ || settingsOpen_ || remapping_) return;
         if (editable) {
             // A deliberate Hide must persist until the taskbar reopens it.
             if (keyboard_->userHidden()) return;
@@ -290,6 +335,30 @@ public:
         form1->addRow(QStringLiteral("Opacity"), opacity);
         tabs->addTab(appearance, QStringLiteral("Appearance"));
 
+        auto *layoutPage = new QWidget(tabs);
+        auto *layoutForm = new QFormLayout(layoutPage);
+        auto *regional = new QComboBox(layoutPage);
+        regional->addItem(QStringLiteral("United Kingdom (QWERTY)"), "uk");
+        regional->addItem(QStringLiteral("United States (QWERTY)"), "us");
+        regional->addItem(QStringLiteral("EU International (accents)"), "intl");
+        regional->addItem(QStringLiteral("French (AZERTY)"), "fr");
+        regional->addItem(QStringLiteral("German (QWERTZ)"), "de");
+        regional->addItem(QStringLiteral("Spanish (QWERTY)"), "es");
+        regional->addItem(QStringLiteral("Italian (QWERTY)"), "it");
+        regional->addItem(QStringLiteral("Portuguese (QWERTY)"), "pt");
+        regional->addItem(QStringLiteral("Swedish (QWERTY)"), "se");
+        const int currentLayout = regional->findData(editing.layout);
+        regional->setCurrentIndex(currentLayout < 0 ? 0 : currentLayout);
+        layoutForm->addRow(QStringLiteral("Keyboard layout"), regional);
+        auto *layoutNote = new QLabel(QStringLiteral(
+            "Changes the on-screen key arrangement only. Your physical keyboard "
+            "and system XKB layout are not changed. Accented characters not "
+            "in the active XKB layout use a Unicode input-method fallback, "
+            "which depends on the application."), layoutPage);
+        layoutNote->setWordWrap(true);
+        layoutForm->addRow(layoutNote);
+        tabs->addTab(layoutPage, QStringLiteral("Layouts"));
+
         auto *behaviour = new QWidget(tabs);
         auto *form2 = new QFormLayout(behaviour);
         auto *pop = new QCheckBox(QStringLiteral("Show enlarged key while pressed"), behaviour);
@@ -333,6 +402,7 @@ public:
         const bool accepted = dialog.exec() == QDialog::Accepted;
         if (accepted) {
             editing.theme = theme->currentText();
+            editing.layout = regional->currentData().toString();
             editing.keyHeight = size->value();
             editing.fontSize = font->value();
             editing.opacity = opacity->value();
@@ -341,17 +411,21 @@ public:
             editing.autoShow = autoShow->isChecked();
             editing.docked = dock->isChecked();
             editing.reserveSpace = reserve->isChecked();
+            // Qtile reservations cannot safely be updated while a dock is
+            // mapped. Unmap first, then re-map with the new geometry/strut.
+            const bool reopen = isVisible();
+            if (reopen) hideWindow(false);
             prefs_ = editing;
             prefs_.save();
             rebuilding_ = true;
-            updateStrut(false);
             keyboard_->setSettings(prefs_);
             rebuilding_ = false;
-            if (isVisible()) {
-                reposition();
-                setWindowOpacity(prefs_.opacity / 100.0);
-                applyX11WindowHints();
-                updateStrut(prefs_.docked && prefs_.reserveSpace);
+            if (reopen) {
+                remapping_ = true;
+                QTimer::singleShot(180, this, [this] {
+                    remapping_ = false;
+                    showWindow(false);
+                });
             }
         }
         settingsOpen_ = false;
@@ -363,6 +437,7 @@ private:
         if (!screen) screen = QGuiApplication::primaryScreen();
         if (!screen) return;
         const QRect rect = screen->geometry();
+        lastScreenGeometry_ = rect;
         const int margin = 4;
         const int height = 5 * prefs_.keyHeight + 4 * 4 + 12 + 2;
         if (prefs_.docked) {
@@ -405,22 +480,28 @@ private:
         XFlush(d);
     }
 
-    void updateStrut(bool active) {
+    void remapForGeometryChange() {
+        if (!isVisible() || remapping_) return;
+        remapping_ = true;
+        hideWindow(false);
+        // Allow Qtile to unmanage the previous dock before mapping again.
+        QTimer::singleShot(180, this, [this] {
+            remapping_ = false;
+            showWindow(false);
+        });
+    }
+
+    void prepareStrutBeforeMap() {
         Display *d = sender_.display();
         if (!d) return;
         const Window w = static_cast<Window>(winId());
         const Atom strut = XInternAtom(d, "_NET_WM_STRUT", False);
         const Atom partial = XInternAtom(d, "_NET_WM_STRUT_PARTIAL", False);
-        if (!active || !prefs_.docked || !isVisible()) {
-            XDeleteProperty(d, w, strut);
-            XDeleteProperty(d, w, partial);
-            XFlush(d);
-            return;
-        }
-        // EWMH bottom struts are root-screen-relative. Do not reserve an
-        // unrelated monitor's edge when the keyboard is on an upper monitor.
         const int rootHeight = DisplayHeight(d, DefaultScreen(d));
-        if (geometry().bottom() != rootHeight - 1) {
+        // An EWMH bottom strut is root-relative. A secondary/upper screen
+        // cannot advertise a full root-bottom reservation.
+        if (!prefs_.docked || !prefs_.reserveSpace ||
+            geometry().bottom() != rootHeight - 1) {
             XDeleteProperty(d, w, strut);
             XDeleteProperty(d, w, partial);
             XFlush(d);
@@ -445,7 +526,9 @@ private:
     bool manualShown_ = false;
     bool settingsOpen_ = false;
     bool rebuilding_ = false;
+    bool remapping_ = false;
     int focusSerial_ = 0;
+    QRect lastScreenGeometry_;
     QPointer<QScreen> targetScreen_;
 };
 

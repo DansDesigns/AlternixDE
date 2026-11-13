@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QSettings>
+#include <QStringList>
 #include <QShowEvent>
 #include <QSizePolicy>
 #include <QStyle>
@@ -35,10 +36,12 @@ struct OsmKeyDef {
     QString upper;
     int span = 2;
     int special = 0;
+    int rowSpan = 1; // Enter occupies both the home and lower letter rows.
 };
 
 struct OsmKeyboardSettings {
     QString theme = QStringLiteral("Dark");
+    QString layout = QStringLiteral("uk"); // On-screen arrangement, not host XKB setting.
     QColor accent = QColor(QStringLiteral("#4a90d9"));
     QColor customBackground = QColor(QStringLiteral("#1e1e1e"));
     QColor customKeys = QColor(QStringLiteral("#383838"));
@@ -56,6 +59,11 @@ struct OsmKeyboardSettings {
         QSettings s(QStringLiteral("AlternixOS"), QStringLiteral("osm-keyboard"));
         OsmKeyboardSettings p;
         p.theme = s.value(QStringLiteral("theme"), p.theme).toString();
+        p.layout = s.value(QStringLiteral("layout"), p.layout).toString().toLower();
+        if (!QStringList{QStringLiteral("uk"), QStringLiteral("us"), QStringLiteral("intl"),
+                         QStringLiteral("fr"), QStringLiteral("de"), QStringLiteral("es"),
+                         QStringLiteral("it"), QStringLiteral("pt"), QStringLiteral("se")}.contains(p.layout))
+            p.layout = QStringLiteral("uk");
         if (p.theme != QLatin1String("Dark") &&
             p.theme != QLatin1String("Light") &&
             p.theme != QLatin1String("Midnight") &&
@@ -82,6 +90,7 @@ struct OsmKeyboardSettings {
     void save() const {
         QSettings s(QStringLiteral("AlternixOS"), QStringLiteral("osm-keyboard"));
         s.setValue(QStringLiteral("theme"), theme);
+        s.setValue(QStringLiteral("layout"), layout);
         s.setValue(QStringLiteral("accent"), accent);
         s.setValue(QStringLiteral("customBackground"), customBackground);
         s.setValue(QStringLiteral("customKeys"), customKeys);
@@ -277,6 +286,8 @@ private:
         case Qt::Key_Tab: emitKey(Qt::Key_Tab, {}); break;
         case Qt::Key_Space: emitKey(Qt::Key_Space, QStringLiteral(" ")); break;
         case Qt::Key_Left: emitKey(Qt::Key_Left, {}); break;
+        case Qt::Key_Up: emitKey(Qt::Key_Up, {}); break;
+        case Qt::Key_Down: emitKey(Qt::Key_Down, {}); break;
         case Qt::Key_Right: emitKey(Qt::Key_Right, {}); break;
         case OSM_KEY_HIDE: hideByUser(); break;
         case OSM_KEY_CUSTOMISE: if (m_onCustomise) m_onCustomise(); break;
@@ -291,8 +302,10 @@ private:
         for (auto &pair : m_characterKeys) pair.first->setText(face(pair.second));
         // Switching keyboard modes recreates modifier keys; keep them illuminated.
         for (auto *button : findChildren<QPushButton *>(QString(), Qt::FindDirectChildrenOnly)) {
-            if (button->text() == QStringLiteral("⇧")) {
-                button->setObjectName(m_shift ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
+            if (button->text() == QStringLiteral("⇧") ||
+                button->text() == QStringLiteral("Caps")) {
+                const bool active = button->text() == QStringLiteral("Caps") ? m_caps : m_shift;
+                button->setObjectName(active ? QStringLiteral("modKeyOn") : QStringLiteral("modKey"));
                 restyle(button);
             }
         }
@@ -308,15 +321,17 @@ private:
     }
     void buildLayout() {
         clearGrid();
-        const auto rows = m_symbols ? symbolRows() : letterRows();
+        const auto rows = m_symbols ? symbolRows() : letterRows(m_style.layout);
+        // 24 columns = 12 ordinary keys. Enter begins on row 2 and occupies
+        // the same final two columns of rows 2 and 3.
         for (int row = 0; row < static_cast<int>(rows.size()); ++row) {
             int column = 0;
             for (const OsmKeyDef &def : rows[row]) {
-                m_grid->addWidget(makeKey(def), row, column, 1, def.span);
+                m_grid->addWidget(makeKey(def), row, column, def.rowSpan, def.span);
                 column += def.span;
             }
         }
-        for (int col = 0; col < 20; ++col) m_grid->setColumnStretch(col, 1);
+        for (int col = 0; col < 24; ++col) m_grid->setColumnStretch(col, 1);
         refreshFaces();
     }
     void applyStyle() {
@@ -351,49 +366,150 @@ private:
         setStyleSheet(style);
     }
 
-    static std::vector<std::vector<OsmKeyDef>> letterRows() {
-        auto k = [](const char *a, const char *b) {
-            return OsmKeyDef{QString::fromUtf8(a), QString::fromUtf8(b), 2, 0};
+    // These presets change the visible virtual keyboard. They NEVER call
+    // setxkbmap or overwrite the user's physical keyboard configuration.
+    // Unicode letters absent from the current XKB keymap require an input-method
+    // fallback in the OS-wide X11 backend (not all applications support it).
+    static std::vector<std::vector<OsmKeyDef>> letterRows(const QString &locale) {
+        auto k = [](const QString &lo, const QString &up) {
+            return OsmKeyDef{lo, up, 2, 0};
         };
-        return {
-            {k("1","!"), k("2","\""), k("3","#"), k("4","$"), k("5","%"),
-             k("6","^"), k("7","&"), k("8","*"), k("9","("), k("0",")")},
-            {k("q","Q"), k("w","W"), k("e","E"), k("r","R"), k("t","T"),
-             k("y","Y"), k("u","U"), k("i","I"), k("o","O"), k("p","P")},
-            {k("a","A"), k("s","S"), k("d","D"), k("f","F"), k("g","G"),
-             k("h","H"), k("j","J"), k("k","K"), k("l","L"),
-             {QStringLiteral("⌫"), {}, 2, Qt::Key_Backspace}},
-            {{QStringLiteral("⇧"), {}, 3, Qt::Key_Shift},
-             k("z","Z"), k("x","X"), k("c","C"), k("v","V"), k("b","B"),
-             k("n","N"), k("m","M"), {QStringLiteral("↵"), {}, 3, Qt::Key_Return}},
-            {{QStringLiteral("?123"), {}, 3, Qt::Key_Mode_switch},
-             k("-","_"), k("@","~"), {QStringLiteral("space"), {}, 5, Qt::Key_Space},
-             k(".",","), {QStringLiteral("←"), {}, 1, Qt::Key_Left},
-             {QStringLiteral("→"), {}, 1, Qt::Key_Right},
-             {QStringLiteral("⚙"), {}, 2, OSM_KEY_CUSTOMISE},
-             {QStringLiteral("Hide"), {}, 2, OSM_KEY_HIDE}}
+        auto s = [](const QString &face, int key, int span = 2, int rows = 1) {
+            return OsmKeyDef{face, {}, span, key, rows};
         };
+        using Pair = std::pair<QString, QString>;
+        std::vector<Pair> numbers{
+            {"1", "!"}, {"2", "\""}, {"3", "£"}, {"4", "$"}, {"5", "%"},
+            {"6", "^"}, {"7", "&"}, {"8", "*"}, {"9", "("}, {"0", ")"}
+        };
+        Pair numberExtra{"`", "¬"};
+        Pair topExtra{"[", "{"};
+        Pair homeExtra{"'", "@"};
+        std::vector<Pair> punctuation{{",", "<"}, {".", ">"}, {"/", "?"}};
+        QString top = QStringLiteral("qwertyuiop");
+        QString home = QStringLiteral("asdfghjkl");
+        QString lower = QStringLiteral("zxcvbnm");
+
+        if (locale == QLatin1String("us") || locale == QLatin1String("intl")) {
+            numbers[1].second = "@";
+            numbers[2].second = "#";
+            numberExtra = {"`", "~"};
+            homeExtra = {"'", "\""};
+            if (locale == QLatin1String("intl")) {
+                numberExtra = {"ü", "Ü"};
+                topExtra = {"é", "É"};
+                homeExtra = {"ñ", "Ñ"};
+            }
+        } else if (locale == QLatin1String("fr")) {
+            numbers = {{"&", "1"}, {"é", "2"}, {"\"", "3"}, {"'", "4"},
+                       {"(", "5"}, {"-", "6"}, {"è", "7"}, {"_", "8"},
+                       {"ç", "9"}, {"à", "0"}};
+            numberExtra = {"²", "³"};
+            top = QStringLiteral("azertyuiop");
+            home = QStringLiteral("qsdfghjkl");
+            lower = QStringLiteral("wxcvbnm");
+            topExtra = {"^", "¨"};
+            homeExtra = {"m", "M"};
+            punctuation = {{",", "?"}, {";", "."}, {":", "/"}};
+        } else if (locale == QLatin1String("de")) {
+            numbers[2].second = "§";
+            numberExtra = {"ö", "Ö"};
+            top = QStringLiteral("qwertzuiop");
+            lower = QStringLiteral("yxcvbnm");
+            topExtra = {"ü", "Ü"};
+            homeExtra = {"ä", "Ä"};
+            punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
+        } else if (locale == QLatin1String("es")) {
+            numberExtra = {"¿", "¡"};
+            topExtra = {"´", "¨"};
+            homeExtra = {"ñ", "Ñ"};
+            punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
+        } else if (locale == QLatin1String("it")) {
+            numberExtra = {"à", "À"};
+            topExtra = {"è", "é"};
+            homeExtra = {"ò", "ç"};
+            punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
+        } else if (locale == QLatin1String("pt")) {
+            numberExtra = {"õ", "Õ"};
+            topExtra = {"ã", "Ã"};
+            homeExtra = {"ç", "Ç"};
+            punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
+        } else if (locale == QLatin1String("se")) {
+            numberExtra = {"ä", "Ä"};
+            topExtra = {"å", "Å"};
+            homeExtra = {"ö", "Ö"};
+            punctuation = {{",", ";"}, {".", ":"}, {"-", "_"}};
+        }
+
+        std::vector<std::vector<OsmKeyDef>> rows(5);
+        for (const auto &pair : numbers) rows[0].push_back(k(pair.first, pair.second));
+        rows[0].push_back(k(numberExtra.first, numberExtra.second));
+        rows[0].push_back(s(QStringLiteral("⌫"), Qt::Key_Backspace));
+
+        rows[1].push_back(s(QStringLiteral("Tab"), Qt::Key_Tab));
+        for (const QChar letter : top) {
+            const QString c(letter);
+            rows[1].push_back(k(c, c.toUpper()));
+        }
+        rows[1].push_back(k(topExtra.first, topExtra.second));
+
+        rows[2].push_back(s(QStringLiteral("Caps"), Qt::Key_CapsLock));
+        for (const QChar letter : home) {
+            const QString c(letter);
+            rows[2].push_back(k(c, c.toUpper()));
+        }
+        rows[2].push_back(k(homeExtra.first, homeExtra.second));
+        rows[2].push_back(s(QStringLiteral("↵"), Qt::Key_Return, 2, 2));
+
+        rows[3].push_back(s(QStringLiteral("⇧"), Qt::Key_Shift));
+        for (const QChar letter : lower) {
+            const QString c(letter);
+            rows[3].push_back(k(c, c.toUpper()));
+        }
+        for (const auto &pair : punctuation) rows[3].push_back(k(pair.first, pair.second));
+
+        // ?123 and Hide are each exactly the width of a normal letter key.
+        // Space takes 5 keys' width, and the four cursor keys have full width.
+        rows[4] = {s(QStringLiteral("?123"), Qt::Key_Mode_switch),
+                   s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+                   s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
+                   s(QStringLiteral("space"), Qt::Key_Space, 10),
+                   s(QStringLiteral("←"), Qt::Key_Left),
+                   s(QStringLiteral("↑"), Qt::Key_Up),
+                   s(QStringLiteral("↓"), Qt::Key_Down),
+                   s(QStringLiteral("→"), Qt::Key_Right)};
+        return rows;
     }
+
     static std::vector<std::vector<OsmKeyDef>> symbolRows() {
-        auto k = [](const char *a, const char *b) {
-            return OsmKeyDef{QString::fromUtf8(a), QString::fromUtf8(b), 2, 0};
+        auto k = [](const QString &lo, const QString &up) {
+            return OsmKeyDef{lo, up, 2, 0};
+        };
+        auto s = [](const QString &face, int key, int span = 2, int rows = 1) {
+            return OsmKeyDef{face, {}, span, key, rows};
         };
         return {
             {k("1","1"), k("2","2"), k("3","3"), k("4","4"), k("5","5"),
-             k("6","6"), k("7","7"), k("8","8"), k("9","9"), k("0","0")},
-            {k("!","!"), k("@","@"), k("#","#"), k("$","$"), k("%","%"),
-             k("^","^"), k("&","&"), k("*","*"), k("(","("), k(")",")")},
-            {k("-","-"), k("_","_"), k("=","="), k("+","+"), k("[","["),
-             k("]","]"), k("{","{"), k("}","}"), k("\\","\\"),
-             {QStringLiteral("⌫"), {}, 2, Qt::Key_Backspace}},
-            {k(";",";"), k(":",":"), k("'","'"), k("\"","\""), k(",",","),
-             k(".","."), k("/","/"), k("?","?"),
-             {QStringLiteral("↵"), {}, 4, Qt::Key_Return}},
-            {{QStringLiteral("abc"), {}, 3, Qt::Key_Mode_switch},
-             k("<","<"), k(">",">"), {QStringLiteral("space"), {}, 5, Qt::Key_Space},
-             k("|","|"), k("`","`"),
-             {QStringLiteral("⚙"), {}, 2, OSM_KEY_CUSTOMISE},
-             {QStringLiteral("Hide"), {}, 2, OSM_KEY_HIDE}}
+             k("6","6"), k("7","7"), k("8","8"), k("9","9"), k("0","0"),
+             k("=","+"), s(QStringLiteral("⌫"), Qt::Key_Backspace)},
+            {s(QStringLiteral("Tab"), Qt::Key_Tab), k("!","!"), k("@","@"), k("#","#"),
+             k("$","$"), k("%","%"), k("^","^"), k("&","&"),
+             k("*","*"), k("(","("), k(")",")"), k("[","{")},
+            {s(QStringLiteral("Caps"), Qt::Key_CapsLock), k("-","-"), k("_","_"),
+             k("=","="), k("+","+"), k("[","["), k("]","]"), k("{","{"),
+             k("}","}"), k("\\","\\"), k("'","\""),
+             s(QStringLiteral("↵"), Qt::Key_Return, 2, 2)},
+            {s(QStringLiteral("⇧"), Qt::Key_Shift), k(";",";"), k(":",":"),
+             k("'","'"), k("\"","\""), k(",",","), k(".","."), k("/","/"),
+             k("?","?"), k("<","<"), k(">",">")},
+            {s(QStringLiteral("abc"), Qt::Key_Mode_switch),
+             s(QStringLiteral("Hide"), OSM_KEY_HIDE),
+             s(QStringLiteral("⚙"), OSM_KEY_CUSTOMISE),
+             s(QStringLiteral("space"), Qt::Key_Space, 10),
+             s(QStringLiteral("←"), Qt::Key_Left),
+             s(QStringLiteral("↑"), Qt::Key_Up),
+             s(QStringLiteral("↓"), Qt::Key_Down),
+             s(QStringLiteral("→"), Qt::Key_Right)}
         };
     }
 
