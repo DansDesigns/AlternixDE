@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
-import os
-import configparser
-import subprocess
+"""Restore osm-paper wallpaper on every XRandR screen geometry change.
 
-# The same configuration file used by osm-paper and osm-lockscreen.
+Qtile's screens_reconfigured hook starts this utility after the output size
+has settled. --clear deliberately discards the old pseudo-transparency root
+pixmap; reusing its landscape dimensions after portrait rotation leaves
+unpainted regions and compositor artefacts.
+"""
+import configparser
+import os
+import subprocess
+import sys
+
 config_path = os.path.expanduser("~/.config/Alternix/osm-paper.conf")
 if not os.path.isfile(config_path):
     raise SystemExit(0)
 
 cfg = configparser.ConfigParser(interpolation=None)
 try:
-    cfg.read(config_path)
+    cfg.read(config_path, encoding="utf-8")
     if not cfg.has_section("last"):
         raise SystemExit(0)
     wall = os.path.expanduser(cfg.get("last", "wallpaper", fallback="").strip())
-    mode = cfg.get("last", "mode", fallback="zoom").strip()
+    mode = cfg.get("last", "mode", fallback="zoom").strip().lower()
 except (OSError, configparser.Error):
     raise SystemExit(0)
 
@@ -22,10 +29,28 @@ if not wall or not os.path.isfile(wall):
     raise SystemExit(0)
 
 mode_map = {
-    "zoom":   "--zoom",
-    "fit":    "--stretch",
-    "tile":   "--tile",
+    "zoom": "--zoom",
+    "fit": "--stretch",
+    "tile": "--tile",
     "center": "--center",
 }
 
-subprocess.Popen(["xwallpaper", mode_map.get(mode, "--zoom"), wall])
+# xwallpaper uses RandR to rescale individually for ALL connected outputs.
+# --clear prevents the previous-sized root pixmap being used as the base;
+# this also fills uncovered regions for center mode rather than leaving junk.
+try:
+    result = subprocess.run(
+        ["xwallpaper", "--clear", mode_map.get(mode, "--zoom"), wall],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=20,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired) as exc:
+    print("osm-paper-restore: unable to redraw wallpaper: " + str(exc), file=sys.stderr)
+    raise SystemExit(1)
+if result.returncode:
+    print("osm-paper-restore: xwallpaper exited with status " + str(result.returncode) +
+          ": " + result.stderr.decode("utf-8", "replace").strip(), file=sys.stderr)
+raise SystemExit(result.returncode)
