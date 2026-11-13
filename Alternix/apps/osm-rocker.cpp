@@ -317,16 +317,9 @@ private:
     }
 
     void openPowerMenu() {
-        // Launch the AlternixOS power application directly instead of relying
-        // on the legacy Super+P keyboard shortcut in the window manager.
-        QString program = QStandardPaths::findExecutable("osm-power");
-        if (program.isEmpty()) {
-            qWarning() << "osm-rocker: osm-power executable not found in PATH";
-            return;
-        }
-
-        if (!QProcess::startDetached(program, QStringList())) {
-            qWarning() << "osm-rocker: failed to launch" << program;
+        // Run the osm-power command directly, as a separate process.
+        if (!QProcess::startDetached("osm-power", QStringList())) {
+            qWarning() << "osm-rocker: failed to launch osm-power";
         }
     }
 };
