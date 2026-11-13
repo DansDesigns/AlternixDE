@@ -715,6 +715,47 @@ static QVector<DesktopCacheStamp> desktopDirectoryStamps() {
     return stamps;
 }
 
+// Picom runs as the session compositor; it is not a launchable desktop app.
+// Identify it by its desktop ID, exact displayed name, or Exec program.
+// The Exec check also handles path-qualified executables and simple wrappers
+// such as "env picom" and "sh -c 'picom --config ...'".
+static bool isPicomCommand(const QString &exec) {
+    const QStringList arguments = QProcess::splitCommand(exec);
+    for (const QString &argument : arguments) {
+        if (QFileInfo(argument).fileName().compare(QStringLiteral("picom"),
+                                                   Qt::CaseInsensitive) == 0)
+            return true;
+        // A shell's -c argument is itself a command string. Check its words
+        // without treating programs such as picom-conf as Picom.
+        if (argument.contains(QLatin1Char(' '))) {
+            const QStringList nested = QProcess::splitCommand(argument);
+            for (const QString &word : nested) {
+                if (QFileInfo(word).fileName().compare(QStringLiteral("picom"),
+                                                       Qt::CaseInsensitive) == 0)
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+static bool isPicomApp(const AppEntry &app, const QString &desktopPath = QString()) {
+    return (!desktopPath.isEmpty() &&
+            QFileInfo(desktopPath).fileName().compare(QStringLiteral("picom.desktop"),
+                                                       Qt::CaseInsensitive) == 0) ||
+           app.name.trimmed().compare(QStringLiteral("picom"),
+                                     Qt::CaseInsensitive) == 0 ||
+           isPicomCommand(app.exec);
+}
+
+// Also apply the exclusion to deserialized entries: a valid on-disk cache
+// must never reintroduce Picom into the visible list.
+static void excludePicom(QList<AppEntry> &apps) {
+    for (int i = apps.size() - 1; i >= 0; --i) {
+        if (isPicomApp(apps.at(i))) apps.removeAt(i);
+    }
+}
+
 static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
     QList<AppEntry> apps;
     for (const QString &dir : standardDesktopDirs()) {
@@ -735,7 +776,9 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
             settings.endGroup();
             if (name.isEmpty() || exec.isEmpty() || nodisplay == "true")
                 continue;
-            apps.append({name, cleanExec(exec), icon});
+            const AppEntry entry{name, cleanExec(exec), icon};
+            if (isPicomApp(entry, path)) continue;
+            apps.append(entry);
         }
     }
     std::sort(apps.begin(), apps.end(), [](const AppEntry &a, const AppEntry &b) {
@@ -745,7 +788,7 @@ static QList<AppEntry> scanDesktopEntries(QVector<DesktopCacheStamp> &files) {
 }
 
 static constexpr quint32 launcherCacheMagic = 0x4f534d4c; // 'OSML'
-static constexpr quint32 launcherCacheVersion = 1;
+static constexpr quint32 launcherCacheVersion = 2; // Rebuild old caches including Picom
 
 static bool readDesktopCache(const QString &cachePath, QList<AppEntry> &apps) {
     QFile cache(cachePath);
@@ -813,6 +856,7 @@ static QList<AppEntry> loadDesktopEntries(const QString &cachePath,
                                            QVector<DesktopCacheStamp> *pendingFiles) {
     QList<AppEntry> apps;
     if (readDesktopCache(cachePath, apps)) {
+        excludePicom(apps);
         if (cacheHit) *cacheHit = true;
         return apps;
     }
@@ -822,6 +866,7 @@ static QList<AppEntry> loadDesktopEntries(const QString &cachePath,
     // first frame, not on the critical path to the opening animation.
     QVector<DesktopCacheStamp> files;
     apps = scanDesktopEntries(files);
+    excludePicom(apps);
     if (pendingFiles) *pendingFiles = files;
     return apps;
 }
