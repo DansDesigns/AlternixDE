@@ -732,3 +732,51 @@ def _stall_watch():
 def _stall_start():
     _stall_beat()
     threading.Thread(target=_stall_watch, daemon=True).start()
+
+
+# --- Alternix wallpaper refresh after XRandR/Qtile reconfiguration ---
+# XRandR resizes the X root window when a tablet is rotated. The saved
+# xwallpaper pixmap has the OLD size until it is painted again. Wait until
+# Qtile finishes its RandR screen reconfiguration before restoring the
+# wallpaper; --clear is handled by the existing osm-paper-restore utility.
+# This is event-driven: no polling daemon and no second wallpaper program.
+_osm_paper_refresh_timer = None
+
+
+def _osm_paper_refresh_now():
+    global _osm_paper_refresh_timer
+    _osm_paper_refresh_timer = None
+    try:
+        subprocess.Popen(
+            ["osm-paper-restore"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        # Never let a missing desktop utility interrupt Qtile screen changes.
+        pass
+
+
+def _osm_paper_schedule_refresh():
+    global _osm_paper_refresh_timer
+    if _osm_paper_refresh_timer is not None:
+        _osm_paper_refresh_timer.cancel()
+    # Coalesce the burst of RandR events on rotation. Give XLibre, picom and
+    # Qtile time to finish resizing the root window and desktop bars.
+    _osm_paper_refresh_timer = qtile.call_later(0.5, _osm_paper_refresh_now)
+
+
+@hook.subscribe.screen_change
+def _osm_paper_screen_changed(event):
+    # Qtile emits this BEFORE reconfigure_screens; this schedules a fallback
+    # redraw for configurations where the post-reconfigure hook is not fired.
+    _osm_paper_schedule_refresh()
+
+
+@hook.subscribe.screens_reconfigured
+def _osm_paper_screens_reconfigured():
+    # Qtile emits this AFTER reconfigure_screens. Cancel the earlier timer and
+    # repaint once at the final size/orientation (including inverted/180°).
+    _osm_paper_schedule_refresh()
+# --- End Alternix wallpaper refresh ---

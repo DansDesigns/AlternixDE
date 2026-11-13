@@ -277,16 +277,16 @@ public:
         };
 
         connect(zoomBtn, &QPushButton::clicked, this, [this, fade]() {
-            if (applyWallpaper("zoom", "xwallpaper --zoom")) fade();
+            if (applyWallpaper("zoom")) fade();
         });
         connect(fitBtn, &QPushButton::clicked, this, [this, fade]() {
-            if (applyWallpaper("fit", "xwallpaper --stretch")) fade();
+            if (applyWallpaper("fit")) fade();
         });
         connect(tileBtn, &QPushButton::clicked, this, [this, fade]() {
-            if (applyWallpaper("tile", "xwallpaper --tile")) fade();
+            if (applyWallpaper("tile")) fade();
         });
         connect(centerBtn, &QPushButton::clicked, this, [this, fade]() {
-            if (applyWallpaper("center", "xwallpaper --center")) fade();
+            if (applyWallpaper("center")) fade();
         });
 
         // Load initial folder
@@ -419,32 +419,39 @@ private:
 
     // ───────────────────── Wallpaper apply ───────────────────────
 
-    QString modeToCommand(const QString &modeName)
+    QString modeToArgument(const QString &modeName) const
     {
-        if (modeName == "zoom")   return "xwallpaper --zoom";
-        if (modeName == "fit")    return "xwallpaper --stretch";
-        if (modeName == "tile")   return "xwallpaper --tile";
-        if (modeName == "center") return "xwallpaper --center";
-        return "xwallpaper --zoom";
+        if (modeName == "fit")    return "--stretch";
+        if (modeName == "tile")   return "--tile";
+        if (modeName == "center") return "--center";
+        return "--zoom";
+    }
+
+    // Always clear the previous X root pixmap. After a screen rotation it
+    // may still have the old landscape/portrait dimensions, leading to
+    // corrupted margins until the entire wallpaper is redrawn.
+    bool redrawWallpaper(const QString &modeName, const QString &path)
+    {
+        if (path.isEmpty()) return false;
+        // Pass arguments directly: wallpaper filenames can contain spaces,
+        // shell quotes and other characters that must not be interpreted.
+        return QProcess::startDetached(
+            "xwallpaper", QStringList{"--clear", modeToArgument(modeName), path});
     }
 
     void applyWallpaperDirect(const QString &modeName, const QString &path)
     {
-        if (path.isEmpty()) return;
-        QString cmd = modeToCommand(modeName) + " \"" + path + "\"";
-        QProcess::startDetached("/bin/sh", {"-c", cmd});
+        redrawWallpaper(modeName, path);
     }
 
-    bool applyWallpaper(const QString &modeName,
-                        const QString &cmdPrefix)
+    bool applyWallpaper(const QString &modeName)
     {
         if (currentImagePath.isEmpty()) {
             selectedModeButton(lastMode)->setChecked(true);
             return false;
         }
 
-        QString cmd = cmdPrefix + " \"" + currentImagePath + "\"";
-        if (!QProcess::startDetached("/bin/sh", {"-c", cmd})) {
+        if (!redrawWallpaper(modeName, currentImagePath)) {
             selectedModeButton(lastMode)->setChecked(true);
             return false;
         }

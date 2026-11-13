@@ -67,6 +67,30 @@ fi
 # Verify the complete X11 pen, touch and auto-rotation runtime before an
 # ISO build/update begins. These files belong in AlternixDE, not in the
 # installer directory. Refuse to ship a UI with missing backends.
+# Wallpaper rotation must ship as ONE consistent set of sources. The Qtile
+# event hook is in the repository config (not in Alternix/scripts/), while
+# the existing wallpaper restorer is in Alternix/apps/.
+ALT_PAPER_RESTORE_SOURCE="$ALT_ROOT/Alternix/apps/osm-paper-restore"
+ALT_PAPER_QTILE_SOURCE="$ALT_ROOT/Alternix/configs/qtile/config.py"
+if [ ! -s "$ALT_PAPER_RESTORE_SOURCE" ] || \
+   [ ! -s "$ALT_PAPER_QTILE_SOURCE" ] || \
+   ! grep -Fq -- '--clear' "$ALT_PAPER_RESTORE_SOURCE" || \
+   ! grep -Fq 'Alternix wallpaper refresh after XRandR/Qtile reconfiguration' "$ALT_PAPER_QTILE_SOURCE"; then
+    echo "ERROR: Wallpaper rotation sources are missing/outdated in Alternix/apps or Alternix/configs/qtile." >&2
+    exit 1
+fi
+if ! python3 - "$ALT_PAPER_RESTORE_SOURCE" "$ALT_PAPER_QTILE_SOURCE" <<'ALT_PAPER_SYNTAX'
+import ast
+import pathlib
+import sys
+for filename in sys.argv[1:]:
+    ast.parse(pathlib.Path(filename).read_text(encoding='utf-8'), filename=filename)
+ALT_PAPER_SYNTAX
+then
+    echo "ERROR: Wallpaper restoration/Qtile Python source failed syntax validation." >&2
+    exit 1
+fi
+
 ALT_INPUT_SOURCE_DIR="$ALT_ROOT/Alternix/scripts"
 for alt_input_file in \
     alternix-rotate-monitor.sh \
@@ -1234,8 +1258,55 @@ echo "• Updating osm-paper..."
 g++ -fPIC apps/osm-paper.cpp -o osm-paper $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 
-echo "• Installing osm-paper-restore..."
-sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
+echo "• Installing osm-paper-restore (rotation-safe full redraw)..."
+sudo install -m 755 "$ALT_PAPER_RESTORE_SOURCE" /usr/local/bin/ || exit 1
+
+# Only update the wallpaper hook inside the installed Qtile config. The
+# updater intentionally does NOT overwrite personal keybindings, layouts,
+# groups, widgets, or user customization with the full repository config.
+echo "• Enabling wallpaper redraw after Qtile screen rotation..."
+if ! sudo python3 - "$ALT_PAPER_QTILE_SOURCE" "$ALT_VLC_HOME/.config/qtile/config.py" <<'ALT_PAPER_QTILE_INSTALL'
+from pathlib import Path
+import ast
+import os
+import shutil
+import sys
+
+source = Path(sys.argv[1]); target = Path(sys.argv[2])
+start_marker = '# --- Alternix wallpaper refresh after XRandR/Qtile reconfiguration ---'
+end_marker = '# --- End Alternix wallpaper refresh ---'
+s = source.read_text(encoding='utf-8')
+assert s.count(start_marker) == 1 and s.count(end_marker) == 1
+hook = s[s.index(start_marker):s.index(end_marker) + len(end_marker)]
+if target.exists():
+    current = target.read_text(encoding='utf-8')
+    if start_marker in current:
+        if end_marker not in current:
+            raise ValueError('Existing wallpaper refresh section has no end marker')
+        prior = current[current.index(start_marker):current.index(end_marker) + len(end_marker)]
+        updated = current.replace(prior, hook, 1)
+    else:
+        updated = current.rstrip('\n') + '\n\n' + hook + '\n'
+    ast.parse(updated, filename=str(target))
+    if updated != current:
+        target.write_text(updated, encoding='utf-8')
+        print('Qtile: updated wallpaper hook, retained existing configuration')
+    else:
+        print('Qtile: wallpaper hook already current, no changes necessary')
+else:
+    ast.parse(s, filename=str(source))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    print('Qtile: installed complete configuration for missing user config')
+ALT_PAPER_QTILE_INSTALL
+then
+    echo "ERROR: Could not update live Qtile wallpaper rotation hook." >&2
+    exit 1
+fi
+sudo chown "$ALT_VLC_USER:$(id -gn "$ALT_VLC_USER")" \
+    "$ALT_VLC_HOME/.config/qtile/config.py" || exit 1
+sudo install -Dm644 "$ALT_PAPER_QTILE_SOURCE" /etc/skel/.config/qtile/config.py || exit 1
+
 
 echo "• Updating osm-lockscreen..."
 g++ -fPIC apps/osm-lockscreen.cpp -o osm-lockscreen $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)

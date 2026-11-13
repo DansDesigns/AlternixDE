@@ -86,6 +86,30 @@ fi
 # Verify the complete X11 pen, touch and auto-rotation runtime before an
 # ISO build/update begins. These files belong in AlternixDE, not in the
 # installer directory. Refuse to ship a UI with missing backends.
+# Wallpaper rotation must ship as ONE consistent set of sources. The Qtile
+# event hook is in the repository config (not in Alternix/scripts/), while
+# the existing wallpaper restorer is in Alternix/apps/.
+ALT_PAPER_RESTORE_SOURCE="$ALT_ROOT/Alternix/apps/osm-paper-restore"
+ALT_PAPER_QTILE_SOURCE="$ALT_ROOT/Alternix/configs/qtile/config.py"
+if [ ! -s "$ALT_PAPER_RESTORE_SOURCE" ] || \
+   [ ! -s "$ALT_PAPER_QTILE_SOURCE" ] || \
+   ! grep -Fq -- '--clear' "$ALT_PAPER_RESTORE_SOURCE" || \
+   ! grep -Fq 'Alternix wallpaper refresh after XRandR/Qtile reconfiguration' "$ALT_PAPER_QTILE_SOURCE"; then
+    echo "ERROR: Wallpaper rotation sources are missing/outdated in Alternix/apps or Alternix/configs/qtile." >&2
+    exit 1
+fi
+if ! python3 - "$ALT_PAPER_RESTORE_SOURCE" "$ALT_PAPER_QTILE_SOURCE" <<'ALT_PAPER_SYNTAX'
+import ast
+import pathlib
+import sys
+for filename in sys.argv[1:]:
+    ast.parse(pathlib.Path(filename).read_text(encoding='utf-8'), filename=filename)
+ALT_PAPER_SYNTAX
+then
+    echo "ERROR: Wallpaper restoration/Qtile Python source failed syntax validation." >&2
+    exit 1
+fi
+
 ALT_INPUT_SOURCE_DIR="$ALT_ROOT/Alternix/scripts"
 for alt_input_file in \
     alternix-rotate-monitor.sh \
@@ -1620,8 +1644,11 @@ StartupNotify=false
 EOF
 chmod +x "$TARGET_HOME/.local/share/applications/osm-paper.desktop"
 
-echo "• Installing osm-paper-restore..."
-sudo install -m 755 apps/osm-paper-restore /usr/local/bin/
+echo "• Installing osm-paper-restore (rotation-safe full redraw)..."
+sudo install -m 755 "$ALT_PAPER_RESTORE_SOURCE" /usr/local/bin/ || exit 1
+# The initial Qtile configuration was already copied from Alternix/configs.
+# Seed future accounts with the same post-XRandR wallpaper refresh hook.
+sudo install -Dm644 "$ALT_PAPER_QTILE_SOURCE" /etc/skel/.config/qtile/config.py || exit 1
 
 echo "• Building osm-styling..."
 g++ -fPIC apps/osm-styling.cpp -o osm-styling $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
