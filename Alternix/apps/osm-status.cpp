@@ -641,11 +641,12 @@ NotificationCard::NotificationCard(
         v->addWidget(body);
     }
 
-    // CLOSE BUTTON
-    QPushButton *close = new QPushButton(" ❌", this);
-    close->setFixedSize(48,48);
+    // CLOSE BUTTON — match osm-running exactly
+    QPushButton *close = new QPushButton("❌", this);
+    close->setFixedSize(48, 48);
     close->setStyleSheet(
-        "QPushButton { color:#ff4a6a; }"
+        "QPushButton{color:#ff4a6a;background:#00000099;border:none;"
+        "border-radius:14px;font-size:26px;}"
         "QPushButton:hover { color:#ff1616; background:#ad1236; border-radius:18px; }"
         "QPushButton:pressed { color:#ffffff; background:#550000; border-radius:18px; }"
     );
