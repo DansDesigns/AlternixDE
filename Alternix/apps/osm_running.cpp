@@ -1,0 +1,765 @@
+#include <QApplication>
+#include <QCoreApplication>
+#include <QWidget>
+#include <QScrollArea>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QFrame>
+#include <QPushButton>
+#include <QScreen>
+#include <QTimer>
+#include <QGraphicsDropShadowEffect>
+#include <QMouseEvent>
+#include <QTouchEvent>
+#include <QLockFile>
+#include <QDir>
+#include <QDebug>
+#include <QPixmap>
+#include <QImage>
+#include <QIcon>
+#include <QScroller>
+#include <QScrollerProperties>
+#include <QPropertyAnimation>
+#include <QPointer>
+#include <QHash>
+#include <QEasingCurve>
+
+#include <functional>
+
+#include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
+
+// XLibre/XRandR can change the X11 root size before Qt5 publishes the new
+// QScreen geometry.  Query the live server root for a single-display tablet;
+// preserve Qt's per-monitor geometry on multi-display desktops.
+static QRect alternixActiveScreenGeometry() {
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen) return QRect();
+    const QRect qtGeometry = screen->geometry();
+    if (QGuiApplication::screens().size() != 1) return qtGeometry;
+    static Display *dpy = XOpenDisplay(nullptr);
+    if (!dpy) return qtGeometry;
+    Window returnedRoot = 0;
+    int x = 0, y = 0;
+    unsigned int width = 0, height = 0, border = 0, depth = 0;
+    if (XGetGeometry(dpy, DefaultRootWindow(dpy), &returnedRoot,
+                     &x, &y, &width, &height, &border, &depth) &&
+        width > 0 && height > 0) {
+        return QRect(0, 0, int(width), int(height));
+    }
+    return qtGeometry;
+}
+
+// ───────────────────────────────────────────── X11 helpers
+static Atom getAtom(Display *dpy, const char *name) {
+    // This app owns one Xlib connection. Cache atoms instead of issuing one
+    // synchronous XInternAtom request for every displayed window and tick.
+    static QHash<QByteArray, Atom> cache;
+    const QByteArray key(name);
+    const auto it = cache.constFind(key);
+    if (it != cache.constEnd()) return it.value();
+    const Atom atom = XInternAtom(dpy, name, False);
+    cache.insert(key, atom);
+    return atom;
+}
+
+static QString getWindowTitle(Display *dpy, Window win) {
+    Atom prop = getAtom(dpy, "_NET_WM_NAME");
+    Atom utf8 = getAtom(dpy, "UTF8_STRING");
+
+    Atom type;
+    int format;
+    unsigned long nitems, after;
+    unsigned char *data = nullptr;
+
+    if (XGetWindowProperty(dpy, win, prop, 0, 256, False, utf8,
+                           &type, &format, &nitems, &after, &data)
+        == Success && data)
+    {
+        QString out = QString::fromUtf8((char*)data, int(nitems));
+        XFree(data);
+        if (!out.isEmpty()) return out;
+    }
+
+    XTextProperty tp;
+    if (XGetWMName(dpy, win, &tp) && tp.value) {
+        QString out = QString::fromLatin1((char*)tp.value);
+        XFree(tp.value);
+        return out;
+    }
+
+    return "";
+}
+
+static QString getWindowClass(Display *dpy, Window win) {
+    XClassHint hint;
+    if (XGetClassHint(dpy, win, &hint)) {
+        QString cls = hint.res_class ? QString::fromLatin1(hint.res_class) : "";
+        if (hint.res_name) XFree(hint.res_name);
+        if (hint.res_class) XFree(hint.res_class);
+        return cls.toLower();
+    }
+    return "";
+}
+
+static QPixmap getNetWmIcon(Display *dpy, Window win, int size = 28) {
+    Atom prop = getAtom(dpy, "_NET_WM_ICON");
+
+    Atom type;
+    int format;
+    unsigned long nitems, after;
+    unsigned char *raw = nullptr;
+
+    if (XGetWindowProperty(dpy, win, prop, 0, 65536, False,
+                           AnyPropertyType,
+                           &type, &format, &nitems, &after, &raw) != Success || !raw)
+    {
+        if (raw) XFree(raw);
+        return QPixmap();
+    }
+
+    unsigned long *data = (unsigned long*)raw;
+    unsigned long len = nitems;
+
+    int bestW = 0, bestH = 0;
+    unsigned long bestOffset = 0;
+
+    unsigned long i = 0;
+    while (i + 1 < len) {
+        unsigned long w = data[i];
+        unsigned long h = data[i+1];
+        // Do not create huge temporary images from an untrusted X property.
+        if (!w || !h || w > 512 || h > 512 || w > (len - i - 2) / h)
+            break;
+        const unsigned long count = w * h;
+        // Prefer the nearest usable icon, not the largest (often 256/512px).
+        if (bestOffset == 0 ||
+            (w >= unsigned(size) && h >= unsigned(size) &&
+             ((bestW < size || bestH < size) || w * h < unsigned(bestW * bestH))) ||
+            (bestW < size && bestH < size && w * h > unsigned(bestW * bestH))) {
+            bestW = int(w);
+            bestH = int(h);
+            bestOffset = i + 2;
+        }
+
+        i += 2 + count;
+    }
+
+    QPixmap out;
+    if (bestOffset > 0) {
+        QImage img(bestW, bestH, QImage::Format_ARGB32);
+        unsigned long *pix = data + bestOffset;
+
+        for (int y = 0; y < bestH; ++y)
+        for (int x = 0; x < bestW; ++x) {
+            unsigned long p = pix[y * bestW + x];
+            img.setPixel(x,y, qRgba((p>>16)&0xFF,(p>>8)&0xFF,p&0xFF,(p>>24)&0xFF));
+        }
+
+        out = QPixmap::fromImage(img)
+                .scaled(size,size,Qt::KeepAspectRatio,Qt::SmoothTransformation);
+    }
+
+    XFree(raw);
+    return out;
+}
+
+// ───────────────────────────────────────────── Structures
+
+struct WindowInfo {
+    Window id;
+    QString title;
+    QString appClass;
+};
+
+class SidePanel;
+class WindowCard;
+class OverlayRoot;   // forward
+
+// ───────────────────────────────────────────── SidePanel
+
+class SidePanel : public QWidget {
+public:
+    explicit SidePanel(Display *dpy, QWidget *parent=nullptr);
+
+    void refreshWindows();
+    void startMonitoring();
+    void stopMonitoring();
+    bool hasWindows() const { return m_list && m_list->count() > 0; }
+    QGraphicsDropShadowEffect *shadow() const { return m_shadow; }
+    void activateWindow(Window w);
+    void closeAppWindow(Window w);
+    void handleEntryActivateAndClose(Window w);
+    void resizeToItems(int count);
+    void syncScreenGeometry(const QRect &screen);
+
+    int computeRequiredWidth(const QStringList &titles) {
+        int base = 160;
+        QFont f; f.setPointSize(32);
+        QFontMetrics fm(f);
+        int max = 0;
+        for (const QString &t : titles)
+            max = qMax(max, fm.horizontalAdvance(t));
+        return base + max;
+    }
+
+    void setCloseCallback(std::function<void()> fn) { onClose = fn; }
+
+public:
+    std::function<void()> onClose;
+
+private:
+    Display *m_dpy;
+    QWidget *m_inner;
+    QScrollArea *m_scroll;
+    QVBoxLayout *m_list;
+    int m_width;
+    int m_maxH;
+    QGraphicsDropShadowEffect *m_shadow = nullptr;
+    QTimer *m_refreshTimer = nullptr;
+    QStringList m_windowSnapshot;
+    bool m_snapshotReady = false;
+};
+
+// ───────────────────────────────────────────── WindowCard
+
+class WindowCard : public QFrame {
+public:
+    WindowCard(SidePanel*, Display*, const WindowInfo&, Window active, QWidget *parent=nullptr);
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override;
+
+private:
+    SidePanel *m_panel;
+    Display *m_dpy;
+    WindowInfo m_info;
+    QLabel *m_titleLabel;
+};
+
+// ───────────────────────────────────────────── SidePanel impl
+
+SidePanel::SidePanel(Display *dpy, QWidget *parent)
+    : QWidget(parent), m_dpy(dpy)
+{
+    setWindowFlag(Qt::WindowDoesNotAcceptFocus,true);
+    setFocusPolicy(Qt::NoFocus);
+    setAttribute(Qt::WA_TranslucentBackground);
+
+    QRect g = alternixActiveScreenGeometry();
+
+    m_width = qMin(520, int(g.width()*0.35));
+    m_maxH  = int(g.height()*0.9);
+
+    int top = int(g.height()*0.20);
+    setGeometry(0, top, m_width, 200);
+
+    QVBoxLayout *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 20, 20, 20);  // top/bottom padding
+
+    m_inner = new QWidget(this);
+    m_inner->setObjectName("inner");
+    m_inner->setStyleSheet(
+        "#inner{"
+        " background:#80708099;"
+        " border-top-left-radius:0px;"
+        " border-bottom-left-radius:0px;"
+        " border-top-right-radius:26px;"
+        " border-bottom-right-radius:26px;"
+        "}"
+    );
+
+    QVBoxLayout *inner = new QVBoxLayout(m_inner);
+    inner->setContentsMargins(16, 16, 16, 16);
+
+    m_scroll = new QScrollArea(m_inner);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    m_scroll->setStyleSheet("QScrollArea, QScrollArea * { background:#00000099; border-radius:14px; border:none; }");
+
+    QScroller::grabGesture(m_scroll->viewport(), QScroller::TouchGesture);
+
+    QWidget *content = new QWidget;
+    content->setStyleSheet("background:#00000099;");
+    content->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+
+    m_list = new QVBoxLayout(content);
+    m_list->setSpacing(2);
+    m_list->setContentsMargins(5, 5, 10, 15);
+
+    m_scroll->setWidget(content);
+
+    inner->addWidget(m_scroll);
+    outer->addWidget(m_inner);
+
+    // shadow
+    QGraphicsDropShadowEffect *sh = new QGraphicsDropShadowEffect(this);
+    sh->setBlurRadius(32);
+    sh->setOffset(0, 0);
+    sh->setColor(QColor(0, 0, 0, 220));
+    m_inner->setGraphicsEffect(sh);
+    m_shadow = sh;
+
+    // Never poll/rebuild the X window list behind a closed panel.
+    m_refreshTimer = new QTimer(this);
+    m_refreshTimer->setInterval(1200);
+    connect(m_refreshTimer, &QTimer::timeout, this, [this]() { refreshWindows(); });
+    refreshWindows();
+}
+
+void SidePanel::startMonitoring() { if (m_refreshTimer) m_refreshTimer->start(); }
+void SidePanel::stopMonitoring() { if (m_refreshTimer) m_refreshTimer->stop(); }
+
+void SidePanel::activateWindow(Window w) {
+    XRaiseWindow(m_dpy, w);
+    XSetInputFocus(m_dpy, w, RevertToPointerRoot, CurrentTime);
+
+    Atom act = getAtom(m_dpy,"_NET_ACTIVE_WINDOW");
+    Window root = DefaultRootWindow(m_dpy);
+
+    XEvent e; memset(&e,0,sizeof(e));
+    e.type = ClientMessage;
+    e.xclient.window = w;
+    e.xclient.message_type = act;
+    e.xclient.format = 32;
+    e.xclient.data.l[0] = 1;
+    e.xclient.data.l[1] = CurrentTime;
+
+    XSendEvent(m_dpy,root,False,
+               SubstructureNotifyMask|SubstructureRedirectMask,&e);
+    XFlush(m_dpy);
+}
+
+void SidePanel::closeAppWindow(Window w) {
+    XKillClient(m_dpy,w);
+    XFlush(m_dpy);
+    refreshWindows();
+}
+
+void SidePanel::handleEntryActivateAndClose(Window w) {
+    activateWindow(w);
+    QTimer::singleShot(80, [this](){
+        if (onClose) onClose();
+    });
+}
+
+// ───────────────────────────────────────────── HEIGHT BASED ON COUNT
+
+void SidePanel::resizeToItems(int count) {
+    const int cardH = 120;
+    int h = count * cardH + 60;
+
+    const QRect screenGeo = alternixActiveScreenGeometry();
+    const int top = int(screenGeo.height() * 0.15);
+    const int available = qMax(1, screenGeo.height() - top);
+    const int maximum = qMax(1, qMin(m_maxH, available));
+    h = qBound(qMin(120, maximum), h, maximum);
+    m_width = qMin(m_width, screenGeo.width());
+    // Coordinates here are local to OverlayRoot, not global screen coordinates.
+    setGeometry(0, top, m_width, h);
+}
+
+void SidePanel::syncScreenGeometry(const QRect &screen) {
+    m_maxH = qMax(1, int(screen.height() * 0.9));
+    m_width = qMin(m_width, screen.width());
+    resizeToItems(m_list ? m_list->count() : 0);
+}
+
+void SidePanel::refreshWindows() {
+    const Atom listA = getAtom(m_dpy, "_NET_CLIENT_LIST");
+    Atom type = 0;
+    int format = 0;
+    unsigned long n = 0, after = 0;
+    unsigned char *data = nullptr;
+
+    // A bounded read avoids an X server megabyte transfer for broken clients.
+    if (XGetWindowProperty(m_dpy, DefaultRootWindow(m_dpy), listA,
+                           0, 4096, False, XA_WINDOW, &type, &format,
+                           &n, &after, &data) != Success) {
+        if (data) XFree(data);
+        return;
+    }
+
+    const Window *wins = reinterpret_cast<Window *>(data);
+    QList<WindowInfo> entries;
+    QStringList snapshot;
+    QStringList titles;
+    for (unsigned long i = 0; i < n; ++i) {
+        if (!wins) break;
+        const Window w = wins[i];
+        if (!w) continue;
+        const QString title = getWindowTitle(m_dpy, w);
+        if (title.isEmpty()) continue;
+        const QString lower = title.toLower();
+        if (lower.contains("osm-running") || lower.contains("osm-launcher") ||
+            lower.contains("wosp-shell")) continue;
+        snapshot << QString::number(qulonglong(w), 16) + ":" + title;
+        titles << title;
+        entries.append(WindowInfo{w, title, QString()});
+    }
+    if (data) XFree(data);
+
+    // No X icon transfers, QWidget allocation, deleteLater backlog or layout
+    // invalidation if the set of windows/titles has not actually changed.
+    if (m_snapshotReady && snapshot == m_windowSnapshot) {
+        return;
+    }
+    m_snapshotReady = true;
+    m_windowSnapshot = snapshot;
+
+    QLayoutItem *it;
+    while ((it = m_list->takeAt(0))) {
+        if (QWidget *card = it->widget()) delete card; // release now, not after many refreshes
+        delete it;
+    }
+
+    for (WindowInfo &info : entries) {
+        info.appClass = getWindowClass(m_dpy, info.id);
+        m_list->addWidget(new WindowCard(this, m_dpy, info, 0));
+    }
+
+    m_width = qMin(computeRequiredWidth(titles),
+                   qMin(1080, alternixActiveScreenGeometry().width()));
+    const QRect g = geometry();
+    if (g.width() != m_width) setGeometry(g.x(), g.y(), m_width, g.height());
+    resizeToItems(entries.size());
+    // A list that is temporarily empty should not make swipes look broken.
+}
+
+// ───────────────────────────────────────────── WindowCard impl
+
+WindowCard::WindowCard(
+    SidePanel *panel, Display *dpy,
+    const WindowInfo &info, Window active,
+    QWidget *parent)
+    : QFrame(parent), m_panel(panel), m_dpy(dpy), m_info(info)
+{
+    Q_UNUSED(active);
+
+    setMinimumHeight(75);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+    setStyleSheet("background:#282828;border-radius:14px;border:none;");
+
+    QHBoxLayout *lay=new QHBoxLayout(this);
+    lay->setContentsMargins(10,2,10,2);
+    lay->setSpacing(2);
+
+    QLabel *icon=new QLabel(this);
+    icon->setFixedSize(32,32);
+
+    QPixmap px=getNetWmIcon(m_dpy,m_info.id,28);
+    if(px.isNull()) {
+        QIcon themed=QIcon::fromTheme(m_info.appClass);
+        if(!themed.isNull()) px=themed.pixmap(64,64);
+    }
+    if(px.isNull()) {
+        px=QPixmap(28,28);
+        px.fill(QColor("#333"));
+    }
+
+    icon->setPixmap(px);
+    icon->setScaledContents(true);
+
+    QLabel *title = new QLabel(m_info.title, this);
+    title->setStyleSheet("color:white;font-size:15px;");
+    title->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_titleLabel = title;
+
+    QPushButton *close=new QPushButton("❌",this);
+    close->setFixedSize(48,48);
+    close->setStyleSheet(
+        "QPushButton{color:#ff4a6a;background:#00000099;border:none;"
+        "border-radius:14px;font-size:26px;}"
+        "QPushButton:hover { color:#ff1616; background:#ad1236; border-radius:18px; }"
+        "QPushButton:pressed { color:#ffffff; background:#550000; border-radius:18px; }"
+    );
+
+    lay->addWidget(icon);
+    lay->addWidget(title,1);
+    lay->addWidget(close);
+
+    connect(close,&QPushButton::clicked,[this](){
+        m_panel->closeAppWindow(m_info.id);
+    });
+}
+
+void WindowCard::mousePressEvent(QMouseEvent *e) {
+    if(e->button()==Qt::LeftButton) {
+        if (m_titleLabel && m_titleLabel->geometry().contains(e->pos())) {
+            m_panel->handleEntryActivateAndClose(m_info.id);
+            return;
+        }
+    }
+    QFrame::mousePressEvent(e);
+}
+
+// ───────────────────────────────────────────── OverlayRoot
+
+class OverlayRoot : public QWidget {
+public:
+    explicit OverlayRoot(Display *dpy)
+        : m_panel(nullptr), m_panelVisible(false)
+    {
+        setWindowFlags(Qt::FramelessWindowHint |
+                       Qt::Tool |
+                       Qt::WindowStaysOnTopHint |
+                       Qt::X11BypassWindowManagerHint |
+                       Qt::WindowDoesNotAcceptFocus);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_DeleteOnClose);
+
+        m_screenGeo = alternixActiveScreenGeometry();
+        setGeometry(m_screenGeo);
+        m_panel = new SidePanel(dpy, this);
+        m_shadow = m_panel->shadow();
+        m_panel->move(-m_panel->width(), m_panel->y());
+        m_panel->hide();
+        m_panel->setCloseCallback([this]() { hidePanel(); });
+        hide();
+    }
+
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        if (m_screenGeo == g && geometry() == g) return;
+        m_screenGeo = g;
+        setGeometry(g);
+        if (!m_panel) return;
+        m_panel->syncScreenGeometry(g);
+        if (!m_animation || m_animation->state() != QAbstractAnimation::Running)
+            m_panel->move(m_panelVisible ? 0 : -m_panel->width(), m_panel->y());
+    }
+
+    void showPanel() {
+        if (m_panelVisible || !m_panel) return;
+        syncScreenGeometry(alternixActiveScreenGeometry());
+        // Open the panel even if no clients are currently listed.
+        // Some X11 WMs publish _NET_CLIENT_LIST asynchronously.
+        m_panel->refreshWindows();
+
+        // Stop an in-flight close before it can hide a newly reopened panel.
+        const bool reversing = m_animation &&
+                               m_animation->state() == QAbstractAnimation::Running;
+        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
+        m_panelVisible = true;
+        if (!isVisible()) { show(); raise(); }
+        const QRect finalGeo(0, m_panel->y(), m_panel->width(), m_panel->height());
+        QRect startGeo = m_panel->geometry();
+        if (!reversing) startGeo.moveLeft(-finalGeo.width());
+        m_panel->setGeometry(startGeo);
+        if (m_shadow) m_shadow->setEnabled(false); // avoid recomputing blur every frame
+        m_panel->show();
+        m_panel->startMonitoring();
+
+        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
+        m_animation = anim;
+        anim->setDuration(180);
+        anim->setStartValue(startGeo);
+        anim->setEndValue(finalGeo);
+        anim->setEasingCurve(QEasingCurve::OutCubic);
+        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
+            if (m_animation != anim || !m_panelVisible) return;
+            m_animation = nullptr;
+            if (m_shadow) m_shadow->setEnabled(true);
+        });
+        anim->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    void hidePanel() {
+        if (!m_panelVisible || !m_panel) return;
+        m_panelVisible = false;
+        m_panel->stopMonitoring();
+        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
+        if (m_shadow) m_shadow->setEnabled(false);
+        const QRect startGeo = m_panel->geometry();
+        QRect endGeo = startGeo;
+        endGeo.moveLeft(-m_panel->width());
+
+        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
+        m_animation = anim;
+        anim->setDuration(170);
+        anim->setStartValue(startGeo);
+        anim->setEndValue(endGeo);
+        anim->setEasingCurve(QEasingCurve::InCubic);
+        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
+            if (m_animation != anim || m_panelVisible) return;
+            m_animation = nullptr;
+            m_panel->hide();
+            hide();
+        });
+        anim->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override {
+        if (m_panel && !m_panel->geometry().contains(e->pos())) hidePanel();
+        else QWidget::mousePressEvent(e);
+    }
+
+private:
+    SidePanel *m_panel;
+    bool m_panelVisible;
+    QRect m_screenGeo;
+    QPointer<QPropertyAnimation> m_animation;
+    // A shadow effect is rendered into an expensive offscreen pixmap while
+    // animated. It is only needed when the panel is stationary.
+    QGraphicsDropShadowEffect *m_shadow = nullptr;
+};
+
+// ───────────────────────────────────────────── ActivationEdgeBar
+// Always-on-top, left-side touch bar. No periodic XRaiseWindow loop.
+
+class ActivationEdgeBar : public QWidget {
+public:
+    explicit ActivationEdgeBar(OverlayRoot *overlay, QWidget *parent = nullptr)
+        : QWidget(parent),
+          m_overlay(overlay),
+          m_dragging(false)
+    {
+        setWindowFlags(Qt::FramelessWindowHint
+                       | Qt::WindowStaysOnTopHint
+                       | Qt::BypassWindowManagerHint
+                       | Qt::WindowDoesNotAcceptFocus);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setMouseTracking(true);
+        setAttribute(Qt::WA_AcceptTouchEvents, true);
+
+        QRect g = alternixActiveScreenGeometry();
+        syncScreenGeometry(g);
+        setStyleSheet("background: rgba(0,0,0,0);");
+
+        show();
+        raise();
+
+        // Qtile and other override-redirect windows can appear above this
+        // translucent swipe strip after startup. Periodic restacking is
+        // necessary for reliable touch input on X11. Do not do it while the
+        // panel is open; then its fullscreen overlay must receive input.
+        m_raiseTimer = new QTimer(this);
+        m_raiseTimer->setInterval(1500);
+        connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
+            if (m_overlay && !m_overlay->isVisible()) raise();
+        });
+        m_raiseTimer->start();
+    }
+
+    void syncScreenGeometry(const QRect &g) {
+        if (!g.isValid() || g.isEmpty()) return;
+        const QRect target(g.x(), g.y(), qMin(25, g.width()), g.height());
+        if (geometry() != target) setGeometry(target);
+    }
+
+protected:
+    // Native touchscreen events are not guaranteed to synthesize mouse drags.
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::TouchBegin ||
+            event->type() == QEvent::TouchUpdate ||
+            event->type() == QEvent::TouchEnd ||
+            event->type() == QEvent::TouchCancel) {
+            auto *touch = static_cast<QTouchEvent *>(event);
+            if (event->type() == QEvent::TouchBegin) {
+                if (!touch->touchPoints().isEmpty()) {
+                    m_pressPos = touch->touchPoints().first().screenPos().toPoint();
+                    m_dragging = true;
+                }
+            } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
+                       !touch->touchPoints().isEmpty()) {
+                if (touch->touchPoints().first().screenPos().x() - m_pressPos.x() > 12) {
+                    if (m_overlay) m_overlay->showPanel();
+                    m_dragging = false;
+                }
+            } else if (event->type() != QEvent::TouchUpdate) {
+                m_dragging = false;
+            }
+            event->accept();
+            return true;
+        }
+        return QWidget::event(event);
+    }
+
+    void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton) {
+            m_dragging = true;
+            m_pressPos = e->globalPos();
+            raise(); // restore the original responsive swipe interaction
+        }
+        QWidget::mousePressEvent(e);
+    }
+
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (!m_dragging) {
+            QWidget::mouseMoveEvent(e);
+            return;
+        }
+
+        int dx = e->globalX() - m_pressPos.x();
+        if (dx > 12) {  // slide-right threshold
+            if (m_overlay) {
+                m_overlay->showPanel();
+            }
+            m_dragging = false;
+        }
+
+        QWidget::mouseMoveEvent(e);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        m_dragging = false;
+        QWidget::mouseReleaseEvent(e);
+    }
+
+    void paintEvent(QPaintEvent *) override {
+        // fully invisible
+    }
+
+private:
+    OverlayRoot *m_overlay;
+    bool m_dragging;
+    QPoint m_pressPos;
+    QTimer *m_raiseTimer = nullptr;
+};
+
+// ───────────────────────────────────────────── main
+
+int main(int argc,char**argv) {
+    QApplication app(argc,argv);
+
+    QLockFile lock(QDir::temp().absoluteFilePath("osm-running.lock"));
+    lock.setStaleLockTime(0);
+    if(!lock.tryLock(20))
+        return 0;
+
+    Display *dpy=XOpenDisplay(nullptr);
+    if(!dpy) return 1;
+
+    OverlayRoot root(dpy);          // overlay window
+    ActivationEdgeBar bar(&root);   // always-on-top gesture edge
+
+    auto updateScreen = [&root, &bar](const QRect &g) {
+        root.syncScreenGeometry(g);
+        bar.syncScreenGeometry(g);
+    };
+    QScreen *screen = QGuiApplication::primaryScreen();
+    QObject::connect(screen, &QScreen::geometryChanged, &root,
+                     [updateScreen](const QRect &) {
+        updateScreen(alternixActiveScreenGeometry());
+    });
+    // Fallback for X11 screen updates whose geometryChanged event was missed.
+    QTimer geometryPoll(&app);
+    geometryPoll.setInterval(750);
+    QObject::connect(&geometryPoll, &QTimer::timeout, &root, [updateScreen]() {
+        updateScreen(alternixActiveScreenGeometry());
+    });
+    geometryPoll.start();
+    updateScreen(alternixActiveScreenGeometry());
+
+    int r=app.exec();
+    XCloseDisplay(dpy);
+    return r;
+}
