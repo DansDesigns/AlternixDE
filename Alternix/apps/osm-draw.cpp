@@ -1013,6 +1013,14 @@ public:
         QHBoxLayout *leftGroup = new QHBoxLayout();
         leftGroup->setSpacing(6);
 
+        // Keep the fullscreen control at the start of the top toolbar so it
+        // remains visible even when a small display clips the far-right tools.
+        btnFullscreen = new QPushButton("⛶\nFull", this);
+        styleIconButton(btnFullscreen, "Enter fullscreen canvas (F11)");
+        btnFullscreen->setFixedSize(58, 46);
+        btnFullscreen->setStyleSheet(btnStyle + "QPushButton { font-size:14px; }");
+        leftGroup->addWidget(btnFullscreen);
+
         btnPen = new QPushButton("✒", this);
         styleIconButton(btnPen, "Pen");
         leftGroup->addWidget(btnPen);
@@ -1072,10 +1080,6 @@ public:
         btnSave = new QPushButton("💾", this);
         styleIconButton(btnSave, "Save PNG");
         rightGroup->addWidget(btnSave);
-
-        btnFullscreen = new QPushButton("⛶", this);
-        styleIconButton(btnFullscreen, "Fullscreen canvas (F11)");
-        rightGroup->addWidget(btnFullscreen);
 
         topBar->addLayout(leftGroup);
         topBar->addStretch(1);
