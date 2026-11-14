@@ -8,7 +8,6 @@
 #include <QSlider>
 #include <QLabel>
 #include <QStatusBar>
-#include <QColorDialog>
 #include <QFileDialog>
 #include <QMouseEvent>
 #include <QPainter>
@@ -29,6 +28,21 @@
 #include <QtMath>
 #include <QGestureEvent>
 #include <QPinchGesture>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QCheckBox>
+#include <QFrame>
+#include <QShortcut>
+#include <QKeySequence>
+#include <QBitArray>
+#include <QVector>
+#include <QPainterPath>
+#include <QIcon>
+#include <QPixmap>
+#include <QSizePolicy>
+#include <functional>
+#include <cmath>
+
 
 // ─────────────────────────────────────────────
 // Live brush-size preview
@@ -74,6 +88,331 @@ private:
     QColor m_penColor;
 };
 
+
+// A checkerboard is used in opacity swatches and when the page is transparent.
+// This is drawn rather than loaded from an external asset.
+static void drawCheckerboard(QPainter &p, const QRect &area, int tile = 10) {
+    p.fillRect(area, QColor("#ededed"));
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor("#bcbcbc"));
+    const int firstY = area.top() / tile;
+    const int lastY = area.bottom() / tile;
+    const int firstX = area.left() / tile;
+    const int lastX = area.right() / tile;
+    for (int row = firstY; row <= lastY; ++row) {
+        for (int col = firstX; col <= lastX; ++col) {
+            if ((row + col) & 1)
+                p.drawRect(col * tile, row * tile, tile, tile);
+        }
+    }
+}
+
+static QIcon colorSwatchIcon(const QColor &color, int side = 28) {
+    QPixmap pixmap(side, side);
+    pixmap.fill(Qt::transparent);
+    QPainter p(&pixmap);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QRect square(1, 1, side - 2, side - 2);
+    p.save();
+    QPainterPath clip;
+    clip.addRoundedRect(QRectF(square), 5, 5);
+    p.setClipPath(clip);
+    drawCheckerboard(p, square, 7);
+    p.fillRect(square, color);
+    p.restore();
+    p.setPen(QPen(QColor("#e0e0e0"), 1.3));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(QRectF(square), 5, 5);
+    return QIcon(pixmap);
+}
+
+// Radial, segmented HSV palette. The outer rings are saturated, inner rings
+// are pastel; the centre shows the currently selected colour over a checker.
+// Brightness and alpha have independent sliders in the dialog below.
+class RadialColorWheel : public QWidget {
+public:
+    explicit RadialColorWheel(const QColor &initial, QWidget *parent = nullptr)
+        : QWidget(parent), m_color(initial) {
+        setMinimumSize(260, 260);
+        setMouseTracking(true);
+        setAccessibleName("Radial colour wheel");
+    }
+
+    QSize sizeHint() const override { return QSize(310, 310); }
+    void setColor(const QColor &color) { m_color = color; update(); }
+    std::function<void(const QColor &)> onSelectionChanged;
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QPointF centre(width() / 2.0, height() / 2.0);
+        const qreal outer = qMin(width(), height()) / 2.0 - 9;
+        const qreal inner = 35.0;
+        const int rings = 5;
+        const int sectors = 12;
+        const int saturationLevels[rings] = {35, 85, 135, 195, 255};
+
+        for (int ring = 0; ring < rings; ++ring) {
+            const qreal r1 = inner + (outer - inner) * ring / rings;
+            const qreal r2 = inner + (outer - inner) * (ring + 1) / rings;
+            const QRectF rectOuter(centre.x() - r2, centre.y() - r2, r2 * 2, r2 * 2);
+            const QRectF rectInner(centre.x() - r1, centre.y() - r1, r1 * 2, r1 * 2);
+            for (int sector = 0; sector < sectors; ++sector) {
+                const qreal start = 90.0 - sector * (360.0 / sectors);
+                QPainterPath wedge;
+                wedge.arcMoveTo(rectOuter, start);
+                wedge.arcTo(rectOuter, start, -360.0 / sectors);
+                wedge.arcTo(rectInner, start - 360.0 / sectors, 360.0 / sectors);
+                wedge.closeSubpath();
+                const int hue = (60 + sector * 30) % 360;
+                p.setBrush(QColor::fromHsv(hue, saturationLevels[ring], 255));
+                p.setPen(QPen(QColor("#24272b"), 1.6));
+                p.drawPath(wedge);
+            }
+        }
+
+        // Neutral centre / live colour sample, including its actual alpha.
+        const QRectF centerRect(centre.x() - inner + 2, centre.y() - inner + 2,
+                                (inner - 2) * 2, (inner - 2) * 2);
+        QPainterPath centerClip;
+        centerClip.addEllipse(centerRect);
+        p.save();
+        p.setClipPath(centerClip);
+        drawCheckerboard(p, centerRect.toAlignedRect(), 8);
+        p.fillRect(centerRect, m_color);
+        p.restore();
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor("#ececec"), 2.0));
+        p.drawEllipse(centerRect);
+
+        // Position marker at the selected hue/saturation, regardless of value.
+        const int sat = m_color.hsvSaturation();
+        if (sat > 0 && m_color.hsvHue() >= 0) {
+            const qreal clockwise = (m_color.hsvHue() - 60 + 360) % 360;
+            const qreal radians = qDegreesToRadians(clockwise);
+            const qreal radius = inner + (outer - inner) * sat / 255.0;
+            const QPointF marker(centre.x() + qSin(radians) * radius,
+                                 centre.y() - qCos(radians) * radius);
+            p.setPen(QPen(QColor("#181818"), 4));
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(marker, 7.0, 7.0);
+            p.setPen(QPen(Qt::white, 2.4));
+            p.drawEllipse(marker, 7.0, 7.0);
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton)
+            choose(e->pos());
+    }
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (e->buttons() & Qt::LeftButton)
+            choose(e->pos());
+    }
+
+private:
+    QColor m_color;
+    void choose(const QPoint &pos) {
+        const QPointF delta = QPointF(pos) - QPointF(width() / 2.0, height() / 2.0);
+        const qreal distance = std::hypot(delta.x(), delta.y());
+        const qreal outer = qMin(width(), height()) / 2.0 - 9;
+        const qreal inner = 35.0;
+        if (distance > outer)
+            return;
+
+        const int level[5] = {35, 85, 135, 195, 255};
+        int hue = m_color.hsvHue() < 0 ? 60 : m_color.hsvHue();
+        int saturation = 0;
+        if (distance >= inner) {
+            qreal clockwise = qRadiansToDegrees(std::atan2(delta.x(), -delta.y()));
+            if (clockwise < 0)
+                clockwise += 360.0;
+            const int sector = qBound(0, int(clockwise / 30.0), 11);
+            hue = (60 + sector * 30) % 360;
+            const int ring = qBound(0, int((distance - inner) * 5.0 / (outer - inner)), 4);
+            saturation = level[ring];
+        }
+        // Choosing a hue from an initially black stroke must be able to produce
+        // a visible colour rather than silently remaining at zero brightness.
+        const int value = m_color.value() == 0 ? 255 : m_color.value();
+        m_color.setHsv(hue, saturation, value, m_color.alpha());
+        update();
+        if (onSelectionChanged)
+            onSelectionChanged(m_color);
+    }
+};
+
+class RadialColorDialog : public QDialog {
+public:
+    RadialColorDialog(const QString &title, const QColor &initial, QWidget *parent = nullptr)
+        : QDialog(parent), m_color(initial.isValid() ? initial : QColor(Qt::black)) {
+        setWindowTitle(title);
+        setModal(true);
+        setStyleSheet(
+            "QDialog { background-color:#222428; color:#f6f6f6; }"
+            "QLabel { color:#efefef; font-size:14px; }"
+            "QSlider::groove:horizontal { height:8px; background:#50545c; border-radius:4px; }"
+            "QSlider::handle:horizontal { background:#ffffff; width:20px; height:20px;"
+            " margin:-6px 0; border-radius:10px; }"
+            "QPushButton { background:#353a41; border:1px solid #626971;"
+            " color:white; border-radius:6px; padding:8px 15px; }"
+            "QPushButton:hover { background:#485260; }"
+        );
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(17, 12, 17, 14);
+        layout->setSpacing(12);
+
+        m_wheel = new RadialColorWheel(m_color, this);
+        layout->addWidget(m_wheel, 0, Qt::AlignCenter);
+        m_wheel->onSelectionChanged = [this](const QColor &c) { setSelected(c); };
+
+        auto addSlider = [this, layout](const QString &name, QSlider *&slider,
+                                        QLabel *&valueLabel, int value) {
+            auto *line = new QHBoxLayout();
+            QLabel *nameLabel = new QLabel(name, this);
+            nameLabel->setFixedWidth(76);
+            line->addWidget(nameLabel);
+            slider = new QSlider(Qt::Horizontal, this);
+            slider->setRange(0, 100);
+            slider->setValue(value);
+            line->addWidget(slider, 1);
+            valueLabel = new QLabel(QString::number(value) + "%", this);
+            valueLabel->setMinimumWidth(48);
+            valueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            line->addWidget(valueLabel);
+            layout->addLayout(line);
+        };
+        addSlider("Brightness", m_valueSlider, m_valueLabel,
+                  qRound(m_color.valueF() * 100));
+        addSlider("Opacity", m_alphaSlider, m_alphaLabel,
+                  qRound(m_color.alphaF() * 100));
+
+        connect(m_valueSlider, &QSlider::valueChanged, this, [this](int value) {
+            QColor next;
+            const int hue = m_color.hsvHue() < 0 ? 60 : m_color.hsvHue();
+            next.setHsv(hue, m_color.hsvSaturation(), qRound(value * 2.55), m_color.alpha());
+            setSelected(next);
+        });
+        connect(m_alphaSlider, &QSlider::valueChanged, this, [this](int percent) {
+            QColor next = m_color;
+            next.setAlpha(qRound(percent * 2.55));
+            setSelected(next);
+        });
+
+        auto *sampleRow = new QHBoxLayout();
+        m_sample = new QLabel(this);
+        m_sample->setFixedSize(68, 36);
+        sampleRow->addWidget(m_sample);
+        m_colorDetails = new QLabel(this);
+        sampleRow->addWidget(m_colorDetails, 1);
+        layout->addLayout(sampleRow);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Ok)->setText("Use colour");
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+        setSelected(m_color);
+    }
+
+    QColor selectedColor() const { return m_color; }
+
+private:
+    QColor m_color;
+    RadialColorWheel *m_wheel = nullptr;
+    QSlider *m_valueSlider = nullptr;
+    QSlider *m_alphaSlider = nullptr;
+    QLabel *m_valueLabel = nullptr;
+    QLabel *m_alphaLabel = nullptr;
+    QLabel *m_sample = nullptr;
+    QLabel *m_colorDetails = nullptr;
+
+    void setSelected(const QColor &c) {
+        m_color = c;
+        m_wheel->setColor(c);
+        const int brightness = qRound(c.valueF() * 100);
+        const int opacity = qRound(c.alphaF() * 100);
+        {
+            QSignalBlocker block(m_valueSlider);
+            m_valueSlider->setValue(brightness);
+        }
+        {
+            QSignalBlocker block(m_alphaSlider);
+            m_alphaSlider->setValue(opacity);
+        }
+        m_valueLabel->setText(QString::number(brightness) + "%");
+        m_alphaLabel->setText(QString::number(opacity) + "%");
+        QPixmap swatch(m_sample->size());
+        swatch.fill(Qt::transparent);
+        QPainter p(&swatch);
+        const QRect box = swatch.rect().adjusted(1, 1, -2, -2);
+        drawCheckerboard(p, box, 9);
+        p.fillRect(box, c);
+        p.setPen(QColor("#ededed"));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(box);
+        p.end();
+        m_sample->setPixmap(swatch);
+        m_colorDetails->setText(QString("R %1  G %2  B %3  A %4")
+                               .arg(c.red()).arg(c.green()).arg(c.blue()).arg(c.alpha()));
+    }
+};
+
+class FloatingToolbar : public QFrame {
+public:
+    explicit FloatingToolbar(QWidget *parent = nullptr) : QFrame(parent) {
+        setObjectName("floatingToolbar");
+        setAttribute(Qt::WA_StyledBackground, true);
+        setStyleSheet("QFrame#floatingToolbar { background:rgba(25,27,32,239);"
+                      " border:1px solid #717985; border-radius:11px; }"
+                      "QPushButton {background:#363b42; color:#ffffff; border:1px solid #525963;"
+                      " border-radius:5px; font-size:19px; padding:0px;}"
+                      "QPushButton:hover {background:#505c68;}"
+                      "QPushButton:checked {background:#305c80; border:2px solid #91d0fa;}"
+                      "QLabel { color:#d6dce5; font-size:16px; }");
+    }
+    void setDragHandle(QWidget *handle) {
+        m_handle = handle;
+        m_handle->setCursor(Qt::SizeAllCursor);
+        m_handle->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == m_handle) {
+            if (event->type() == QEvent::MouseButtonPress) {
+                auto *mouse = static_cast<QMouseEvent *>(event);
+                if (mouse->button() == Qt::LeftButton) {
+                    m_dragging = true;
+                    m_dragStart = mouse->globalPos();
+                    m_initialPos = pos();
+                    return true;
+                }
+            } else if (event->type() == QEvent::MouseMove && m_dragging) {
+                auto *mouse = static_cast<QMouseEvent *>(event);
+                QPoint next = m_initialPos + mouse->globalPos() - m_dragStart;
+                if (parentWidget()) {
+                    next.setX(qBound(0, next.x(), qMax(0, parentWidget()->width() - width())));
+                    next.setY(qBound(0, next.y(), qMax(0, parentWidget()->height() - height())));
+                }
+                move(next);
+                return true;
+            } else if (event->type() == QEvent::MouseButtonRelease && m_dragging) {
+                m_dragging = false;
+                return true;
+            }
+        }
+        return QFrame::eventFilter(watched, event);
+    }
+
+private:
+    QWidget *m_handle = nullptr;
+    bool m_dragging = false;
+    QPoint m_dragStart;
+    QPoint m_initialPos;
+};
+
 // ─────────────────────────────────────────────
 // Drawing Canvas
 // ─────────────────────────────────────────────
@@ -113,7 +452,7 @@ public:
         // Default canvas size
         QSize initialSize(1280, 720);
         m_image = QImage(initialSize, QImage::Format_ARGB32_Premultiplied);
-        m_image.fill(m_bgColor);
+        m_image.fill(Qt::transparent);
     }
 
     // ───── public API ─────
@@ -136,6 +475,11 @@ public:
         m_fillColor = c;
     }
 
+    void setTransparentBackground(bool enabled) {
+        m_transparentBackground = enabled;
+        update();
+    }
+
     void setPenSize(int s) {
         m_penSize = qMax(1, s);
     }
@@ -144,7 +488,7 @@ public:
         pushUndo();
         m_redoStack.clear();
         if (!m_image.isNull()) {
-            m_image.fill(m_bgColor);
+            m_image.fill(Qt::transparent);
         }
         update();
     }
@@ -174,12 +518,15 @@ public:
         if (path.isEmpty() || m_image.isNull())
             return false;
 
+        // Keep actual pixel alpha whenever the transparent-background option
+        // is on. Otherwise composite on white to match the visible page.
+        if (m_transparentBackground)
+            return m_image.save(path, "PNG");
         QImage out(m_image.size(), QImage::Format_ARGB32_Premultiplied);
         out.fill(m_bgColor);
         QPainter p(&out);
         p.drawImage(0, 0, m_image);
         p.end();
-
         return out.save(path, "PNG");
     }
 
@@ -224,7 +571,7 @@ public:
         m_redoStack.clear();
 
         QImage newImage(newSize, QImage::Format_ARGB32_Premultiplied);
-        newImage.fill(m_bgColor);
+        newImage.fill(Qt::transparent);
 
         if (!m_image.isNull()) {
             QPainter p(&newImage);
@@ -272,9 +619,16 @@ protected:
         p.translate(m_viewOffset);
         p.scale(m_zoomFactor, m_zoomFactor);
 
-        // Draw white "page" under the image
+        // Show transparent pixels against a checkerboard when enabled.
         QRect imageRect(QPoint(0, 0), m_image.size());
-        p.fillRect(imageRect, m_bgColor);
+        if (m_transparentBackground) {
+            p.save();
+            p.setClipRect(imageRect);
+            drawCheckerboard(p, imageRect, 12);
+            p.restore();
+        } else {
+            p.fillRect(imageRect, m_bgColor);
+        }
         p.drawImage(0, 0, m_image);
 
         // Shape preview
@@ -342,6 +696,15 @@ protected:
         m_currentPoint = imgPos;
         m_showPreview = false;
 
+        // Fill finds and validates the entire bounded area first, then pushes
+        // a single undo snapshot only if it can actually apply a fill.
+        if (m_tool == Tool::Fill) {
+            if (floodFill(imgPos, m_fillColor))
+                update();
+            m_drawing = false;
+            return;
+        }
+
         if (m_tool != Tool::None) {
             pushUndo();
             m_redoStack.clear();
@@ -349,10 +712,6 @@ protected:
 
         if (m_tool == Tool::Pen || m_tool == Tool::Eraser) {
             drawLineOnImage(m_lastPoint, m_lastPoint); // dot
-        } else if (m_tool == Tool::Fill) {
-            floodFill(imgPos, m_fillColor);
-            m_drawing = false;
-            update();
         } else if (m_tool == Tool::Line ||
                    m_tool == Tool::Rect ||
                    m_tool == Tool::Ellipse) {
@@ -440,6 +799,7 @@ private:
     QColor m_penColor;
     QColor m_fillColor;
     QColor m_bgColor;
+    bool   m_transparentBackground = false;
     int    m_penSize;
 
     QImage m_image;
@@ -491,9 +851,10 @@ private:
 
     void drawLineOnImage(const QPoint &from, const QPoint &to) {
         QPainter p(&m_image);
-        QColor c = (m_tool == Tool::Eraser) ? m_bgColor : m_penColor;
-
-        QPen pen(c, m_penSize, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        // Eraser removes real alpha instead of merely overpainting white.
+        if (m_tool == Tool::Eraser)
+            p.setCompositionMode(QPainter::CompositionMode_Clear);
+        QPen pen(m_penColor, m_penSize, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
         p.setPen(pen);
         p.drawLine(from, to);
         p.end();
@@ -505,39 +866,75 @@ private:
         update(dirtyWidgetRect);
     }
 
-    void floodFill(const QPoint &start, const QColor &newColor) {
-        if (!QRect(0, 0, m_image.width(), m_image.height()).contains(start))
-            return;
-
-        QColor targetColor = QColor::fromRgba(m_image.pixel(start));
-        if (targetColor == newColor)
-            return;
-
-        QStack<QPoint> stack;
-        stack.push(start);
-
+    bool floodFill(const QPoint &start, const QColor &newColor) {
         const int w = m_image.width();
         const int h = m_image.height();
+        if (!QRect(0, 0, w, h).contains(start))
+            return false;
 
-        while (!stack.isEmpty()) {
-            QPoint pt = stack.pop();
-            int x = pt.x();
-            int y = pt.y();
+        const QRgb target = m_image.pixel(start);
+        const QRgb replacement = qPremultiply(newColor.rgba());
+        if (target == replacement)
+            return false;
 
-            if (x < 0 || x >= w || y < 0 || y >= h)
+        // Treat small differences from anti-aliasing as part of the same area,
+        // while keeping actual outlines/colour boundaries impermeable.
+        const int tolerance = 12;
+        auto matches = [&](int x, int y) -> bool {
+            const QRgb sample = reinterpret_cast<const QRgb *>(m_image.constScanLine(y))[x];
+            return qAbs(qAlpha(sample) - qAlpha(target)) <= tolerance &&
+                   qAbs(qRed(sample) - qRed(target)) <= tolerance &&
+                   qAbs(qGreen(sample) - qGreen(target)) <= tolerance &&
+                   qAbs(qBlue(sample) - qBlue(target)) <= tolerance;
+        };
+
+        // Collect horizontal runs without modifying the original image. If the
+        // selected region reaches ANY page edge, it is uncontained: do nothing.
+        // This prevents a click on an unclosed shape from painting the page.
+        QBitArray visited(w * h, false);
+        QVector<int> pending;
+        QVector<int> region;
+        pending.reserve(1024);
+        region.reserve(4096);
+        pending.append(start.y() * w + start.x());
+        while (!pending.isEmpty()) {
+            const int index = pending.takeLast();
+            const int x = index % w;
+            const int y = index / w;
+            if (visited.testBit(index) || !matches(x, y))
                 continue;
 
-            QColor current = QColor::fromRgba(m_image.pixel(x, y));
-            if (current != targetColor)
-                continue;
-
-            m_image.setPixelColor(x, y, newColor);
-
-            stack.push(QPoint(x + 1, y));
-            stack.push(QPoint(x - 1, y));
-            stack.push(QPoint(x, y + 1));
-            stack.push(QPoint(x, y - 1));
+            int left = x;
+            while (left > 0 && !visited.testBit(y * w + left - 1) &&
+                   matches(left - 1, y))
+                --left;
+            for (int px = left; px < w; ++px) {
+                const int at = y * w + px;
+                if (visited.testBit(at) || !matches(px, y))
+                    break;
+                // No image modification or undo record has occurred yet.
+                if (px == 0 || px == w - 1 || y == 0 || y == h - 1)
+                    return false;
+                visited.setBit(at);
+                region.append(at);
+                const int above = at - w;
+                const int below = at + w;
+                if (!visited.testBit(above) && matches(px, y - 1))
+                    pending.append(above);
+                if (!visited.testBit(below) && matches(px, y + 1))
+                    pending.append(below);
+            }
         }
+
+        if (region.isEmpty())
+            return false;
+        pushUndo();
+        m_redoStack.clear();
+        for (int index : region) {
+            QRgb *scan = reinterpret_cast<QRgb *>(m_image.scanLine(index / w));
+            scan[index % w] = replacement;
+        }
+        return true;
     }
 
     void centerCanvas() {
@@ -637,7 +1034,7 @@ public:
         leftGroup->addWidget(btnEllipse);
 
         btnFill = new QPushButton("🪣", this);
-        styleIconButton(btnFill, "Fill");
+        styleIconButton(btnFill, "Fill enclosed region");
         leftGroup->addWidget(btnFill);
 
         btnGrab = new QPushButton("👋", this);
@@ -676,11 +1073,17 @@ public:
         styleIconButton(btnSave, "Save PNG");
         rightGroup->addWidget(btnSave);
 
+        btnFullscreen = new QPushButton("⛶", this);
+        styleIconButton(btnFullscreen, "Fullscreen canvas (F11)");
+        rightGroup->addWidget(btnFullscreen);
+
         topBar->addLayout(leftGroup);
         topBar->addStretch(1);
         topBar->addLayout(rightGroup);
 
-        mainLayout->addLayout(topBar);
+        toolbarContainer = new QWidget(central);
+        toolbarContainer->setLayout(topBar);
+        mainLayout->addWidget(toolbarContainer);
 
         // ─────────────────────────────────
         // SIZE + COLOR BAR + CANVAS PRESETS
@@ -718,7 +1121,10 @@ public:
 
         strokeColorBtn = new QPushButton(this);
         strokeColorBtn->setFixedSize(32, 32);
-        strokeColorBtn->setStyleSheet(colorButtonStyle(QColor(Qt::black)));
+        strokeColorBtn->setStyleSheet(colorButtonStyle());
+        strokeColorBtn->setIcon(colorSwatchIcon(strokeColor));
+        strokeColorBtn->setIconSize(QSize(28, 28));
+        strokeColorBtn->setToolTip("Stroke colour and opacity");
         controlBar->addWidget(strokeColorBtn);
 
         QLabel *fillLabel = new QLabel("Fill:", this);
@@ -727,7 +1133,10 @@ public:
 
         fillColorBtn = new QPushButton(this);
         fillColorBtn->setFixedSize(32, 32);
-        fillColorBtn->setStyleSheet(colorButtonStyle(QColor(Qt::red)));
+        fillColorBtn->setStyleSheet(colorButtonStyle());
+        fillColorBtn->setIcon(colorSwatchIcon(fillColor));
+        fillColorBtn->setIconSize(QSize(28, 28));
+        fillColorBtn->setToolTip("Fill colour and opacity");
         controlBar->addWidget(fillColorBtn);
 
         QLabel *canvasLabel = new QLabel("Canvas:", this);
@@ -748,16 +1157,23 @@ public:
         sizePresetBox->addItem("Custom...");
         controlBar->addWidget(sizePresetBox);
 
+        transparentCheck = new QCheckBox("Transparent", this);
+        transparentCheck->setStyleSheet("QCheckBox {color:#eeeeee;font-size:14px;}"
+                                        "QCheckBox::indicator {width:17px;height:17px;}");
+        transparentCheck->setToolTip("Display an alpha checkerboard and save PNGs with transparency");
+        controlBar->addWidget(transparentCheck);
         controlBar->addStretch(1);
 
-        mainLayout->addLayout(controlBar);
+        controlContainer = new QWidget(central);
+        controlContainer->setLayout(controlBar);
+        mainLayout->addWidget(controlContainer);
 
         // ─────────────────────────────────
         // CANVAS CONTAINER
         // ─────────────────────────────────
-        QWidget *canvasContainer = new QWidget(this);
+        canvasContainer = new QWidget(central);
         canvasContainer->setStyleSheet("background:#282828;");
-        QVBoxLayout *canvasLayout = new QVBoxLayout(canvasContainer);
+        canvasLayout = new QVBoxLayout(canvasContainer);
         canvasLayout->setContentsMargins(32, 16, 32, 16);
         canvasLayout->setSpacing(0);
 
@@ -806,7 +1222,9 @@ public:
         btnFit->setAccessibleName("Fit image to window");
         zoomLayout->addWidget(btnFit);
 
-        mainLayout->addLayout(zoomLayout);
+        zoomContainer = new QWidget(central);
+        zoomContainer->setLayout(zoomLayout);
+        mainLayout->addWidget(zoomContainer);
 
         // ─────────────────────────────────
         // STATUSBAR
@@ -815,6 +1233,23 @@ public:
         sb->setStyleSheet("QStatusBar { background:#282828; color:white; font-size:16px; }");
         setStatusBar(sb);
         statusBar()->showMessage("Ready");
+
+        createFloatingToolbar();
+        canvasContainer->installEventFilter(this);
+        auto *fullscreenShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
+        connect(fullscreenShortcut, &QShortcut::activated, this,
+                [this]() { toggleCanvasFullscreen(); });
+        auto *exitFullscreenShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), this);
+        connect(exitFullscreenShortcut, &QShortcut::activated, this, [this]() {
+            if (isFullScreen()) toggleCanvasFullscreen();
+        });
+        connect(btnFullscreen, &QPushButton::clicked, this,
+                [this]() { toggleCanvasFullscreen(); });
+        connect(transparentCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+            canvas->setTransparentBackground(enabled);
+            if (floatingTransparency)
+                floatingTransparency->setChecked(enabled);
+        });
 
         // ─────────────────────────────────
         // CONNECTIONS
@@ -895,20 +1330,15 @@ public:
         });
 
         connect(strokeColorBtn, &QPushButton::clicked, this, [this]() {
-            QColor c = QColorDialog::getColor(Qt::black, this, "Select Stroke Color");
-            if (c.isValid()) {
-                canvas->setPenColor(c);
-                penPreview->setPenColor(c);
-                strokeColorBtn->setStyleSheet(colorButtonStyle(c));
-            }
+            RadialColorDialog dialog("Select stroke colour", strokeColor, this);
+            if (dialog.exec() == QDialog::Accepted)
+                applyStrokeColor(dialog.selectedColor());
         });
 
         connect(fillColorBtn, &QPushButton::clicked, this, [this]() {
-            QColor c = QColorDialog::getColor(Qt::red, this, "Select Fill Color");
-            if (c.isValid()) {
-                canvas->setFillColor(c);
-                fillColorBtn->setStyleSheet(colorButtonStyle(c));
-            }
+            RadialColorDialog dialog("Select fill colour", fillColor, this);
+            if (dialog.exec() == QDialog::Accepted)
+                applyFillColor(dialog.selectedColor());
         });
 
         connect(btnUndo, &QPushButton::clicked, this, [this]() {
@@ -987,12 +1417,12 @@ public:
 
         // Default setup
         canvas->setPenSize(sizeSlider->value());
-        canvas->setPenColor(Qt::black);
-        canvas->setFillColor(Qt::red);
+        applyStrokeColor(strokeColor);
+        applyFillColor(fillColor);
         canvas->setTool(DrawingCanvas::Tool::Pen);
         btnPen->setChecked(true);
         penPreview->setPenSize(sizeSlider->value());
-        penPreview->setPenColor(Qt::black);
+        penPreview->setPenColor(strokeColor);
         canvas->setZoom(1.0);
     }
 
@@ -1009,6 +1439,9 @@ public:
 
         openedImagePath = QFileInfo(path).absoluteFilePath();
         setWindowTitle("🌅Draw - " + QFileInfo(path).fileName());
+        // Images carrying an alpha channel should not be flattened by default.
+        if (image.hasAlphaChannel())
+            transparentCheck->setChecked(true);
 
         // Opening an image (toolbar or command-line) always starts in Grab mode,
         // preventing an accidental stroke while adjusting the view.
@@ -1045,6 +1478,14 @@ public:
     }
 
 protected:
+    bool eventFilter(QObject *watched, QEvent *ev) override {
+        if (watched == canvasContainer && ev->type() == QEvent::Resize &&
+            floatingToolbar && floatingToolbar->isVisible()) {
+            QTimer::singleShot(0, this, [this]() { keepFloatingMenuVisible(); });
+        }
+        return QMainWindow::eventFilter(watched, ev);
+    }
+
     bool event(QEvent *ev) override {
         if (ev->type() == QEvent::Gesture) {
             return gestureEvent(static_cast<QGestureEvent*>(ev));
@@ -1068,6 +1509,20 @@ private:
     QPushButton *btnUndo;
     QPushButton *btnRedo;
     QPushButton *btnFit;
+    QPushButton *btnFullscreen;
+
+    QWidget *toolbarContainer = nullptr;
+    QWidget *controlContainer = nullptr;
+    QWidget *zoomContainer = nullptr;
+    QWidget *canvasContainer = nullptr;
+    QVBoxLayout *canvasLayout = nullptr;
+    FloatingToolbar *floatingToolbar = nullptr;
+    QPushButton *floatingStroke = nullptr;
+    QPushButton *floatingFill = nullptr;
+    QPushButton *floatingTransparency = nullptr;
+    QCheckBox *transparentCheck = nullptr;
+    QColor strokeColor = Qt::black;
+    QColor fillColor = Qt::red;
 
     QSlider   *sizeSlider;
     PenSizePreview *penPreview;
@@ -1111,14 +1566,145 @@ private:
         return false;
     }
 
-    static QString colorButtonStyle(const QColor &c) {
-        return QString(
-                   "QPushButton {"
-                   " border-radius:4px; border:2px solid #f0f0f0;"
-                   " background-color:%1;"
-                   "}"
-                   "QPushButton:hover { border:2px solid #ffffff; }")
-            .arg(c.name());
+    static QString colorButtonStyle() {
+        return QStringLiteral(
+            "QPushButton {background:#30343a;border-radius:5px;"
+            "border:1px solid #a0a7af;padding:0px;}"
+            "QPushButton:hover {border:2px solid #ffffff;}");
+    }
+
+    void applyStrokeColor(const QColor &c) {
+        strokeColor = c;
+        canvas->setPenColor(c);
+        penPreview->setPenColor(c);
+        strokeColorBtn->setIcon(colorSwatchIcon(c));
+        if (floatingStroke)
+            floatingStroke->setIcon(colorSwatchIcon(c, 26));
+    }
+
+    void applyFillColor(const QColor &c) {
+        fillColor = c;
+        canvas->setFillColor(c);
+        fillColorBtn->setIcon(colorSwatchIcon(c));
+        if (floatingFill)
+            floatingFill->setIcon(colorSwatchIcon(c, 26));
+    }
+
+    void keepFloatingMenuVisible() {
+        if (!floatingToolbar || !canvasContainer)
+            return;
+        floatingToolbar->adjustSize();
+        QPoint current = floatingToolbar->pos();
+        current.setX(qBound(0, current.x(),
+                            qMax(0, canvasContainer->width() - floatingToolbar->width())));
+        current.setY(qBound(0, current.y(),
+                            qMax(0, canvasContainer->height() - floatingToolbar->height())));
+        floatingToolbar->move(current);
+        floatingToolbar->raise();
+    }
+
+    void toggleCanvasFullscreen() {
+        const bool enable = !isFullScreen();
+        toolbarContainer->setVisible(!enable);
+        controlContainer->setVisible(!enable);
+        zoomContainer->setVisible(!enable);
+        statusBar()->setVisible(!enable);
+        canvasLayout->setContentsMargins(enable ? 0 : 32, enable ? 0 : 16,
+                                        enable ? 0 : 32, enable ? 0 : 16);
+        if (enable) {
+            showFullScreen();
+            floatingToolbar->show();
+            floatingToolbar->adjustSize();
+            floatingToolbar->move(12, 12);
+            floatingToolbar->raise();
+        } else {
+            floatingToolbar->hide();
+            showNormal();
+        }
+        QTimer::singleShot(0, this, [this]() { keepFloatingMenuVisible(); });
+    }
+
+    void createFloatingToolbar() {
+        floatingToolbar = new FloatingToolbar(canvasContainer);
+        auto *layout = new QVBoxLayout(floatingToolbar);
+        layout->setContentsMargins(7, 6, 7, 7);
+        layout->setSpacing(5);
+        auto *top = new QHBoxLayout();
+        top->setSpacing(4);
+        auto *bottom = new QHBoxLayout();
+        bottom->setSpacing(5);
+
+        auto *handle = new QLabel("⠿", floatingToolbar);
+        handle->setFixedSize(22, 34);
+        handle->setToolTip("Drag to reposition tools");
+        handle->setAlignment(Qt::AlignCenter);
+        floatingToolbar->setDragHandle(handle);
+        top->addWidget(handle);
+
+        auto makeButton = [this](const QString &icon, const QString &tip,
+                                 QHBoxLayout *row, int width = 34) {
+            auto *b = new QPushButton(icon, floatingToolbar);
+            b->setFixedSize(width, 34);
+            b->setToolTip(tip);
+            b->setAccessibleName(tip);
+            row->addWidget(b);
+            return b;
+        };
+        auto *tools = new QButtonGroup(floatingToolbar);
+        tools->setExclusive(true);
+        const QList<QPushButton *> originals = {
+            btnPen, btnEraser, btnLine, btnRect, btnEllipse, btnFill, btnGrab
+        };
+        for (QPushButton *original : originals) {
+            QPushButton *b = makeButton(original->text(), original->toolTip(), top);
+            b->setCheckable(true);
+            tools->addButton(b);
+            connect(b, &QPushButton::clicked, original, &QPushButton::click);
+            connect(original, &QPushButton::toggled, b, &QPushButton::setChecked);
+        }
+        auto *undo = makeButton("↩", "Undo", top);
+        auto *redo = makeButton("↪", "Redo", top);
+        connect(undo, &QPushButton::clicked, btnUndo, &QPushButton::click);
+        connect(redo, &QPushButton::clicked, btnRedo, &QPushButton::click);
+        layout->addLayout(top);
+
+        auto *sizeCaption = new QLabel("Size", floatingToolbar);
+        bottom->addWidget(sizeCaption);
+        auto *miniSizeSlider = new QSlider(Qt::Horizontal, floatingToolbar);
+        miniSizeSlider->setRange(1, 50);
+        miniSizeSlider->setValue(sizeSlider->value());
+        miniSizeSlider->setFixedWidth(82);
+        miniSizeSlider->setToolTip("Pen and eraser size");
+        bottom->addWidget(miniSizeSlider);
+        connect(miniSizeSlider, &QSlider::valueChanged, sizeSlider, &QSlider::setValue);
+        connect(sizeSlider, &QSlider::valueChanged, miniSizeSlider, &QSlider::setValue);
+
+        floatingStroke = makeButton("", "Stroke colour / opacity", bottom, 32);
+        floatingStroke->setIconSize(QSize(26, 26));
+        floatingStroke->setIcon(colorSwatchIcon(strokeColor, 26));
+        floatingFill = makeButton("", "Fill colour / opacity", bottom, 32);
+        floatingFill->setIconSize(QSize(26, 26));
+        floatingFill->setIcon(colorSwatchIcon(fillColor, 26));
+        connect(floatingStroke, &QPushButton::clicked, strokeColorBtn, &QPushButton::click);
+        connect(floatingFill, &QPushButton::clicked, fillColorBtn, &QPushButton::click);
+
+        floatingTransparency = makeButton("◩", "Transparent background for PNG", bottom);
+        floatingTransparency->setCheckable(true);
+        connect(floatingTransparency, &QPushButton::toggled,
+                transparentCheck, &QCheckBox::setChecked);
+        auto *clear = makeButton("🗑", "Clear", bottom);
+        auto *open = makeButton("📂", "Open image", bottom);
+        auto *save = makeButton("💾", "Save PNG", bottom);
+        auto *fit = makeButton("⤢", "Fit to screen", bottom);
+        auto *exit = makeButton("⛶", "Exit fullscreen (F11 / Esc)", bottom);
+        connect(clear, &QPushButton::clicked, btnClear, &QPushButton::click);
+        connect(open, &QPushButton::clicked, btnOpen, &QPushButton::click);
+        connect(save, &QPushButton::clicked, btnSave, &QPushButton::click);
+        connect(fit, &QPushButton::clicked, btnFit, &QPushButton::click);
+        connect(exit, &QPushButton::clicked, this, [this]() { toggleCanvasFullscreen(); });
+        layout->addLayout(bottom);
+        floatingToolbar->adjustSize();
+        floatingToolbar->hide();
     }
 };
 
