@@ -791,6 +791,7 @@ public:
     QMap<QWidget*, QRect> finalGeomMap;
     QMap<QWidget*, QGraphicsOpacityEffect*> opacityMap;
     QPointer<QSequentialAnimationGroup> panelAnimation;
+    QList<QList<QWidget*>> cascadeStages;
     QString lastBatteryIconName;
     QProcess *powerSaverQuery = nullptr;
     QString powerSaverExecutable = QStandardPaths::findExecutable("powerprofilesctl");
@@ -1559,107 +1560,174 @@ public:
         updateGeometry();
     }
 
-    // Original three-stage cascading card animation: each card grows from
-    // 30% to its full geometry while fading in. Closing runs in reverse.
-    // Keep a single tracked animation sequence so rapid interaction cannot
-    // leave orphaned animations changing geometry on a hidden panel.
+    // Animate the visible layout in the original direction: clock card,
+    // system-card grid *one physical row at a time*, brightness card last.
+    // Each card grows from 30% with a fade, staggered slightly across a row.
+    // Reversing the stages provides the matching close cascade.  Animating
+    // the cards rather than the entire grid also avoids an expensive
+    // full-grid opacity effect on every frame.
+    QList<QList<QWidget*>> buildCascadeStages() const {
+        QList<QList<QWidget*>> stages;
+        if (topCardWidget) stages.append(QList<QWidget*>{topCardWidget});
+        if (systemGrid) {
+            QMap<int, QList<QWidget*>> rows;
+            for (QWidget *card : systemCards) {
+                if (!card) continue;
+                const int index = systemGrid->indexOf(card);
+                if (index < 0) continue;
+                int r = 0, c = 0, rs = 0, cs = 0;
+                systemGrid->getItemPosition(index, &r, &c, &rs, &cs);
+                rows[r].append(card);
+            }
+            for (auto it = rows.cbegin(); it != rows.cend(); ++it)
+                if (!it.value().isEmpty()) stages.append(it.value());
+        }
+        if (brightnessCardWidget) stages.append(QList<QWidget*>{brightnessCardWidget});
+        return stages;
+    }
+
+    static QRect scaledCardRect(const QRect &original, double scale) {
+        const int w = qMax(1, qRound(original.width() * scale));
+        const int h = qMax(1, qRound(original.height() * scale));
+        const QPoint centre = original.center();
+        return QRect(centre.x() - w / 2, centre.y() - h / 2, w, h);
+    }
+
+    QGraphicsOpacityEffect *cardOpacity(QWidget *card, qreal initialOpacity) {
+        if (!card) return nullptr;
+        auto *eff = qobject_cast<QGraphicsOpacityEffect*>(card->graphicsEffect());
+        if (!eff) {
+            eff = new QGraphicsOpacityEffect(card);
+            card->setGraphicsEffect(eff);
+            eff->setOpacity(initialOpacity);
+        }
+        opacityMap.insert(card, eff);
+        return eff;
+    }
+
+    void stopCascade() {
+        if (!panelAnimation) return;
+        auto *old = panelAnimation.data();
+        panelAnimation = nullptr;
+        old->stop();
+        old->deleteLater();
+    }
+
+    // Remove offscreen effects when idle: they are useful for the transition,
+    // but retaining them on every card can burden Xorg/Picom while the panel
+    // is open and its live status text updates.
+    void releaseCascadeEffects() {
+        for (auto it = opacityMap.cbegin(); it != opacityMap.cend(); ++it) {
+            QWidget *card = it.key();
+            if (card && card->graphicsEffect() == it.value())
+                card->setGraphicsEffect(nullptr);
+        }
+        opacityMap.clear();
+    }
+
+    // A stage is either the clock, one row of system cards, or brightness.
+    // Cards in a row overlap slightly in time to form a visible cascade.
+    void appendCascadeStage(QSequentialAnimationGroup *sequence,
+                            QList<QWidget*> cards, bool opening) {
+        if (!opening) std::reverse(cards.begin(), cards.end());
+        auto *row = new QParallelAnimationGroup(sequence);
+        int position = 0;
+        for (QWidget *card : cards) {
+            if (!card || !finalGeomMap.contains(card)) continue;
+            auto *eff = opacityMap.value(card, nullptr);
+            if (!eff) continue;
+            // When the user closes during an opening animation, skip cards
+            // that have not started appearing yet (instead of delaying exit).
+            if (!opening && eff->opacity() < 0.01) continue;
+
+            auto *offset = new QSequentialAnimationGroup(row);
+            if (position > 0) offset->addPause(position * 20);
+            auto *pair = new QParallelAnimationGroup(offset);
+
+            auto *geometry = new QPropertyAnimation(card, "geometry", pair);
+            geometry->setDuration(opening ? 115 : 100);
+            geometry->setStartValue(card->geometry());
+            geometry->setEndValue(opening ? finalGeomMap.value(card) :
+                                   scaledCardRect(finalGeomMap.value(card), 0.30));
+            geometry->setEasingCurve(opening ? QEasingCurve::OutCubic :
+                                              QEasingCurve::InCubic);
+
+            auto *opacity = new QPropertyAnimation(eff, "opacity", pair);
+            opacity->setDuration(opening ? 110 : 95);
+            opacity->setStartValue(eff->opacity());
+            opacity->setEndValue(opening ? 1.0 : 0.0);
+            opacity->setEasingCurve(opening ? QEasingCurve::OutQuad :
+                                             QEasingCurve::InQuad);
+
+            pair->addAnimation(geometry);
+            pair->addAnimation(opacity);
+            offset->addAnimation(pair);
+            row->addAnimation(offset);
+            ++position;
+        }
+        if (row->animationCount() > 0) {
+            sequence->addAnimation(row);
+            sequence->addPause(12);
+        } else {
+            delete row;
+        }
+    }
+
     void openPanel() {
         if (closing || isVisible()) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
         if (brightnessController) brightnessController->panelOpened();
         if (refreshTimer) { refreshEnabled = false; refreshTimer->stop(); }
         if (deviceTimer) deviceTimer->stop();
-        if (panelAnimation) {
-            panelAnimation->stop();
-            panelAnimation->deleteLater();
-            panelAnimation = nullptr;
-        }
-        for (QWidget *w : orderedWidgets) {
-            if (!w) continue;
-            if (auto *effect = qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect()))
-                effect->setOpacity(0.0);
-            w->hide();
-        }
-        clockLabel->setText(QTime::currentTime().toString("HH:mm:ss"));
-        showFullScreen();  // the original fullscreen overlay behaviour
+        stopCascade();
+        releaseCascadeEffects();
+        for (QWidget *w : orderedWidgets)
+            if (w) w->hide();
+        if (clockLabel) clockLabel->setText(QTime::currentTime().toString("HH:mm:ss"));
+        showFullScreen();
         raise();
-        // showEvent starts the cascade after Qt has laid out the cards.
+        // showEvent starts the cascade after Qt's layout is ready.
     }
 
     void playOpenAnimation() {
-        if (!isVisible() || closing) return;
-        if (panelAnimation) {
-            panelAnimation->stop();
-            panelAnimation->deleteLater();
-            panelAnimation = nullptr;
-        }
+        if (!isVisible() || closing || panelAnimation) return;
         updateBatteryIconColor();
-
-        const double startScale = 0.3;
         for (QWidget *w : orderedWidgets)
             if (w) w->show();
         if (layout()) layout()->activate();
+        if (systemGrid) systemGrid->activate();
 
+        cascadeStages = buildCascadeStages();
         finalGeomMap.clear();
-        for (QWidget *w : orderedWidgets) {
-            if (!w) continue;
-            const QRect endRect = w->geometry();
-            if (!endRect.isValid()) continue;
-            finalGeomMap.insert(w, endRect);
-            QGraphicsOpacityEffect *eff =
-                qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect());
-            if (!eff) {
-                eff = new QGraphicsOpacityEffect(w);
-                w->setGraphicsEffect(eff);
+        for (const QList<QWidget*> &stage : cascadeStages) {
+            for (QWidget *card : stage) {
+                if (!card || !card->geometry().isValid()) continue;
+                const QRect full = card->geometry();
+                finalGeomMap.insert(card, full);
+                auto *eff = cardOpacity(card, 0.0);
+                if (!eff) continue;
+                eff->setOpacity(0.0);
+                card->setGeometry(scaledCardRect(full, 0.30));
             }
-            eff->setOpacity(0.0);
-            opacityMap.insert(w, eff);
-
-            const int newW = qMax(1, int(endRect.width() * startScale));
-            const int newH = qMax(1, int(endRect.height() * startScale));
-            const QPoint c = endRect.center();
-            const QRect startRect(c.x() - newW / 2, c.y() - newH / 2,
-                                  newW, newH);
-            w->setGeometry(startRect);
         }
 
-        auto *seq = new QSequentialAnimationGroup(this);
-        panelAnimation = seq;
-        for (QWidget *w : orderedWidgets) {
-            if (!w || !finalGeomMap.contains(w)) continue;
-            QGraphicsOpacityEffect *eff = opacityMap.value(w, nullptr);
-            if (!eff) continue;
-            auto *par = new QParallelAnimationGroup(seq);
+        auto *sequence = new QSequentialAnimationGroup(this);
+        panelAnimation = sequence;
+        for (const QList<QWidget*> &stage : cascadeStages)
+            appendCascadeStage(sequence, stage, true);
 
-            auto *gAnim = new QPropertyAnimation(w, "geometry", par);
-            gAnim->setDuration(80);
-            gAnim->setStartValue(w->geometry());
-            gAnim->setEndValue(finalGeomMap.value(w));
-            gAnim->setEasingCurve(QEasingCurve::OutCubic);
-            auto *oAnim = new QPropertyAnimation(eff, "opacity", par);
-            oAnim->setDuration(70);
-            oAnim->setStartValue(0.0);
-            oAnim->setEndValue(1.0);
-            oAnim->setEasingCurve(QEasingCurve::OutQuad);
-            par->addAnimation(gAnim);
-            par->addAnimation(oAnim);
-            seq->addAnimation(par);
-            seq->addPause(10);
-        }
-        QObject::connect(seq, &QSequentialAnimationGroup::finished,
-                         this, [this, seq]() {
-            if (panelAnimation != seq || closing || !isVisible()) return;
+        connect(sequence, &QSequentialAnimationGroup::finished, this,
+                [this, sequence]() {
+            if (panelAnimation != sequence || closing || !isVisible()) return;
             panelAnimation = nullptr;
-            for (QWidget *w : orderedWidgets) {
-                if (!w || !finalGeomMap.contains(w)) continue;
-                w->setGeometry(finalGeomMap.value(w));
-                if (auto *eff = opacityMap.value(w, nullptr)) eff->setOpacity(1.0);
-            }
+            for (auto it = finalGeomMap.cbegin(); it != finalGeomMap.cend(); ++it)
+                if (it.key()) it.key()->setGeometry(it.value());
+            releaseCascadeEffects();
             if (refreshTimer) { refreshEnabled = true; refreshTimer->start(); }
             if (deviceTimer) deviceTimer->start();
             refreshDeviceStates();
         });
-        seq->start(QAbstractAnimation::DeleteWhenStopped);
+        sequence->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
     void animatedClose() {
@@ -1667,71 +1735,40 @@ public:
         closing = true;
         if (refreshTimer) { refreshEnabled = false; refreshTimer->stop(); }
         if (deviceTimer) deviceTimer->stop();
-        if (panelAnimation) {
-            panelAnimation->stop();
-            panelAnimation->deleteLater();
-            panelAnimation = nullptr;
+        const bool interruptedOpen = bool(panelAnimation);
+        stopCascade();
+
+        // On orientation changes, use the current grid rows and geometry.
+        cascadeStages = buildCascadeStages();
+        if (!interruptedOpen) finalGeomMap.clear();
+        for (const QList<QWidget*> &stage : cascadeStages) {
+            for (QWidget *card : stage) {
+                if (!card) continue;
+                if (!interruptedOpen || !finalGeomMap.contains(card))
+                    finalGeomMap.insert(card, card->geometry());
+                cardOpacity(card, 1.0);
+            }
         }
-        const double endScale = 0.3;
-        if (finalGeomMap.isEmpty()) {
+
+        auto *sequence = new QSequentialAnimationGroup(this);
+        panelAnimation = sequence;
+        for (int i = cascadeStages.size() - 1; i >= 0; --i)
+            appendCascadeStage(sequence, cascadeStages.at(i), false);
+        connect(sequence, &QSequentialAnimationGroup::finished, this,
+                [this, sequence]() {
+            if (panelAnimation != sequence) return;
+            panelAnimation = nullptr;
+            for (auto it = finalGeomMap.cbegin(); it != finalGeomMap.cend(); ++it)
+                if (it.key()) it.key()->setGeometry(it.value());
             for (QWidget *w : orderedWidgets)
-                if (w && w->geometry().isValid()) finalGeomMap[w] = w->geometry();
-        }
-        QList<QWidget*> closeOrder = orderedWidgets;
-        std::reverse(closeOrder.begin(), closeOrder.end());
-        auto *seq = new QSequentialAnimationGroup(this);
-        panelAnimation = seq;
-        for (QWidget *w : closeOrder) {
-            if (!w) continue;
-            const QRect base = finalGeomMap.value(w, w->geometry());
-            if (!base.isValid()) continue;
-            QGraphicsOpacityEffect *eff =
-                qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect());
-            if (!eff) {
-                eff = new QGraphicsOpacityEffect(w);
-                w->setGraphicsEffect(eff);
-                eff->setOpacity(1.0);
-                opacityMap.insert(w, eff);
-            }
-            const int newW = qMax(1, int(base.width() * endScale));
-            const int newH = qMax(1, int(base.height() * endScale));
-            const QPoint c = base.center();
-            const QRect small(c.x() - newW / 2, c.y() - newH / 2,
-                              newW, newH);
-            auto *par = new QParallelAnimationGroup(seq);
-            auto *gAnim = new QPropertyAnimation(w, "geometry", par);
-            gAnim->setDuration(70);
-            gAnim->setStartValue(w->geometry());
-            gAnim->setEndValue(small);
-            gAnim->setEasingCurve(QEasingCurve::InCubic);
-            auto *oAnim = new QPropertyAnimation(eff, "opacity", par);
-            oAnim->setDuration(60);
-            oAnim->setStartValue(eff->opacity());
-            oAnim->setEndValue(0.0);
-            oAnim->setEasingCurve(QEasingCurve::InQuad);
-            par->addAnimation(gAnim);
-            par->addAnimation(oAnim);
-            seq->addAnimation(par);
-            seq->addPause(8);
-        }
-        QObject::connect(seq, &QSequentialAnimationGroup::finished,
-                         this, [this, seq]() {
-            if (panelAnimation != seq) return;
-            panelAnimation = nullptr;
-            for (QWidget *w : orderedWidgets) {
-                if (!w) continue;
-                const QRect end = finalGeomMap.value(w);
-                if (end.isValid()) w->setGeometry(end);
-                if (auto *eff = qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect()))
-                    eff->setOpacity(0.0);
-                w->hide();
-            }
+                if (w) w->hide();
+            releaseCascadeEffects();
             hide();
             lower();
             closing = false;
             if (onPanelClosed) onPanelClosed();
         });
-        seq->start(QAbstractAnimation::DeleteWhenStopped);
+        sequence->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
     // ──────────────────────────────  Update battery icon from icons
