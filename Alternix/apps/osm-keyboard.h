@@ -626,9 +626,11 @@ private:
              k("=","="), k("+","+"), k("[","["), k("]","]"), k("{","{"),
              k("}","}"), extra, k("'","\""),
              s(QStringLiteral("↵"), Qt::Key_Return, 2, 2)},
+            // Keep Up in grid columns 20-21, directly above Down in both
+            // letter and symbol layouts; relocate ?, < and > to its left.
             {s(QStringLiteral("⇧"), Qt::Key_Shift), k(";",";"), k(":",":"),
              k("'","'"), k("\"","\""), k(",",","), k(".","."),
-             s(QStringLiteral("↑"), Qt::Key_Up), k("?","?"), k("<","<"), k(">",">")},
+             k("?","?"), k("<","<"), k(">",">"), s(QStringLiteral("↑"), Qt::Key_Up)},
             {s(QStringLiteral("Ctrl"), Qt::Key_Control),
              s(QStringLiteral("Win"), Qt::Key_Meta),
              s(QStringLiteral("Hide"), OSM_KEY_HIDE),
