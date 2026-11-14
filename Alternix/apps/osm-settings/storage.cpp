@@ -7,6 +7,7 @@
 #include <QScrollArea>
 #include <QScroller>
 #include <QFrame>
+#include <QFont>
 #include <QTimer>
 #include <QProcess>
 #include <QFileInfo>
@@ -307,10 +308,18 @@ public:
     explicit StoragePage(QStackedWidget *stack)
         : QWidget(stack), m_stack(stack)
     {
-        // Keep the page background on the page, not every descendant.
-        // Unscoped backgrounds create square backings around rounded tiles.
+        // Keep backgrounds scoped so card corners stay clean, but preserve
+        // the original Sans font and white text throughout this settings page.
+        // Without the descendant text rule, Qt may render numeric labels in
+        // the application palette's silver/grey foreground colour.
         setObjectName("alternixStoragePage");
-        setStyleSheet("QWidget#alternixStoragePage { background:#282828; color:white; font-family:Sans; }");
+        QFont storageFont = font();
+        storageFont.setFamily("Sans");
+        setFont(storageFont);
+        setStyleSheet(
+            "QWidget#alternixStoragePage { background:#282828; color:#ffffff; }"
+            "QWidget#alternixStoragePage QLabel { color:#ffffff; font-family:Sans; }"
+        );
         setMinimumWidth(720);
 
         QVBoxLayout *root = new QVBoxLayout(this);
