@@ -21,6 +21,35 @@
 #include <QSettings>
 #include <QVector>
 #include <QDebug>
+#include <QLockFile>
+#include <QCryptographicHash>
+#include <QWindow>
+
+// Shared, session-scoped overlay coordination. QLockFile automatically clears
+// a marker when its owning process exits and checks for stale markers after a
+// crash. This needs only QtCore/QtWidgets, not a new X11 library dependency.
+static QString overlayMarkerPath(const QString &name) {
+    const QByteArray display = qgetenv("DISPLAY").isEmpty()
+        ? qgetenv("WAYLAND_DISPLAY") : qgetenv("DISPLAY");
+    const QByteArray session = QCryptographicHash::hash(display, QCryptographicHash::Sha256)
+                                   .toHex().left(16);
+    const QString dir = QDir::homePath() + "/.cache/Alternix/overlay-locks";
+    QDir().mkpath(dir);
+    return dir + "/" + name + "-" + QString::fromLatin1(session) + ".lock";
+}
+
+static bool overlayMarkerActive(const QString &name) {
+    const QString marker = overlayMarkerPath(name);
+    if (!QFileInfo::exists(marker))
+        return false;
+    QLockFile probe(marker);
+    probe.setStaleLockTime(0); // never treat a live, long-running lock as expired
+    if (probe.tryLock(0)) {
+        probe.unlock(); // absent or stale marker
+        return false;
+    }
+    return probe.error() == QLockFile::LockFailedError;
+}
 
 // ────────────────────────────────
 // /proc + /sys sampling helpers
@@ -353,10 +382,19 @@ public:
           lastCpuTotal(0),
           lastCpuIdle(0),
           lastRx(0),
-          lastTx(0)
+          lastTx(0),
+          powerMarker(overlayMarkerPath("osm-power")),
+          overLockscreen(overlayMarkerActive("osm-lockscreen"))
     {
-        // Fullscreen, no decorations, overlay-style
-        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+        // When the screen is locked, make the power menu an unmanaged
+        // override-redirect window too. Otherwise Qtile cannot reliably
+        // stack a normal StaysOnTopHint window above the lockscreen.
+        Qt::WindowFlags flags = Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint;
+        if (overLockscreen)
+            flags |= Qt::BypassWindowManagerHint;
+        setWindowFlags(flags);
+        powerMarker.setStaleLockTime(0);
+        powerMarker.tryLock(0); // remains held during privilege prompts
         setAttribute(Qt::WA_TranslucentBackground, true);
 
         // Take up the full screen
@@ -465,6 +503,18 @@ public:
         connect(timer, &QTimer::timeout, this, &PowerMenuWindow::updateStats);
         timer->start(1000);
         updateClock();
+
+        // While locked, keep the permitted menu above the lockscreen.
+        // The lockscreen observes powerMarker and stops competing for focus.
+        if (overLockscreen) {
+            QTimer *priorityTimer = new QTimer(this);
+            priorityTimer->setInterval(180);
+            connect(priorityTimer, &QTimer::timeout, this, [this]() {
+                if (isVisible() && !warningOpen)
+                    raise(); // do not cover a child warning dialog
+            });
+            priorityTimer->start();
+        }
 
         updateStyles();
     }
@@ -587,6 +637,9 @@ private:
     quint64 lastRx;
     quint64 lastTx;
     QElapsedTimer netTimer;
+    QLockFile powerMarker;
+    bool overLockscreen;
+    bool warningOpen = false;
 
     QWidget* createIconButton(const QString &labelText, const QString &iconPath) {
         QWidget *wrapper = new QWidget(this);
@@ -736,11 +789,25 @@ private slots:
         log.write("\n");
     }
 
+    void showPowerWarning(const QString &title, const QString &detail) {
+        warningOpen = true;
+        QMessageBox dialog(QMessageBox::Warning, title, detail, QMessageBox::Ok, this);
+        if (overLockscreen) {
+            // A managed modal dialog can otherwise be trapped behind the
+            // unmanaged power overlay while the desktop is locked.
+            dialog.setWindowFlags(dialog.windowFlags()
+                                  | Qt::BypassWindowManagerHint
+                                  | Qt::WindowStaysOnTopHint);
+        }
+        dialog.exec();
+        warningOpen = false;
+    }
+
     void sleepFailedBeforeLock(const QString &detail) {
         showFullScreen();
         raise();
         activateWindow();
-        QMessageBox::warning(this, "Sleep could not start", detail);
+        showPowerWarning("Sleep could not start", detail);
     }
 
     void doSleep() {
@@ -930,7 +997,11 @@ private slots:
             return;
         }
 
-        hide();
+        // Keep the approved fullscreen overlay visible while the shutdown
+        // sound plays on a locked desktop, so there is no exposed interval
+        // where the hidden power menu leaves another window selectable.
+        if (!overLockscreen)
+            hide();
         powerSoundProcess = new QProcess(this);
         QProcess *proc = powerSoundProcess;
 
@@ -970,13 +1041,42 @@ private slots:
     }
 
     void launchPowerAction(const QString &action) {
+        if (overLockscreen) {
+            // A detached process allows this menu to close before osm-sudo's
+            // graphical pattern/PIN dialog is on screen. The lockscreen then
+            // immediately takes both grabs back and hides that dialog. Keep
+            // the allowed overlay session alive until osm-sudo completes.
+            QProcess *proc = new QProcess(this);
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [this, proc](int, QProcess::ExitStatus) {
+                proc->deleteLater();
+                close(); // marker released; lockscreen regains input
+            });
+            connect(proc, &QProcess::errorOccurred, this,
+                    [this, proc, action](QProcess::ProcessError error) {
+                if (error != QProcess::FailedToStart)
+                    return;
+                proc->deleteLater();
+                powerActionPending = false;
+                showFullScreen();
+                raise();
+                activateWindow();
+                showPowerWarning("Power action failed",
+                                 "Could not start osm-sudo for " + action + ".");
+            });
+            hide();
+            proc->start("osm-sudo", QStringList() << action);
+            return;
+        }
+
+        // Preserve the original detached power-action path when unlocked.
         if (!QProcess::startDetached("osm-sudo", QStringList() << action)) {
             powerActionPending = false;
             showFullScreen();
             raise();
             activateWindow();
-            QMessageBox::warning(this, "Power action failed",
-                                 "Could not start osm-sudo for " + action + ".");
+            showPowerWarning("Power action failed",
+                             "Could not start osm-sudo for " + action + ".");
             return;
         }
         close();
@@ -1001,6 +1101,8 @@ int main(int argc, char *argv[]) {
 
     PowerMenuWindow w;
     w.showFullScreen();
+    w.raise();
+    w.activateWindow();
 
     return app.exec();
 }
