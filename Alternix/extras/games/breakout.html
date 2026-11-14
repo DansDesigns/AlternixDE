@@ -155,6 +155,8 @@
     border-radius: 6px;
     color: #cbd5e1;
     font: 11px/1.45 monospace;
+    font-variant-numeric: tabular-nums;
+    min-height: 30px;
     white-space: normal;
     overflow-wrap: anywhere;
     pointer-events: none;
@@ -428,7 +430,7 @@
             <span>Show FPS / performance meter</span>
             <div class="switch"></div>
           </div>
-          <p class="info" style="margin: 8px 0 0">FPS diagnostics appear above the playfield, never over the game. Graphics quality automatically adapts to sustained drops.</p>
+          <p class="info" style="margin: 8px 0 0">Diagnostics appear above the game. Frame gap is the time between browser frames; Logic, Draw and Save are game-side costs. Peaks cover the last 10 seconds.</p>
         </div>
         <button class="btn small" id="btn-clear-scores">Clear High Scores</button>
         <button class="btn" id="btn-settings-back">Back</button>
@@ -556,11 +558,14 @@
   var JAG_TEETH = 7, JAG_TILT = 26 * Math.PI / 180;
   var BUMP_SPREAD = Math.PI / 2.4, BUMP_CURVE = 0.6;
   var MAX_BOUNCE = 78 * Math.PI / 180;
-  var LEVEL_CLEAR_MS = 1500, AUTOSAVE_MS = 3000;
+  // Keep the synchronous save path for explicit pause/exit, but periodic saves
+  // are queued outside the animation frame and occur less often.
+  var LEVEL_CLEAR_MS = 1500, AUTOSAVE_MS = 12000;
   // Bound worst-case work so repeated multiball or very high levels cannot
   // grow the collision workload without limit.
   var MAX_BALLS = 20, MAX_POWERUPS = 40, MAX_PARTICLES = 240;
-  var SIM_STEP = 1000 / 60, MAX_UPDATES_PER_FRAME = 5;
+  var SIM_STEP = 1000 / 60, MAX_UPDATES_PER_FRAME = 10;
+  var MAX_CATCHUP_MS = 180, SIM_WORK_BUDGET_MS = 8;
 
   var BRICK_W = 54, BRICK_H = 20, BRICK_PAD = 6;
   var COLORS = ['#f87171', '#fb923c', '#facc15', '#4ade80', '#60a5fa', '#c084fc', '#2dd4bf', '#f0abfc'];
@@ -570,7 +575,7 @@
   /* ================= elements ============================================ */
   var canvas = document.getElementById('gameCanvas');
   var touchArea = document.getElementById('touch-area');
-  var ctx = canvas.getContext('2d');
+  var ctx = canvas.getContext('2d', { desynchronized: true });
   // The brick layer is painted only when bricks appear/disappear, not at 60 FPS.
   var brickLayer = document.createElement('canvas');
   var brickCtx = brickLayer.getContext('2d');
@@ -642,6 +647,36 @@
   var wind = 0, windTarget = 0, windTimer = 0, windParticles = [];
   var countdownTimer = 0, countdownValue = COUNTDOWN_START, countdownAlpha = 0;
   var autosaveTimer = 0;
+  var idleSaveId = null, idleSaveIsCallback = false;
+  function cancelPendingAutosave() {
+    if (idleSaveId === null) return;
+    if (idleSaveIsCallback && window.cancelIdleCallback) window.cancelIdleCallback(idleSaveId);
+    else window.clearTimeout(idleSaveId);
+    idleSaveId = null;
+  }
+  function queueAutosave() {
+    if (!hasGame || idleSaveId !== null) return;
+    if (typeof window.requestIdleCallback === 'function') {
+      idleSaveIsCallback = true;
+      idleSaveId = window.requestIdleCallback(function(deadline) {
+        idleSaveId = null;
+        if (!hasGame || (state !== 'playing' && state !== 'countdown' && state !== 'levelclear')) return;
+        // Don't start a potentially slow localStorage write just ahead of a
+        // frame unless the browser has run out of opportunities to save.
+        if (deadline.timeRemaining() < 8 && !deadline.didTimeout) {
+          queueAutosave();
+          return;
+        }
+        saveGame();
+      }, { timeout: 6000 });
+    } else {
+      idleSaveIsCallback = false;
+      idleSaveId = window.setTimeout(function() {
+        idleSaveId = null;
+        if (hasGame && (state === 'playing' || state === 'countdown' || state === 'levelclear')) saveGame();
+      }, 250);
+    }
+  }
 
   var keysDown = {};
   var padAxes = [0, 0];
@@ -653,6 +688,27 @@
   var lastTime = performance.now(), simCarry = 0;
   var perfElapsed = 0, perfFrames = 0, perfLogic = 0, perfRender = 0;
   var perfWorst = 0, perfSkipped = 0, perfNeedsDraw = true;
+  var perfLogicWorst = 0, perfDrawWorst = 0, perfSaveWorst = 0;
+  var perfLongTaskCount = 0, perfLongTaskWorst = 0, perfResizeCount = 0;
+  var perfHistory = [];
+  // Long Tasks reveals browser main-thread tasks >50ms. It doesn't detect
+  // GPU compositor delays, and isn't available in every browser.
+  var longTaskSupported = false;
+  try {
+    if (typeof PerformanceObserver !== 'undefined' &&
+        PerformanceObserver.supportedEntryTypes &&
+        PerformanceObserver.supportedEntryTypes.indexOf('longtask') !== -1) {
+      var stallObserver = new PerformanceObserver(function(list) {
+        var entries = list.getEntries();
+        for (var i = 0; i < entries.length; i++) {
+          perfLongTaskCount++;
+          perfLongTaskWorst = Math.max(perfLongTaskWorst, entries[i].duration);
+        }
+      });
+      stallObserver.observe({ entryTypes: ['longtask'] });
+      longTaskSupported = true;
+    }
+  } catch (e) {}
   // The playfield's logical coordinates are independent of the raster size.
   // The raster follows its *displayed* dimensions rather than the potentially
   // huge 2.5x world coordinates (1600x1200 even on a small tablet).
@@ -681,6 +737,7 @@
     var height = Math.max(1, Math.round(cssHeight * ratio));
     if (canvas.width === width && canvas.height === height) return;
 
+    perfResizeCount++;
     canvas.width = width;
     canvas.height = height;
     ctx.setTransform(width / W, 0, 0, height / H, 0, 0);
@@ -1416,7 +1473,7 @@
 
     if (hudDirty) updateHUD();
     autosaveTimer -= dt;
-    if (autosaveTimer <= 0) { autosaveTimer = AUTOSAVE_MS; saveGame(); }
+    if (autosaveTimer <= 0) { autosaveTimer = AUTOSAVE_MS; queueAutosave(); }
   }
 
   /* ================= drawing ============================================= */
@@ -1687,35 +1744,57 @@
     }
   }
 
-  function updatePerformanceUI(frameMs, logicMs, renderMs, skipped) {
-    // Always measure the running game for auto-quality, even with the FPS UI off.
+  function updatePerformanceUI(frameMs, logicMs, drawMs, skipped) {
     perfElapsed += frameMs;
     perfFrames++;
     perfLogic += logicMs;
-    perfRender += renderMs;
+    perfRender += drawMs;
     perfWorst = Math.max(perfWorst, frameMs);
+    perfLogicWorst = Math.max(perfLogicWorst, logicMs);
+    perfDrawWorst = Math.max(perfDrawWorst, drawMs);
     perfSkipped += skipped;
     if (perfElapsed < 1000) return;
-    var fps = Math.round(perfFrames * 1000 / perfElapsed);
-    var logic = (perfLogic / perfFrames).toFixed(1);
-    var render = (perfRender / perfFrames).toFixed(1);
-    if (settings.showPerformance) {
-      perfMeter.textContent = 'FPS ' + fps + ' | Logic ' + logic + 'ms | Draw ' + render + 'ms' +
-        ' | Worst ' + Math.round(perfWorst) + 'ms | Skipped ' + perfSkipped +
-        ' | Balls ' + balls.length + ' | Graphics ' +
-        (renderQuality < 1 || autoReducedEffects ? 'adaptive' : 'normal');
+    var fps = Math.round(perfFrames * 1000 / Math.max(1, perfElapsed));
+    var avgLogic = (perfLogic / Math.max(1, perfFrames)).toFixed(1);
+    var avgDraw = (perfRender / Math.max(1, perfFrames)).toFixed(1);
+    perfHistory.push({ gap: perfWorst, logic: perfLogicWorst, draw: perfDrawWorst,
+      save: perfSaveWorst, tasks: perfLongTaskCount, taskWorst: perfLongTaskWorst,
+      resized: perfResizeCount });
+    if (perfHistory.length > 10) perfHistory.shift();
+    var peaks = { gap: 0, logic: 0, draw: 0, save: 0, tasks: 0, taskWorst: 0, resized: 0 };
+    for (var j = 0; j < perfHistory.length; j++) {
+      var sample = perfHistory[j];
+      peaks.gap = Math.max(peaks.gap, sample.gap);
+      peaks.logic = Math.max(peaks.logic, sample.logic);
+      peaks.draw = Math.max(peaks.draw, sample.draw);
+      peaks.save = Math.max(peaks.save, sample.save);
+      peaks.tasks += sample.tasks;
+      peaks.taskWorst = Math.max(peaks.taskWorst, sample.taskWorst);
+      peaks.resized += sample.resized;
     }
-    // Only trim display quality, never the speed of the balls or physics.
-    // A sustained drop first removes expensive glow, then reduces pixel work.
+    if (settings.showPerformance) {
+      // 'Gap' measures time between callbacks, NOT just the JS game work.
+      // Logic/Draw/Save peaks separately help diagnose the source of stalls.
+      perfMeter.textContent =
+        'FPS ' + fps + ' | Frame gap ' + Math.round(peaks.gap) + 'ms' +
+        ' | Logic ' + avgLogic + 'ms (max ' + peaks.logic.toFixed(1) + ')' +
+        ' | Draw ' + avgDraw + 'ms (max ' + peaks.draw.toFixed(1) + ')' +
+        ' | Save max ' + peaks.save.toFixed(1) + 'ms' +
+        ' | JS stalls ' + (longTaskSupported ? peaks.tasks + ' (max ' + Math.round(peaks.taskWorst) + 'ms)' : 'n/a') +
+        ' | Skipped ' + perfSkipped + ' | Balls ' + balls.length +
+        ' | Canvas resizes ' + peaks.resized +
+        ' | Graphics ' + (renderQuality < 1 || autoReducedEffects ? 'adaptive' : 'normal');
+    }
+    // Don't keep reallocating canvas backing stores in response to isolated
+    // frame delays. Adapt only when a sustained FPS drop indicates overload.
     if (fps < 45 && !document.hidden) {
       lowFpsSeconds++;
       recoverySeconds = 0;
-      if (lowFpsSeconds >= 2) {
+      if (lowFpsSeconds >= 3) {
         lowFpsSeconds = 0;
         if (!autoReducedEffects) {
           autoReducedEffects = true;
           resizeRenderSurfaces(true);
-          redrawBrickLayer();
         } else if (renderQuality > 0.66) {
           renderQuality = Math.max(0.65, renderQuality - 0.15);
           resizeRenderSurfaces(true);
@@ -1724,7 +1803,7 @@
     } else if (fps >= 57) {
       lowFpsSeconds = 0;
       recoverySeconds++;
-      if (recoverySeconds >= 8) {
+      if (recoverySeconds >= 12) {
         recoverySeconds = 0;
         if (renderQuality < 1) {
           renderQuality = Math.min(1, renderQuality + 0.15);
@@ -1732,18 +1811,15 @@
         } else if (autoReducedEffects) {
           autoReducedEffects = false;
           resizeRenderSurfaces(true);
-          redrawBrickLayer();
         }
       }
     } else {
       lowFpsSeconds = 0;
       recoverySeconds = 0;
     }
-    perfElapsed = 0;
-    perfFrames = 0;
-    perfLogic = 0;
-    perfRender = 0;
-    perfWorst = 0;
+    perfElapsed = perfFrames = perfLogic = perfRender = 0;
+    perfWorst = perfLogicWorst = perfDrawWorst = 0;
+    perfSaveWorst = perfLongTaskCount = perfLongTaskWorst = perfResizeCount = 0;
     perfSkipped = 0;
   }
 
@@ -1755,18 +1831,18 @@
 
     if (state === 'menu' || state === 'gameover' || document.hidden) {
       simCarry = 0;
-      // Static menu/game-over screens do not need 60 full canvas repaints.
       if (perfNeedsDraw) { draw(); perfNeedsDraw = false; }
     } else {
-      // Bound catch-up work to avoid a spiral of death during a long stall.
-      var frameDt = Math.min(rawDt, 150);
-      simCarry += frameDt;
+      // ~100ms frame gaps require SIX simulation ticks, not the previous
+      // five-tick limit. Still constrain total work to avoid a death spiral.
+      simCarry += Math.min(rawDt, MAX_CATCHUP_MS);
       var startLogic = performance.now();
       var steps = 0;
       while (simCarry >= SIM_STEP && steps < MAX_UPDATES_PER_FRAME) {
         update(SIM_STEP);
         simCarry -= SIM_STEP;
         steps++;
+        if (steps >= 4 && performance.now() - startLogic > SIM_WORK_BUDGET_MS) break;
       }
       var skipped = 0;
       if (simCarry >= SIM_STEP) {
@@ -1911,6 +1987,8 @@
   /* ================= save / resume ======================================= */
   function saveGame() {
     if (!hasGame) return;
+    cancelPendingAutosave();
+    var saveStarted = performance.now();
     var alive = [];
     for (var i = 0; i < bricks.length; i++) {
       if (bricks[i].alive) {
@@ -1944,9 +2022,11 @@
     };
     savedGame = data;
     saveJSON(KEY_SAVE, data);
+    perfSaveWorst = Math.max(perfSaveWorst, performance.now() - saveStarted);
   }
 
   function clearSave() {
+    cancelPendingAutosave();
     savedGame = null;
     Store.del(KEY_SAVE);
   }
@@ -2384,6 +2464,9 @@
     perfRender = 0;
     perfWorst = 0;
     perfSkipped = 0;
+    perfLogicWorst = perfDrawWorst = perfSaveWorst = 0;
+    perfLongTaskCount = perfLongTaskWorst = perfResizeCount = 0;
+    perfHistory = [];
     perfMeter.textContent = 'Measuring performance...';
     refreshSettingsUI();
     resizeRenderSurfaces(true);
