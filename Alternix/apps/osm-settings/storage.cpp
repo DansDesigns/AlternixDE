@@ -307,7 +307,10 @@ public:
     explicit StoragePage(QStackedWidget *stack)
         : QWidget(stack), m_stack(stack)
     {
-        setStyleSheet("background:#282828; color:white; font-family:Sans;");
+        // Keep the page background on the page, not every descendant.
+        // Unscoped backgrounds create square backings around rounded tiles.
+        setObjectName("alternixStoragePage");
+        setStyleSheet("QWidget#alternixStoragePage { background:#282828; color:white; font-family:Sans; }");
         setMinimumWidth(720);
 
         QVBoxLayout *root = new QVBoxLayout(this);
@@ -316,7 +319,7 @@ public:
 
         QLabel *title = new QLabel("Storage");
         title->setAlignment(Qt::AlignCenter);
-        title->setStyleSheet("font-size:40px; font-weight:bold;");
+        title->setStyleSheet("color:white; background:transparent; border:none; font-size:40px; font-weight:bold;");
         root->addWidget(title);
 
         // Scroll
@@ -325,30 +328,35 @@ public:
         m_scroll->setFrameShape(QFrame::NoFrame);
         m_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_scroll->setStyleSheet("QScrollArea { background:transparent; border:none; }");
+        m_scroll->viewport()->setStyleSheet("background:transparent; border:none;");
         QScroller::grabGesture(m_scroll->viewport(), QScroller::LeftMouseButtonGesture);
 
         m_wrap = new QWidget(m_scroll);
+        m_wrap->setStyleSheet("background:transparent; border:none;");
         QVBoxLayout *wrapLay = new QVBoxLayout(m_wrap);
         wrapLay->setSpacing(10);
         wrapLay->setContentsMargins(0,0,0,0);
 
         // Outer card
         m_outer = new QFrame(m_wrap);
-        m_outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:32px; }");
+        m_outer->setObjectName("storageOuterPanel");
+        m_outer->setStyleSheet("QFrame#storageOuterPanel { background:#3a3a3a; border:none; border-radius:32px; }");
         QVBoxLayout *outerLay = new QVBoxLayout(m_outer);
         outerLay->setContentsMargins(20, 20, 20, 20);
         outerLay->setSpacing(20);
 
         // Internal Storage Card
         QFrame *intCard = new QFrame(m_outer);
-        intCard->setStyleSheet("QFrame { background:#444444; border-radius:26px; }");
+        intCard->setObjectName("storageInternalCard");
+        intCard->setStyleSheet("QFrame#storageInternalCard { background:#444444; border:none; border-radius:26px; }");
         QVBoxLayout *intLay = new QVBoxLayout(intCard);
         intLay->setContentsMargins(16, 20, 16, 20);
         intLay->setSpacing(12);
 
         m_internalTitle = new QLabel("Internal Storage");
         m_internalTitle->setAlignment(Qt::AlignCenter);
-        m_internalTitle->setStyleSheet("font-size:24px; font-weight:bold;");
+        m_internalTitle->setStyleSheet("color:white; background:transparent; border:none; font-size:24px; font-weight:bold;");
         intLay->addWidget(m_internalTitle);
 
         m_usage = new QSlider(Qt::Horizontal, intCard);
@@ -374,8 +382,9 @@ public:
 
         m_info = new QLabel("...");
         m_info->setAlignment(Qt::AlignCenter);
+        m_info->setObjectName("storageUsageInfo");
         m_info->setStyleSheet(
-            "QLabel { background:#383838; border-radius:14px;"
+            "QLabel#storageUsageInfo { background:#383838; color:white; border:none; border-radius:14px;"
             " font-size:22px; padding:8px 20px; }"
         );
         intLay->addWidget(m_info);
@@ -395,6 +404,7 @@ public:
 
         // Devices
         m_devicesWidget = new QWidget(m_outer);
+        m_devicesWidget->setStyleSheet("background:transparent; border:none;");
         m_devicesLayout = new QVBoxLayout(m_devicesWidget);
         m_devicesLayout->setSpacing(16);
         m_devicesLayout->setContentsMargins(0,8,0,0);
@@ -635,7 +645,8 @@ private:
         pc->dev = dev;
 
         QFrame *frame = new QFrame();
-        frame->setStyleSheet("QFrame { background:#555555; border-radius:18px; }");
+        frame->setObjectName("storagePartitionCard");
+        frame->setStyleSheet("QFrame#storagePartitionCard { background:#555555; border:none; border-radius:18px; }");
         frame->setMinimumWidth(200);
         frame->setMaximumWidth(240);
 
@@ -645,12 +656,12 @@ private:
 
         QLabel *lbl = new QLabel(QFileInfo(dev).fileName());
         lbl->setAlignment(Qt::AlignCenter);
-        lbl->setStyleSheet("font-size:22px;");
+        lbl->setStyleSheet("color:white; background:transparent; border:none; font-size:22px;");
         lay->addWidget(lbl);
 
         QLabel *info = new QLabel("...");
         info->setAlignment(Qt::AlignCenter);
-        info->setStyleSheet("font-size:18px;");
+        info->setStyleSheet("color:white; background:transparent; border:none; font-size:18px;");
         info->setWordWrap(true);
         lay->addWidget(info);
 
@@ -792,19 +803,20 @@ private:
             else dc->type = "Removable Drive";
 
             QFrame *card = new QFrame();
-            card->setStyleSheet("QFrame { background:#3a3a3a; border-radius:26px; }");
+            card->setObjectName("storageDeviceCard");
+            card->setStyleSheet("QFrame#storageDeviceCard { background:#3a3a3a; border:none; border-radius:26px; }");
             QVBoxLayout *devLay = new QVBoxLayout(card);
             devLay->setContentsMargins(24, 20, 24, 20);
             devLay->setSpacing(14);
             QLabel *title = new QLabel(dc->type + ": " + base);
             title->setAlignment(Qt::AlignCenter);
-            title->setStyleSheet("font-size:26px; font-weight:bold;");
+            title->setStyleSheet("color:white; background:transparent; border:none; font-size:26px; font-weight:bold;");
             devLay->addWidget(title);
 
             QLabel *space = new QLabel("Not mounted — " + disk.size);
             space->setAlignment(Qt::AlignCenter);
             space->setWordWrap(true);
-            space->setStyleSheet("font-size:18px;");
+            space->setStyleSheet("color:white; background:transparent; border:none; font-size:18px;");
             devLay->addWidget(space);
             dc->space = space;
 
@@ -838,7 +850,7 @@ private:
             if (disk.volumes.isEmpty()) {
                 QLabel *noFs = new QLabel("No mountable filesystem found");
                 noFs->setAlignment(Qt::AlignCenter);
-                noFs->setStyleSheet("font-size:18px;");
+                noFs->setStyleSheet("color:white; background:transparent; border:none; font-size:18px;");
                 devLay->addWidget(noFs);
             } else if (anyMounted) {
                 for (PartitionCard *pc : dc->parts) {
@@ -862,7 +874,7 @@ private:
         if (!anyDisks) {
             QLabel *none = new QLabel("No additional storage devices found");
             none->setAlignment(Qt::AlignCenter);
-            none->setStyleSheet("font-size:24px;");
+            none->setStyleSheet("color:white; background:transparent; border:none; font-size:24px;");
             m_devicesLayout->addWidget(none);
         }
         m_devicesLayout->addStretch();
