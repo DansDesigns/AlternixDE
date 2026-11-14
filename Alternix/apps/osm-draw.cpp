@@ -40,6 +40,8 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QSizePolicy>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <functional>
 #include <cmath>
 
@@ -480,6 +482,13 @@ public:
         update();
     }
 
+    // Background is a non-destructive page colour: translucent brush pixels
+    // remain editable, and opaque PNG exports composite against this colour.
+    void setDarkBackground(bool enabled) {
+        m_bgColor = enabled ? QColor("#202124") : QColor(Qt::white);
+        update();
+    }
+
     void setPenSize(int s) {
         m_penSize = qMax(1, s);
     }
@@ -688,6 +697,11 @@ protected:
             return;
 
         QPoint imgPos = widgetToImage(e->pos());
+        // Do not turn a click OUTSIDE the displayed page into a fill at its
+        // nearest edge, which could unintentionally recolour the whole page.
+        if (m_tool == Tool::Fill &&
+            !QRect(QPoint(0, 0), m_image.size()).contains(imgPos))
+            return;
         clampPointToImage(imgPos);
 
         m_drawing = true;
@@ -888,51 +902,63 @@ private:
                    qAbs(qBlue(sample) - qBlue(target)) <= tolerance;
         };
 
-        // Collect horizontal runs without modifying the original image. If the
-        // selected region reaches ANY page edge, it is uncontained: do nothing.
-        // This prevents a click on an unclosed shape from painting the page.
+        // The canvas edge is a boundary, not a reason to reject a fill.
+        // Scanline runs avoid a per-pixel stack: filling an empty 4096x4096
+        // canvas remains bounded in memory even on lower-powered devices.
+        struct FillRun { int row; int left; int right; };
         QBitArray visited(w * h, false);
-        QVector<int> pending;
-        QVector<int> region;
-        pending.reserve(1024);
-        region.reserve(4096);
-        pending.append(start.y() * w + start.x());
-        while (!pending.isEmpty()) {
-            const int index = pending.takeLast();
-            const int x = index % w;
-            const int y = index / w;
-            if (visited.testBit(index) || !matches(x, y))
+        QVector<QPoint> seeds;
+        QVector<FillRun> runs;
+        seeds.reserve(256);
+        runs.reserve(256);
+        seeds.append(start);
+
+        while (!seeds.isEmpty()) {
+            const QPoint seed = seeds.takeLast();
+            const int x = seed.x();
+            const int y = seed.y();
+            const int at = y * w + x;
+            if (visited.testBit(at) || !matches(x, y))
                 continue;
 
             int left = x;
             while (left > 0 && !visited.testBit(y * w + left - 1) &&
                    matches(left - 1, y))
                 --left;
-            for (int px = left; px < w; ++px) {
-                const int at = y * w + px;
-                if (visited.testBit(at) || !matches(px, y))
-                    break;
-                // No image modification or undo record has occurred yet.
-                if (px == 0 || px == w - 1 || y == 0 || y == h - 1)
-                    return false;
-                visited.setBit(at);
-                region.append(at);
-                const int above = at - w;
-                const int below = at + w;
-                if (!visited.testBit(above) && matches(px, y - 1))
-                    pending.append(above);
-                if (!visited.testBit(below) && matches(px, y + 1))
-                    pending.append(below);
+            int right = x;
+            while (right + 1 < w && !visited.testBit(y * w + right + 1) &&
+                   matches(right + 1, y))
+                ++right;
+
+            for (int px = left; px <= right; ++px)
+                visited.setBit(y * w + px);
+            runs.append({y, left, right});
+
+            // Queue exactly one seed for each adjacent, unvisited span.
+            // Bounds checks stop at page edges, so the entire page may fill.
+            for (int neighborY : {y - 1, y + 1}) {
+                if (neighborY < 0 || neighborY >= h)
+                    continue;
+                bool inSpan = false;
+                for (int px = left; px <= right; ++px) {
+                    const int neighborIndex = neighborY * w + px;
+                    const bool candidate = !visited.testBit(neighborIndex) &&
+                                           matches(px, neighborY);
+                    if (candidate && !inSpan)
+                        seeds.append(QPoint(px, neighborY));
+                    inSpan = candidate;
+                }
             }
         }
 
-        if (region.isEmpty())
+        if (runs.isEmpty())
             return false;
         pushUndo();
         m_redoStack.clear();
-        for (int index : region) {
-            QRgb *scan = reinterpret_cast<QRgb *>(m_image.scanLine(index / w));
-            scan[index % w] = replacement;
+        for (const FillRun &run : runs) {
+            QRgb *scan = reinterpret_cast<QRgb *>(m_image.scanLine(run.row));
+            for (int px = run.left; px <= run.right; ++px)
+                scan[px] = replacement;
         }
         return true;
     }
@@ -1042,7 +1068,7 @@ public:
         leftGroup->addWidget(btnEllipse);
 
         btnFill = new QPushButton("🪣", this);
-        styleIconButton(btnFill, "Fill enclosed region");
+        styleIconButton(btnFill, "Fill connected area (canvas edges are boundaries)");
         leftGroup->addWidget(btnFill);
 
         btnGrab = new QPushButton("👋", this);
@@ -1166,6 +1192,18 @@ public:
                                         "QCheckBox::indicator {width:17px;height:17px;}");
         transparentCheck->setToolTip("Display an alpha checkerboard and save PNGs with transparency");
         controlBar->addWidget(transparentCheck);
+
+        btnDarkBackground = new QPushButton("☾ Dark", this);
+        btnDarkBackground->setCheckable(true);
+        btnDarkBackground->setFixedHeight(32);
+        btnDarkBackground->setMinimumWidth(77);
+        btnDarkBackground->setStyleSheet(
+            "QPushButton {background:#363b42; color:#ffffff; border-radius:5px;"
+            "border:1px solid #66717b; padding:2px 8px; font-size:14px;}"
+            "QPushButton:checked {background:#47617b; border:2px solid #a4d6ff;}"
+            "QPushButton:hover {background:#4b515c;}");
+        btnDarkBackground->setToolTip("Use a dark canvas background (also used for opaque PNG exports)");
+        controlBar->addWidget(btnDarkBackground);
         controlBar->addStretch(1);
 
         controlContainer = new QWidget(central);
@@ -1249,7 +1287,19 @@ public:
         });
         connect(btnFullscreen, &QPushButton::clicked, this,
                 [this]() { toggleCanvasFullscreen(); });
+        // White (neither selected), Dark, and Transparent are exclusive page
+        // backgrounds. This changes the page backing, not the drawn pixels.
+        connect(btnDarkBackground, &QPushButton::toggled, this, [this](bool enabled) {
+            if (enabled && transparentCheck->isChecked())
+                transparentCheck->setChecked(false);
+            canvas->setDarkBackground(enabled);
+            if (floatingDarkBackground)
+                floatingDarkBackground->setChecked(enabled);
+            statusBar()->showMessage(enabled ? "Canvas background: dark" : "Canvas background: white", 1800);
+        });
         connect(transparentCheck, &QCheckBox::toggled, this, [this](bool enabled) {
+            if (enabled && btnDarkBackground->isChecked())
+                btnDarkBackground->setChecked(false);
             canvas->setTransparentBackground(enabled);
             if (floatingTransparency)
                 floatingTransparency->setChecked(enabled);
@@ -1514,6 +1564,7 @@ private:
     QPushButton *btnRedo;
     QPushButton *btnFit;
     QPushButton *btnFullscreen;
+    QPushButton *btnDarkBackground = nullptr;
 
     QWidget *toolbarContainer = nullptr;
     QWidget *controlContainer = nullptr;
@@ -1524,6 +1575,12 @@ private:
     QPushButton *floatingStroke = nullptr;
     QPushButton *floatingFill = nullptr;
     QPushButton *floatingTransparency = nullptr;
+    QPushButton *floatingDarkBackground = nullptr;
+    QPushButton *floatingSizeButton = nullptr;
+    QFrame *floatingSizePopup = nullptr;
+    QSlider *floatingSizePopupSlider = nullptr;
+    PenSizePreview *floatingSizePreview = nullptr;
+    QScrollArea *floatingToolScroller = nullptr;
     QCheckBox *transparentCheck = nullptr;
     QColor strokeColor = Qt::black;
     QColor fillColor = Qt::red;
@@ -1584,6 +1641,8 @@ private:
         strokeColorBtn->setIcon(colorSwatchIcon(c));
         if (floatingStroke)
             floatingStroke->setIcon(colorSwatchIcon(c, 26));
+        if (floatingSizePreview)
+            floatingSizePreview->setPenColor(c);
     }
 
     void applyFillColor(const QColor &c) {
@@ -1597,6 +1656,10 @@ private:
     void keepFloatingMenuVisible() {
         if (!floatingToolbar || !canvasContainer)
             return;
+        // Preserve one row on smaller screens by allowing horizontal scrolling
+        // inside the toolbar instead of wrapping or placing buttons offscreen.
+        const int maxWidth = qMax(180, canvasContainer->width() - 16);
+        floatingToolbar->setMaximumWidth(maxWidth);
         floatingToolbar->adjustSize();
         QPoint current = floatingToolbar->pos();
         current.setX(qBound(0, current.x(),
@@ -1609,6 +1672,8 @@ private:
 
     void toggleCanvasFullscreen() {
         const bool enable = !isFullScreen();
+        if (floatingSizePopup)
+            floatingSizePopup->hide();
         toolbarContainer->setVisible(!enable);
         controlContainer->setVisible(!enable);
         zoomContainer->setVisible(!enable);
@@ -1630,83 +1695,173 @@ private:
 
     void createFloatingToolbar() {
         floatingToolbar = new FloatingToolbar(canvasContainer);
-        auto *layout = new QVBoxLayout(floatingToolbar);
-        layout->setContentsMargins(7, 6, 7, 7);
-        layout->setSpacing(5);
-        auto *top = new QHBoxLayout();
-        top->setSpacing(4);
-        auto *bottom = new QHBoxLayout();
-        bottom->setSpacing(5);
+        auto *layout = new QHBoxLayout(floatingToolbar);
+        layout->setContentsMargins(7, 5, 7, 5);
+        layout->setSpacing(3);
 
         auto *handle = new QLabel("⠿", floatingToolbar);
-        handle->setFixedSize(22, 34);
+        handle->setFixedSize(22, 38);
         handle->setToolTip("Drag to reposition tools");
         handle->setAlignment(Qt::AlignCenter);
         floatingToolbar->setDragHandle(handle);
-        top->addWidget(handle);
+        layout->addWidget(handle);
 
-        auto makeButton = [this](const QString &icon, const QString &tip,
-                                 QHBoxLayout *row, int width = 34) {
-            auto *b = new QPushButton(icon, floatingToolbar);
-            b->setFixedSize(width, 34);
-            b->setToolTip(tip);
-            b->setAccessibleName(tip);
-            row->addWidget(b);
-            return b;
+        // The toolbar is ONE horizontal row. On narrow displays the contents
+        // can scroll sideways rather than wrapping into a second line.
+        floatingToolScroller = new QScrollArea(floatingToolbar);
+        floatingToolScroller->setFrameShape(QFrame::NoFrame);
+        floatingToolScroller->setWidgetResizable(false);
+        floatingToolScroller->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        floatingToolScroller->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        floatingToolScroller->setStyleSheet(
+            "QScrollArea { background:transparent; border:0px; }"
+            "QScrollBar:horizontal { height:8px; background:#282c32; }"
+            "QScrollBar::handle:horizontal { background:#667789; border-radius:4px; min-width:28px; }"
+            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width:0px; }");
+        auto *contents = new QWidget(floatingToolScroller);
+        contents->setObjectName("floatingToolContents");
+        contents->setStyleSheet("QWidget#floatingToolContents { background:transparent; }");
+        auto *row = new QHBoxLayout(contents);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(3);
+        auto makeButton = [contents](const QString &symbol, const QString &tip,
+                                     QHBoxLayout *target, int width = 34) {
+            auto *button = new QPushButton(symbol, contents);
+            button->setFixedSize(width, 38);
+            button->setToolTip(tip);
+            button->setAccessibleName(tip);
+            target->addWidget(button);
+            return button;
         };
+
         auto *tools = new QButtonGroup(floatingToolbar);
         tools->setExclusive(true);
         const QList<QPushButton *> originals = {
             btnPen, btnEraser, btnLine, btnRect, btnEllipse, btnFill, btnGrab
         };
         for (QPushButton *original : originals) {
-            QPushButton *b = makeButton(original->text(), original->toolTip(), top);
-            b->setCheckable(true);
-            tools->addButton(b);
-            connect(b, &QPushButton::clicked, original, &QPushButton::click);
-            connect(original, &QPushButton::toggled, b, &QPushButton::setChecked);
+            QPushButton *button = makeButton(original->text(), original->toolTip(), row);
+            button->setCheckable(true);
+            tools->addButton(button);
+            connect(button, &QPushButton::clicked, original, &QPushButton::click);
+            connect(original, &QPushButton::toggled, button, &QPushButton::setChecked);
+            button->setChecked(original->isChecked());
         }
-        auto *undo = makeButton("↩", "Undo", top);
-        auto *redo = makeButton("↪", "Redo", top);
+
+        auto *undo = makeButton("↩", "Undo", row);
+        auto *redo = makeButton("↪", "Redo", row);
         connect(undo, &QPushButton::clicked, btnUndo, &QPushButton::click);
         connect(redo, &QPushButton::clicked, btnRedo, &QPushButton::click);
-        layout->addLayout(top);
 
-        auto *sizeCaption = new QLabel("Size", floatingToolbar);
-        bottom->addWidget(sizeCaption);
-        auto *miniSizeSlider = new QSlider(Qt::Horizontal, floatingToolbar);
-        miniSizeSlider->setRange(1, 50);
-        miniSizeSlider->setValue(sizeSlider->value());
-        miniSizeSlider->setFixedWidth(82);
-        miniSizeSlider->setToolTip("Pen and eraser size");
-        bottom->addWidget(miniSizeSlider);
-        connect(miniSizeSlider, &QSlider::valueChanged, sizeSlider, &QSlider::setValue);
-        connect(sizeSlider, &QSlider::valueChanged, miniSizeSlider, &QSlider::setValue);
+        // A compact single-row button opens a large, touch-friendly slider
+        // with a live 1:1 preview. It shares the normal size slider's value.
+        floatingSizeButton = makeButton("5px ▾", "Brush size", row, 76);
+        floatingSizeButton->setStyleSheet(
+            "QPushButton {background:#363b42;color:#ffffff;border:1px solid #68717b;"
+            "border-radius:5px;font-size:15px;}"
+            "QPushButton:hover {background:#505c68;}");
+        connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) {
+            if (floatingSizeButton)
+                floatingSizeButton->setText(QString("%1px ▾").arg(value));
+            if (floatingSizePopupSlider)
+                floatingSizePopupSlider->setValue(value);
+            if (floatingSizePreview)
+                floatingSizePreview->setPenSize(value);
+        });
+        floatingSizePopup = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+        floatingSizePopup->setObjectName("floatingSizePopup");
+        floatingSizePopup->setAttribute(Qt::WA_StyledBackground);
+        floatingSizePopup->setStyleSheet(
+            "QFrame#floatingSizePopup {background:#22262d;border:1px solid #788492;border-radius:12px;}"
+            "QLabel {color:#ffffff;font-size:15px;}"
+            "QSlider::groove:horizontal {height:14px;background:#4b5460;border-radius:7px;}"
+            "QSlider::handle:horizontal {width:46px;height:46px;margin:-16px 0;"
+            "background:#e0eefb;border:2px solid #84c6fa;border-radius:23px;}"
+            "QSlider::handle:horizontal:pressed {background:#accfe8;}");
+        auto *popupLayout = new QVBoxLayout(floatingSizePopup);
+        popupLayout->setContentsMargins(18, 14, 18, 18);
+        popupLayout->setSpacing(14);
+        auto *previewRow = new QHBoxLayout();
+        auto *previewLabel = new QLabel("Brush size", floatingSizePopup);
+        previewLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+        previewRow->addWidget(previewLabel, 1);
+        floatingSizePreview = new PenSizePreview(floatingSizePopup);
+        floatingSizePreview->setPenColor(strokeColor);
+        floatingSizePreview->setPenSize(sizeSlider->value());
+        previewRow->addWidget(floatingSizePreview);
+        popupLayout->addLayout(previewRow);
+        floatingSizePopupSlider = new QSlider(Qt::Horizontal, floatingSizePopup);
+        floatingSizePopupSlider->setRange(sizeSlider->minimum(), sizeSlider->maximum());
+        floatingSizePopupSlider->setValue(sizeSlider->value());
+        floatingSizePopupSlider->setFixedHeight(60);
+        floatingSizePopupSlider->setMinimumWidth(275);
+        floatingSizePopupSlider->setToolTip("Drag the large handle to adjust pen / eraser size");
+        popupLayout->addWidget(floatingSizePopupSlider);
+        connect(floatingSizePopupSlider, &QSlider::valueChanged, sizeSlider, &QSlider::setValue);
+        floatingSizePopup->adjustSize();
+        connect(floatingSizeButton, &QPushButton::clicked, this, [this]() {
+            floatingSizePopupSlider->setValue(sizeSlider->value());
+            floatingSizePreview->setPenSize(sizeSlider->value());
+            floatingSizePopup->adjustSize();
+            QPoint location = floatingSizeButton->mapToGlobal(
+                QPoint(0, floatingSizeButton->height() + 7));
+            QScreen *targetScreen = QGuiApplication::screenAt(location);
+            if (!targetScreen)
+                targetScreen = QGuiApplication::primaryScreen();
+            if (targetScreen) {
+                const QRect area = targetScreen->availableGeometry();
+                if (location.x() + floatingSizePopup->width() > area.right())
+                    location.setX(area.right() - floatingSizePopup->width() + 1);
+                if (location.y() + floatingSizePopup->height() > area.bottom())
+                    location.setY(floatingSizeButton->mapToGlobal(QPoint(0, 0)).y()
+                                  - floatingSizePopup->height() - 7);
+                location.setX(qMax(area.left(), location.x()));
+                location.setY(qMax(area.top(), location.y()));
+            }
+            floatingSizePopup->move(location);
+            floatingSizePopup->show();
+            floatingSizePopup->raise();
+        });
 
-        floatingStroke = makeButton("", "Stroke colour / opacity", bottom, 32);
+        floatingStroke = makeButton("", "Stroke colour / opacity", row, 34);
         floatingStroke->setIconSize(QSize(26, 26));
         floatingStroke->setIcon(colorSwatchIcon(strokeColor, 26));
-        floatingFill = makeButton("", "Fill colour / opacity", bottom, 32);
+        floatingFill = makeButton("", "Fill colour / opacity", row, 34);
         floatingFill->setIconSize(QSize(26, 26));
         floatingFill->setIcon(colorSwatchIcon(fillColor, 26));
         connect(floatingStroke, &QPushButton::clicked, strokeColorBtn, &QPushButton::click);
         connect(floatingFill, &QPushButton::clicked, fillColorBtn, &QPushButton::click);
 
-        floatingTransparency = makeButton("◩", "Transparent background for PNG", bottom);
+        floatingTransparency = makeButton("◩", "Transparent background / PNG alpha", row);
         floatingTransparency->setCheckable(true);
         connect(floatingTransparency, &QPushButton::toggled,
                 transparentCheck, &QCheckBox::setChecked);
-        auto *clear = makeButton("🗑", "Clear", bottom);
-        auto *open = makeButton("📂", "Open image", bottom);
-        auto *save = makeButton("💾", "Save PNG", bottom);
-        auto *fit = makeButton("⤢", "Fit to screen", bottom);
-        auto *exit = makeButton("⛶", "Exit fullscreen (F11 / Esc)", bottom);
+        floatingDarkBackground = makeButton("☾", "Dark canvas background / dark PNG export", row);
+        floatingDarkBackground->setCheckable(true);
+        connect(floatingDarkBackground, &QPushButton::toggled,
+                btnDarkBackground, &QPushButton::setChecked);
+        connect(btnDarkBackground, &QPushButton::toggled,
+                floatingDarkBackground, &QPushButton::setChecked);
+
+        auto *clear = makeButton("🗑", "Clear", row);
+        auto *open = makeButton("📂", "Open image", row);
+        auto *save = makeButton("💾", "Save PNG", row);
+        auto *fit = makeButton("⤢", "Fit to screen", row);
+        auto *exit = makeButton("⛶", "Exit fullscreen (F11 / Esc)", row);
         connect(clear, &QPushButton::clicked, btnClear, &QPushButton::click);
         connect(open, &QPushButton::clicked, btnOpen, &QPushButton::click);
         connect(save, &QPushButton::clicked, btnSave, &QPushButton::click);
         connect(fit, &QPushButton::clicked, btnFit, &QPushButton::click);
         connect(exit, &QPushButton::clicked, this, [this]() { toggleCanvasFullscreen(); });
-        layout->addLayout(bottom);
+
+        // Keep item placement completely horizontal. The scroller becomes
+        // narrower when the screen cannot fit the full row.
+        contents->adjustSize();
+        floatingToolScroller->setWidget(contents);
+        floatingToolScroller->setFixedHeight(56);
+        floatingToolScroller->setMinimumWidth(150);
+        floatingToolScroller->setMaximumWidth(contents->sizeHint().width() + 3);
+        layout->addWidget(floatingToolScroller);
         floatingToolbar->adjustSize();
         floatingToolbar->hide();
     }
