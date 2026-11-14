@@ -27,6 +27,7 @@
 #include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QLockFile>
+#include <QCloseEvent>
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
@@ -193,6 +194,9 @@ public:
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAttribute(Qt::WA_NoSystemBackground, true);
         setAttribute(Qt::WA_AcceptTouchEvents, true);
+        // Tool windows do not always count as ordinary primary windows for
+        // Qt's automatic quit-on-last-window-closed behaviour.
+        setAttribute(Qt::WA_QuitOnClose, true);
         setFocusPolicy(Qt::NoFocus);
         setMouseTracking(false);
         interactionClock.start();
@@ -206,6 +210,15 @@ public:
         if (display) XCloseDisplay(display);
     }
 
+protected:
+    void closeEvent(QCloseEvent *event) override {
+        QWidget::closeEvent(event);
+        // An X11 bypass/Tool window may otherwise disappear while its Qt
+        // event loop continues running invisibly (and holding the lock).
+        if (event->isAccepted()) QCoreApplication::quit();
+    }
+
+public:
     bool attachX11() {
         display = XOpenDisplay(nullptr);
         if (!display) { qCritical("welcome: X11 display is unavailable"); return false; }
@@ -736,9 +749,19 @@ int main(int argc,char **argv) {
     const bool firstRun=args.contains("--once");
     if (firstRun && (isLiveSystem() || QFileInfo::exists(donePath()))) return 0;
 
-    QLockFile lock(QDir::tempPath()+"/alternix-welcome-"+QString::number(getuid())+".lock");
-    lock.setStaleLockTime(0);
-    if (!lock.tryLock(100)) return 0;
+    // Permit as many SEPARATE runs as the user wants, but never stack
+    // multiple overlays simultaneously. QLockFile releases the lock when
+    // this process exits. Disable age-only stale detection so a long-running
+    // active guide is never mistaken for a stale instance; dead PID locks
+    // can still be recovered by QLockFile.
+    QLockFile singleInstanceLock(QDir::tempPath()+"/alternix-welcome-"
+                                 +QString::number(getuid())+".lock");
+    singleInstanceLock.setStaleLockTime(0);
+    if (!singleInstanceLock.tryLock(100)) {
+        // Another Welcome is open (or its lock cannot be acquired).
+        // Never start an overlapping overlay.
+        return 0;
+    }
 
     WelcomeOverlay overlay;
     const int delay=(firstRun || args.contains("--startup-delay")) ? 3200 : 0;
