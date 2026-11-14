@@ -160,7 +160,7 @@ const QVector<Step> &guide() {
           "Tap or click anywhere to start the interactive desktop tour."},
         {"App Launcher", {{"Swipe up",Purple},{"=",Plain},{"App Launcher",Plain},
                           {"or",Plain},{"tap the icon",Green,3}},
-          "Swipe up from the bottom edge or tap the real launcher icon."},
+          "Swipe up anywhere on the desktop, or tap the real launcher icon."},
         {"Taskbar & Keyboard", {{"Application Taskbar",Green},
                                  {"Toggle Keyboard",Green}},
           "The bottom bar is your taskbar. Tap its keyboard icon to open and hide the keyboard."},
@@ -171,7 +171,7 @@ const QVector<Step> &guide() {
         {"Quick Settings", {{"Pull down",Green},{"or",Plain},
                               {"Swipe on desktop",Purple},{"=",Plain},
                               {"Quick Settings",SoftWhite}},
-          "Pull down from the top, or swipe down on the desktop, to open Quick Settings."},
+          "Pull down from either marked area on the top bar, or swipe down on the desktop."},
         {"Top Bar", {{"Desktop Switcher & System Tray",Plain},
                        {"Tap = Clock",Green,3},
                        {"Window & Device Controls",Plain}},
@@ -281,20 +281,42 @@ protected:
         p.save();
         p.setCompositionMode(QPainter::CompositionMode_Clear);
         for (const QRectF &hole : holes) {
-            QPainterPath path;
-            path.addRoundedRect(hole, qMin(18.0,hole.height()*.25),
-                                qMin(18.0,hole.height()*.25));
-            p.fillPath(path,Qt::transparent);
+            if (page == 5) {
+                // The PowerPoint's Quick Settings slide shows exactly two
+                // rectangular top-bar regions, not one full-width strip or a
+                // floating desktop region. Keep their shape corners square.
+                p.fillRect(hole,Qt::transparent);
+            } else {
+                QPainterPath path;
+                path.addRoundedRect(hole, qMin(18.0,hole.height()*.25),
+                                    qMin(18.0,hole.height()*.25));
+                p.fillPath(path,Qt::transparent);
+            }
         }
         p.restore();
         p.setCompositionMode(QPainter::CompositionMode_SourceOver);
         const QColor edge = (page==3 || page==4) ? QColor(203,0,180) : QColor(57,212,1);
         for (const QRectF &hole : holes) {
-            p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),60),11));
             p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(hole,17,17);
-            p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),220),3));
-            p.drawRoundedRect(hole,17,17);
+            if (page == 5) {
+                // Match slide 6's two open-top GREEN bracket outlines.
+                QPainterPath bracket;
+                bracket.moveTo(hole.left(),hole.top());
+                bracket.lineTo(hole.left(),hole.bottom());
+                bracket.lineTo(hole.right(),hole.bottom());
+                bracket.lineTo(hole.right(),hole.top());
+                p.setPen(QPen(QColor(57,212,1,80),12,Qt::SolidLine,
+                              Qt::RoundCap,Qt::RoundJoin));
+                p.drawPath(bracket);
+                p.setPen(QPen(QColor(57,212,1,235),4,Qt::SolidLine,
+                              Qt::RoundCap,Qt::RoundJoin));
+                p.drawPath(bracket);
+            } else {
+                p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),60),11));
+                p.drawRoundedRect(hole,17,17);
+                p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),220),3));
+                p.drawRoundedRect(hole,17,17);
+            }
         }
         drawInstructionCard(p);
         drawFooter(p);
@@ -396,11 +418,17 @@ private:
 
     QVector<Rect> targetRegions() const {
         switch (page) {
-        case 1: return {frac(.36,.915,.28,.08),frac(.02,.925,.14,.07),frac(.84,.925,.14,.07)};
+        case 1:
+            // Swiping UP works anywhere on the desktop: do not show misleading
+            // left/right hotspots. Highlight only the real bottom launcher icon.
+            return {frac(.36,.915,.28,.08)};
         case 2: return {frac(.00,.92,.40,.08),frac(.84,.91,.16,.09)};
         case 3: return {frac(.00,.12,.09,.74)};
         case 4: return {frac(.91,.12,.09,.74)};
-        case 5: return {frac(.00,.00,1.0,.085),frac(.34,.16,.32,.16)};
+        case 5:
+            // Slide 6: the original green brackets mark top-bar spans
+            // approximately x=11%-44% and x=56%-89%, height 7.2%.
+            return {frac(.11,.00,.33,.072),frac(.56,.00,.33,.072)};
         case 6: return {frac(.0,.0,.145,.085),frac(.43,.0,.14,.085),
                         frac(.85,.0,.15,.085)};
         default: return {};
@@ -501,7 +529,9 @@ private:
         const qreal dx=diff.x(),dy=diff.y();
         const bool click=std::hypot(dx,dy)<qMax(24.0,width()*.025);
         if (page==1) {
-            if ((gestureStart.y()>height()*.86 && dy< -height()*.12) ||
+            // Any deliberate upward swipe on the desktop opens the launcher;
+            // the centre-bottom icon remains an alternative tap target.
+            if ((dy < -height()*.12 && std::abs(dy)>std::abs(dx)*1.1) ||
                 (click && gestureStart.y()>height()*.89 &&
                  std::abs(gestureStart.x()-width()*.5)<width()*.15)) mark(1);
         } else if (page==2 && click && gestureStart.y()>height()*.89) {
