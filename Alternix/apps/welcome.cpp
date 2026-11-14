@@ -202,9 +202,22 @@ public:
         interactionClock.start();
         pollTimer.setInterval(16);
         QObject::connect(&pollTimer, &QTimer::timeout, this, [this]{ pollPointer(); });
+
+        // Animate the painted overlay, not its X11 window opacity. The guide
+        // already uses an ARGB/translucent window for desktop passthrough;
+        // painting with a rising alpha fades in every gradient, glow, bracket
+        // and navigation button together without changing its input shape.
+        fadeTimer.setInterval(16); // approximately 60 redraws per second
+        fadeTimer.setTimerType(Qt::PreciseTimer);
+        QObject::connect(&fadeTimer, &QTimer::timeout, this, [this] {
+            fadeOpacity = qMin(qreal(1.0), qreal(fadeClock.elapsed()) / 1500.0);
+            update();
+            if (fadeOpacity >= 1.0) fadeTimer.stop();
+        });
     }
 
     ~WelcomeOverlay() override {
+        fadeTimer.stop();
         pollTimer.stop();
         socketNotifier.reset();
         if (display) XCloseDisplay(display);
@@ -265,6 +278,13 @@ public:
         update();
     }
 
+    void beginFadeIn() {
+        fadeOpacity = 0.0;
+        fadeClock.start();
+        fadeTimer.start();
+        update();
+    }
+
 protected:
     void resizeEvent(QResizeEvent *e) override {
         QWidget::resizeEvent(e);
@@ -275,6 +295,12 @@ protected:
         QPainter p(this);
         p.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing |
                          QPainter::SmoothPixmapTransform);
+        // Clear the previous frame first: otherwise partially transparent
+        // paint can accumulate and make the fade appear instantaneous.
+        p.setCompositionMode(QPainter::CompositionMode_Source);
+        p.fillRect(rect(), Qt::transparent);
+        p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        p.setOpacity(fadeOpacity);
         if (page==0) {
             // The introductory slide keeps its *entire* original PPT gradient.
             p.fillRect(rect(),deckGradient(0,rect()));
@@ -377,6 +403,9 @@ private:
     QPointF touchPress;
     QElapsedTimer interactionClock;
     QTimer pollTimer;
+    QTimer fadeTimer;
+    QElapsedTimer fadeClock;
+    qreal fadeOpacity = 0.0;
     Display *display=nullptr;
     Window root=0;
     int xiOpcode=0,xiEvent=0,xiError=0;
@@ -775,6 +804,7 @@ int main(int argc,char **argv) {
         overlay.show();
         if (!overlay.attachX11()) {overlay.close();return;}
         overlay.raise();
+        overlay.beginFadeIn(); // 0% -> 100% across 1.5 seconds on every launch
         QObject::connect(screen,&QScreen::geometryChanged,&overlay,
                          [&overlay](const QRect &geometry){overlay.fitScreen(geometry);});
     };
