@@ -37,6 +37,14 @@
   .touch-zone.left small { transform:rotate(180deg); }
   #gameCanvas { display:block; width:100%; height:100%; touch-action:none; -webkit-touch-callout:none; }
   .hint { text-align:center; font-size:12px; color:var(--muted); line-height:1.45; min-height:18px; flex:none; }
+  /* Diagnostic strip stays outside the playing field, including fullscreen. */
+  .performance-strip { display:none; flex:none; min-height:23px; padding:3px 8px; border:1px solid var(--edge); border-radius:7px;
+    background:var(--panel); color:#cbd5e1; font:600 clamp(9px,1.35vw,11px) system-ui,sans-serif;
+    align-items:center; justify-content:center; gap:3px 12px; flex-wrap:wrap; font-variant-numeric:tabular-nums; }
+  .performance-strip.visible { display:flex; }
+  .performance-strip strong { color:var(--cyan); }
+  .performance-strip .slow { color:#fbbf24; }
+  .performance-strip .critical { color:#fb7185; }
   .menu-overlay { position:absolute; inset:0; display:flex; justify-content:center; align-items:center; padding:12px; background:rgba(11,17,32,.86); backdrop-filter:blur(5px); z-index:5; overflow:auto; }
   .menu-overlay.hidden, .panel.hidden { display:none; }
   .panel { background:rgba(15,23,42,.98); border:1px solid var(--edge); border-radius:13px; padding:22px 24px; width:min(390px,100%); max-height:100%; overflow-y:auto; text-align:center; box-shadow:0 14px 44px rgba(0,0,0,.48); scrollbar-width:thin; }
@@ -152,6 +160,14 @@
       <span class="action-label" id="fs-text">Fullscreen</span>
     </button>
   </div>
+  <div class="performance-strip" id="performance-strip" aria-live="off">
+    <span>FPS <strong id="perf-fps">—</strong></span>
+    <span>Logic <strong id="perf-logic">—</strong></span>
+    <span>Draw <strong id="perf-draw">—</strong></span>
+    <span>Worst <strong id="perf-worst">—</strong></span>
+    <span>Skipped <strong id="perf-skipped">0</strong></span>
+    <span>Quality <strong id="perf-quality">High</strong></span>
+  </div>
   <div class="playfield-row">
     <div class="touch-zone left" id="touch-zone-1" role="group" aria-label="Player 1 touch area: drag up or down to move the left paddle"><span><strong>P1</strong><small>TOUCH AREA</small></span></div>
     <div class="arena" id="arena">
@@ -183,6 +199,11 @@
         <p class="tiny" style="text-align:left;margin:-10px 0 14px">Both paddles flash for 2 seconds before an effect. Sticky, speedup and shrink last 8 seconds; multiball lasts until every ball scores.</p>
         <div class="row"><div class="toggle" id="toggle-sound" role="switch" tabindex="0" aria-checked="true"><span>Sound effects</span><span class="switch"></span></div></div>
         <div class="row"><div class="toggle" id="toggle-startfs" role="switch" tabindex="0" aria-checked="false"><span>Start in fullscreen</span><span class="switch"></span></div></div>
+        <div class="row"><div class="row-label">Performance</div>
+          <div class="toggle" id="toggle-autoquality" role="switch" tabindex="0" aria-checked="true"><span>Automatic graphics quality</span><span class="switch"></span></div>
+        </div>
+        <div class="row"><div class="toggle" id="toggle-perfmeter" role="switch" tabindex="0" aria-checked="true"><span>Show FPS / performance meter</span><span class="switch"></span></div></div>
+        <p class="tiny" style="text-align:left;margin:-10px 0 13px">The performance meter is outside the game. Auto quality reduces rendering resolution and glow during sustained slowdowns without changing the match or controls.</p>
         <button class="btn" id="btn-settings-back">Back</button>
         <p class="tiny">Difficulty, paddle size, and winning score apply to the next new match. Colours update immediately. Names apply to the next match.</p>
       </div>
@@ -233,12 +254,12 @@
 <script>
 (function () {
   'use strict';
-  var canvas=document.getElementById('gameCanvas'), ctx=canvas.getContext('2d');
+  var canvas=document.getElementById('gameCanvas'), ctx=canvas.getContext('2d',{alpha:false});
   var arena=document.getElementById('arena'), menu=document.getElementById('menu');
   var touchZones=[document.getElementById('touch-zone-1'),document.getElementById('touch-zone-2')];
   var panels={main:document.getElementById('panel-main'),settings:document.getElementById('panel-settings'),how:document.getElementById('panel-how'),scores:document.getElementById('panel-scores'),stats:document.getElementById('panel-stats'),over:document.getElementById('panel-over'),exit:document.getElementById('panel-exit')};
   var palette=['#38bdf8','#f472b6','#4ade80','#fbbf24','#fb7185','#a78bfa','#2dd4bf','#f97316'];
-  var defaults={difficulty:'normal',points:7,paddle:'normal',p1Colour:palette[0],p2Colour:palette[1],p1Name:'Player 1',p2Name:'Player 2',winByTwo:true,randomEffects:true,sound:true,startFullscreen:false};
+  var defaults={difficulty:'normal',points:7,paddle:'normal',p1Colour:palette[0],p2Colour:palette[1],p1Name:'Player 1',p2Name:'Player 2',winByTwo:true,randomEffects:true,sound:true,startFullscreen:false,autoQuality:true,showPerf:true};
   var store=(function(){var fallback={},enabled=true;try{localStorage.setItem('pong.test','1');localStorage.removeItem('pong.test');}catch(e){enabled=false;}return{
     get:function(key){try{return enabled?localStorage.getItem(key):(fallback[key]||null);}catch(e){return fallback[key]||null;}},
     set:function(key,value){try{if(enabled)localStorage.setItem(key,value);else fallback[key]=value;}catch(e){fallback[key]=value;}},
@@ -253,6 +274,7 @@
   if(!palette.includes(settings.p2Colour)||settings.p2Colour===settings.p1Colour)settings.p2Colour=palette[1];
   function cleanName(s,i){return String(s||'').trim().replace(/[\x00-\x1f\x7f]/g,'').slice(0,16)||'Player '+(i+1);}
   settings.p1Name=cleanName(settings.p1Name,0);settings.p2Name=cleanName(settings.p2Name,1);
+  settings.autoQuality=settings.autoQuality!==false;settings.showPerf=settings.showPerf!==false;
   function configuredNames(){return [cleanName(settings.p1Name,0),cleanName(settings.p2Name,1)];}
   var matchNames=configuredNames();
   var highScores=readJSON('pong.highscores',[]);
@@ -275,6 +297,7 @@
   var state='menu',hasMatch=false,prevState='countdown',suspendBall=false,clock=0,countdownCount=3;
   var keys={},padMove=[0,0],padStartDown=[false,false],playerPointers=[null,null],pointerOwners=new Map();
   var mouseSide=-1,elapsedSave=0,lastTime=performance.now(),accumulator=0;
+  var pendingAutosave=false;
   var audioContext=null;
   var difficultySpeed={easy:.77,normal:1,hard:1.25,insane:1.52};
   var paddleFactors={small:.17,normal:.225,large:.29};
@@ -294,16 +317,57 @@
       osc.connect(vol);vol.connect(audioContext.destination);osc.start(now);osc.stop(now+seconds);
     }catch(e){}
   }
-  function fitCanvas(){
+  /* Graphics resolution is deliberately separate from the logical field size.
+     Resizing the backing canvas should never reset game positions or speed. */
+  var bgCanvas=document.createElement('canvas'),bgCtx=bgCanvas.getContext('2d',{alpha:false});
+  var bgColours='',graphicsLevel=0,rasterDpr=0;
+  var performanceStrip=document.getElementById('performance-strip');
+  var perf={fps:60,frames:0,sampleStart:performance.now(),logicTotal:0,drawTotal:0,
+    worstMs:0,skipped:0,lastAdjust:0,badSamples:0,goodSamples:0};
+  var qualityNames=['High','Medium','Low'];
+  function refreshPerfVisibility(){performanceStrip.classList.toggle('visible',!!settings.showPerf);}
+  function drawStaticBackground(){
+    if(!bgCanvas.width||!bgCanvas.height)return;
+    bgCtx.setTransform(bgCanvas.width/W,0,0,bgCanvas.height/H,0,0);
+    bgCtx.fillStyle='#0f172a';bgCtx.fillRect(0,0,W,H);
+    var l=bgCtx.createLinearGradient(0,0,W/2,0);
+    l.addColorStop(0,colourRGBA(settings.p1Colour,.07));l.addColorStop(1,colourRGBA(settings.p1Colour,0));
+    bgCtx.fillStyle=l;bgCtx.fillRect(0,0,W/2,H);
+    var r=bgCtx.createLinearGradient(W,0,W/2,0);
+    r.addColorStop(0,colourRGBA(settings.p2Colour,.07));r.addColorStop(1,colourRGBA(settings.p2Colour,0));
+    bgCtx.fillStyle=r;bgCtx.fillRect(W/2,0,W/2,H);
+    bgCtx.save();bgCtx.strokeStyle='rgba(148,163,184,.29)';bgCtx.lineWidth=2;
+    bgCtx.setLineDash([8,12]);bgCtx.beginPath();bgCtx.moveTo(W/2,0);bgCtx.lineTo(W/2,H);bgCtx.stroke();
+    bgCtx.setLineDash([]);bgCtx.beginPath();
+    bgCtx.ellipse(W/2,H/2,Math.min(W*.15,H*.27),Math.min(W*.15,H*.27),0,0,Math.PI*2);
+    bgCtx.strokeStyle='rgba(148,163,184,.16)';bgCtx.stroke();bgCtx.restore();
+    bgColours=settings.p1Colour+'|'+settings.p2Colour;
+  }
+  function configureCanvasPixels(){
+    if(W<20||H<20)return;
+    // At high quality a 1080p game stays under ~2M pixels, not the original 6M.
+    var budget=[1900000,1050000,500000][graphicsLevel];
+    var maxDpr=[1.5,1.1,.85][graphicsLevel];
+    var dpr=Math.min(window.devicePixelRatio||1,maxDpr,Math.sqrt(budget/(W*H)));
+    dpr=Math.max(.18,dpr);
+    var pw=Math.max(1,Math.round(W*dpr)),ph=Math.max(1,Math.round(H*dpr));
+    var colours=settings.p1Colour+'|'+settings.p2Colour;
+    if(canvas.width===pw&&canvas.height===ph&&bgColours===colours)return;
+    if(canvas.width!==pw||canvas.height!==ph){
+      canvas.width=pw;canvas.height=ph;
+      ctx.setTransform(pw/W,0,0,ph/H,0,0);
+      bgCanvas.width=pw;bgCanvas.height=ph;
+      rasterDpr=pw/W;
+    }
+    drawStaticBackground();
+  }
+  function fitCanvas(forceGeometry){
     var rect=arena.getBoundingClientRect(),portrait=window.matchMedia('(orientation: portrait)').matches;
     var nw=Math.max(1,(portrait?rect.height:rect.width)-4),nh=Math.max(1,(portrait?rect.width:rect.height)-4);
     if(nw<20||nh<20)return;
+    if(!forceGeometry&&Math.abs(nw-W)<.75&&Math.abs(nh-H)<.75){configureCanvasPixels();return;}
     var oldW=W,oldH=H;
     W=nw;H=nh;
-    // Bound total pixels on large 4K/8K monitors without leaving unused space.
-    var dpr=clamp(window.devicePixelRatio||1,1,Math.max(1,Math.min(2.5,Math.sqrt(6000000/(W*H)))));
-    canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);
-    ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);
     scale=clamp(Math.min(W/850,H/540),.6,1.5);
     ballRadius=clamp(W*.0095,5.5,10);
     paddleWidth=clamp(W*.017,10,18);
@@ -320,6 +384,38 @@
       [ball].concat(extraBalls).forEach(function(b){b.x=b.x/oldW*W;b.y=b.y/oldH*H;b.vx*=W/oldW;b.vy*=H/oldH;b.trail=[];});
     }else{ball.x=W/2;ball.y=H/2;}
     ball.trail=[];
+    // Logical sizes changed: force the new background even if the raster pixel count matches.
+    bgColours='';configureCanvasPixels();
+    if(state==='menu'||state==='gameover')draw();
+  }
+  function adaptGraphics(timestamp,fps){
+    if(!settings.autoQuality||!hasMatch||state==='menu'||document.hidden)return;
+    if(fps<48){perf.badSamples++;perf.goodSamples=0;}
+    else if(fps>57){perf.goodSamples++;perf.badSamples=0;}
+    else{perf.badSamples=0;perf.goodSamples=0;}
+    if(perf.badSamples>=2&&graphicsLevel<2&&timestamp-perf.lastAdjust>1500){
+      graphicsLevel++;perf.lastAdjust=timestamp;perf.badSamples=0;
+      configureCanvasPixels();
+    }else if(perf.goodSamples>=10&&graphicsLevel>0&&timestamp-perf.lastAdjust>9000){
+      graphicsLevel--;perf.lastAdjust=timestamp;perf.goodSamples=0;
+      configureCanvasPixels();
+    }
+  }
+  function showPerformance(timestamp){
+    var elapsed=timestamp-perf.sampleStart;
+    if(elapsed<950)return;
+    perf.fps=Math.round(perf.frames*1000/Math.max(1,elapsed));
+    if(settings.showPerf){
+      var fpsEl=document.getElementById('perf-fps');fpsEl.textContent=perf.fps;
+      fpsEl.className=perf.fps<30?'critical':perf.fps<50?'slow':'';
+      document.getElementById('perf-logic').textContent=(perf.logicTotal/Math.max(1,perf.frames)).toFixed(1)+'ms';
+      document.getElementById('perf-draw').textContent=(perf.drawTotal/Math.max(1,perf.frames)).toFixed(1)+'ms';
+      document.getElementById('perf-worst').textContent=perf.worstMs.toFixed(0)+'ms';
+      document.getElementById('perf-skipped').textContent=perf.skipped;
+      document.getElementById('perf-quality').textContent=qualityNames[graphicsLevel]+' ('+Math.round(rasterDpr*100)+'%)';
+    }
+    adaptGraphics(timestamp,perf.fps);
+    perf.frames=0;perf.sampleStart=timestamp;perf.logicTotal=0;perf.drawTotal=0;perf.worstMs=0;
   }
   function centerPaddles(){for(var i=0;i<2;i++){paddles[i].y=(H-paddles[i].h)/2;paddles[i].dy=0;}}
   function centerBall(){ball.x=W/2;ball.y=H/2;ball.vx=0;ball.vy=0;ball.trail=[];ball.rally=0;ball.sticky=null;extraBalls=[];}
@@ -411,6 +507,7 @@
     document.querySelectorAll('.player-hud')[0].style.setProperty('--player',settings.p1Colour);
     document.querySelectorAll('.player-hud')[1].style.setProperty('--player',settings.p2Colour);
     paddles[0].colour=settings.p1Colour;paddles[1].colour=settings.p2Colour;
+    if(bgColours&&bgColours!==settings.p1Colour+'|'+settings.p2Colour)configureCanvasPixels();
     document.getElementById('hud-name-1').textContent=hasMatch?matchNames[0]:cleanName(settings.p1Name,0);
     document.getElementById('hud-name-2').textContent=hasMatch?matchNames[1]:cleanName(settings.p2Name,1);
     touchZones.forEach(function(zone,i){
@@ -444,7 +541,7 @@
   }
   function resetMatch(){
     matchRules=configuredRules();matchNames=configuredNames();score=[0,0];hasMatch=true;pointWinner=-1;lastWinner=-1;
-    resetEffects();fitCanvas();
+    resetEffects();fitCanvas(true);
     serveDir=Math.random()<.5?-1:1;centerPaddles();centerBall();updateHUD();saveMatch();startCountdown(3,false);
   }
   function maybeFullscreen(){if(settings.startFullscreen&&!document.fullscreenElement&&!document.webkitFullscreenElement)toggleFullscreen();}
@@ -462,7 +559,7 @@
       effects.wait=clamp(Number(d.wait)||0,0,30);effects.timer=clamp(Number(d.timer)||0,0,EFFECT_DURATION);
       if(effects.phase!=='idle'&&!effects.type){effects.phase='idle';effects.wait=randomEffectDelay();}
     }
-    fitCanvas();
+    fitCanvas(true);
     score=[Math.max(0,Math.floor(Number(data.score[0])||0)),Math.max(0,Math.floor(Number(data.score[1])||0))];
     serveDir=data.serveDir===-1?-1:1;
     for(var i=0;i<2;i++)paddles[i].y=clamp(((data.paddles||[])[i]||.5)*H-paddles[i].h/2,0,H-paddles[i].h);
@@ -480,6 +577,13 @@
     // A countdown gives both people time to put their fingers back on the screen.
     if(prevState==='point'||pointWinner>=0){pointWinner=-1;centerBall();startCountdown(2,false);}
     else startCountdown(3,Math.abs(ball.vx)>0);
+  }
+  function queueAutosave(){
+    if(pendingAutosave)return;
+    pendingAutosave=true;
+    var job=function(){pendingAutosave=false;if(hasMatch&&state==='playing')saveMatch();};
+    if(window.requestIdleCallback)window.requestIdleCallback(job,{timeout:1500});
+    else window.setTimeout(job,80);
   }
   function saveMatch(){
     if(!hasMatch)return;
@@ -629,7 +733,7 @@
         updateBall(currentBalls[k],dt);
       }
       elapsedSave+=dt;
-      if(elapsedSave>=2){elapsedSave=0;saveMatch();}
+      if(elapsedSave>=5){elapsedSave=0;queueAutosave();}
     }
   }
   function roundedRect(x,y,w,h,r){
@@ -639,7 +743,7 @@
   }
   function label(message,size,colour,y,alpha){
     ctx.save();ctx.fillStyle=colour;ctx.globalAlpha=alpha===undefined?1:alpha;ctx.font='800 '+Math.max(20,Math.round(size*scale))+'px Segoe UI, system-ui, sans-serif';
-    ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor=colour;ctx.shadowBlur=18;
+    ctx.textAlign='center';ctx.textBaseline='middle';ctx.shadowColor=colour;ctx.shadowBlur=graphicsLevel===2?0:graphicsLevel===1?6:18;
     ctx.fillText(message,W/2,y);ctx.restore();
   }
   function drawEffectBadge(message,colour){
@@ -652,17 +756,11 @@
     ctx.fillText(message,W/2,y+barH/2,barW-12);ctx.restore();
   }
   function draw(){
-    ctx.clearRect(0,0,W,H);
-    ctx.fillStyle='#0f172a';ctx.fillRect(0,0,W,H);
-    // Subtle opposing player colours echo the Breakout palette.
-    var l=ctx.createLinearGradient(0,0,W/2,0);l.addColorStop(0,colourRGBA(paddles[0].colour,.07));l.addColorStop(1,colourRGBA(paddles[0].colour,0));ctx.fillStyle=l;ctx.fillRect(0,0,W/2,H);
-    var r=ctx.createLinearGradient(W,0,W/2,0);r.addColorStop(0,colourRGBA(paddles[1].colour,.07));r.addColorStop(1,colourRGBA(paddles[1].colour,0));ctx.fillStyle=r;ctx.fillRect(W/2,0,W/2,H);
-    ctx.save();ctx.strokeStyle='rgba(148,163,184,.29)';ctx.lineWidth=2;ctx.setLineDash([8,12]);ctx.beginPath();ctx.moveTo(W/2,0);ctx.lineTo(W/2,H);ctx.stroke();ctx.setLineDash([]);
-    ctx.beginPath();ctx.ellipse(W/2,H/2,Math.min(W*.15,H*.27),Math.min(W*.15,H*.27),0,0,Math.PI*2);ctx.strokeStyle='rgba(148,163,184,.16)';ctx.stroke();ctx.restore();
+    ctx.drawImage(bgCanvas,0,0,W,H);
     var warning=state==='playing'&&effects.phase==='warning';
     for(var i=0;i<2;i++){
       var p=paddles[i],flash=warning&&Math.floor((WARNING_DURATION-effects.timer)*8)%2===0;
-      ctx.save();ctx.shadowColor=flash?'#fbbf24':p.colour;ctx.shadowBlur=flash?29:17;
+      ctx.save();ctx.shadowColor=flash?'#fbbf24':p.colour;ctx.shadowBlur=graphicsLevel===2?0:graphicsLevel===1?(flash?10:6):(flash?29:17);
       ctx.fillStyle=flash?'#fff7d6':p.colour;
       roundedRect(p.x,p.y,p.w,p.h,Math.min(8,p.w/2));ctx.fill();
       ctx.shadowBlur=0;ctx.fillStyle=flash?'#f59e0b':'rgba(255,255,255,.27)';
@@ -670,12 +768,12 @@
     }
     if(hasMatch||state==='countdown'||state==='point'||state==='gameover'||state==='menu'){
       [ball].concat(extraBalls).forEach(function(b,index){
-        for(var t=0;t<b.trail.length;t++){
+        for(var t=graphicsLevel===2?Math.max(0,b.trail.length-3):graphicsLevel===1?Math.max(0,b.trail.length-7):0;t<b.trail.length;t++){
           var pt=b.trail[t],a=(t+1)/b.trail.length*.23;
           ctx.fillStyle=index===0?'rgba(226,232,240,'+a+')':'rgba(251,191,36,'+a+')';
           ctx.beginPath();ctx.arc(pt.x,pt.y,ballRadius*(.25+.65*(t+1)/b.trail.length),0,Math.PI*2);ctx.fill();
         }
-        ctx.save();ctx.fillStyle=index===0?'#f8fafc':'#fbbf24';ctx.shadowColor=index===0?'#e0f2fe':'#fbbf24';ctx.shadowBlur=18;
+        ctx.save();ctx.fillStyle=index===0?'#f8fafc':'#fbbf24';ctx.shadowColor=index===0?'#e0f2fe':'#fbbf24';ctx.shadowBlur=graphicsLevel===2?0:graphicsLevel===1?7:18;
         ctx.beginPath();ctx.arc(b.x,b.y,ballRadius,0,Math.PI*2);ctx.fill();ctx.restore();
         if(b.sticky){
           ctx.save();ctx.strokeStyle='#fde68a';ctx.globalAlpha=.7;ctx.lineWidth=2;ctx.setLineDash([5,5]);
@@ -701,12 +799,25 @@
     }
   }
   function loop(t){
-    var dt=Math.min(Math.max((t-lastTime)/1000,0),.05);lastTime=t;
+    var raw=Math.max(0,(t-lastTime)/1000);lastTime=t;
+    // Keep up with short browser stalls. The original 50ms clamp and 7-step
+    // limit caused literal slow motion whenever rendering fell below ~20fps.
+    // A long tab suspension is not simulated in fast-forward.
+    if(raw>.5){accumulator=0;raw=0;}
+    var dt=Math.min(raw,.12),step=1/120;
+    if(raw>.12)perf.skipped+=Math.floor((raw-.12)/step);
+    var a=performance.now();
     gamepadInput();accumulator+=dt;
     var steps=0;
-    while(accumulator>=1/120&&steps<7){update(1/120);accumulator-=1/120;steps++;}
-    if(steps>=7)accumulator=0;
-    draw();requestAnimationFrame(loop);
+    while(accumulator>=step&&steps<15){update(step);accumulator-=step;steps++;}
+    if(accumulator>=step){perf.skipped+=Math.floor(accumulator/step);accumulator=accumulator%step;}
+    var b=performance.now();
+    if(state!=='menu'&&state!=='gameover')draw();
+    var c=performance.now();
+    perf.frames++;perf.logicTotal+=b-a;perf.drawTotal+=c-b;
+    if(raw*1000>perf.worstMs)perf.worstMs=raw*1000;
+    showPerformance(t);
+    requestAnimationFrame(loop);
   }
   // All input surfaces share the canvas' vertical coordinate system.
   // Pointer capture and per-player ownership allow two independent touches.
@@ -896,11 +1007,16 @@
   buildColours('colours-1',0);buildColours('colours-2',1);
   function wireToggle(id,key){
     var el=document.getElementById(id);
-    function toggle(){settings[key]=!settings[key];persistSettings();refreshSettings();}
+    function toggle(){
+      settings[key]=!settings[key];
+      if(key==='autoQuality'&&!settings.autoQuality){graphicsLevel=0;perf.badSamples=0;perf.goodSamples=0;configureCanvasPixels();}
+      persistSettings();refreshSettings();
+    }
     el.addEventListener('click',toggle);
     el.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});
   }
   wireToggle('toggle-winby2','winByTwo');wireToggle('toggle-sound','sound');wireToggle('toggle-startfs','startFullscreen');
+  wireToggle('toggle-autoquality','autoQuality');wireToggle('toggle-perfmeter','showPerf');
   (function(){
     var el=document.getElementById('toggle-random');
     function toggle(){
@@ -932,15 +1048,16 @@
       var mine=settings[i===0?'p1Colour':'p2Colour'],other=settings[i===0?'p2Colour':'p1Colour'];
       document.getElementById('colours-'+(i+1)).querySelectorAll('button').forEach(function(b){b.classList.toggle('active',b.dataset.colour===mine);b.classList.toggle('taken',b.dataset.colour===other);});
     });
-    [['toggle-winby2','winByTwo'],['toggle-random','randomEffects'],['toggle-sound','sound'],['toggle-startfs','startFullscreen']].forEach(function(k){
+    [['toggle-winby2','winByTwo'],['toggle-random','randomEffects'],['toggle-sound','sound'],['toggle-startfs','startFullscreen'],['toggle-autoquality','autoQuality'],['toggle-perfmeter','showPerf']].forEach(function(k){
       var el=document.getElementById(k[0]);el.classList.toggle('on',!!settings[k[1]]);el.setAttribute('aria-checked',String(!!settings[k[1]]));
     });
+    refreshPerfVisibility();
   }
   if(window.ResizeObserver)new ResizeObserver(fitCanvas).observe(arena);
   window.addEventListener('resize',fitCanvas);
   fitCanvas();centerPaddles();centerBall();
   updateHUD();refreshSettings();refreshMain();showPanel('main');
-  requestAnimationFrame(loop);
+  draw();requestAnimationFrame(loop);
 })();
 </script>
 </body>
