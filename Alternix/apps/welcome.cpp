@@ -3,9 +3,11 @@
 // g++ -std=c++17 -O3 -fPIC apps/welcome.cpp -o welcome \
 //    $(pkg-config --cflags --libs Qt5Widgets) -lX11 -lXext -lXi
 //
-// The PowerPoint wording, Comfortaa typeface, per-run glows, and individual
-// slide gradient directions are preserved. Instead of showing screenshots of
-// the bars, this guide spotlights the LIVE desktop underneath. Its X11 Shape
+// The PowerPoint (welcomw.pptx, 11 annotated screens) defines the wording,
+// control rectangles, and panel locations. The original introductory screen
+// precedes those 11 steps; no screenshot or annotation shapes are baked in.
+// Comfortaa, coloured glows and gradient-backed cards remain. Instead of bar
+// screenshots, this guide spotlights the LIVE desktop underneath. Its X11 Shape
 // INPUT region contains only the guide's own controls; desktop clicks, swipes
 // and on-screen keyboard touches reach the real underlying windows.
 //
@@ -21,6 +23,8 @@
 #include <QDirIterator>
 #include <QEvent>
 #include <QElapsedTimer>
+#include <QPropertyAnimation>
+#include <QEasingCurve>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -123,19 +127,19 @@ QLinearGradient deckGradient(int page, const QRectF &bounds, int opacity=255) {
     QColor blue(150,220,248,opacity), offWhite(242,242,242,opacity),
            peach(246,198,173,opacity);
     QLinearGradient gradient;
-    if (page <= 2) { // 270 degrees: blue top / peach bottom
+    if (page <= 3) { // Blue top / peach bottom: intro, launcher, taskbar, keyboard
         gradient = QLinearGradient(bounds.left(),bounds.top(),bounds.left(),bounds.bottom());
         gradient.setColorAt(0,blue); gradient.setColorAt(.5,offWhite);
         gradient.setColorAt(1,peach);
-    } else if (page == 3) { // 0 degrees: peach left / blue right
+    } else if (page == 4) { // Running Apps: peach left / blue right
         gradient = QLinearGradient(bounds.left(),bounds.top(),bounds.right(),bounds.top());
         gradient.setColorAt(0,peach); gradient.setColorAt(.5,offWhite);
         gradient.setColorAt(1,blue);
-    } else if (page == 4) { // 180 degrees: blue left / peach right
+    } else if (page == 5) { // Notifications: blue left / peach right
         gradient = QLinearGradient(bounds.left(),bounds.top(),bounds.right(),bounds.top());
         gradient.setColorAt(0,blue); gradient.setColorAt(.5,offWhite);
         gradient.setColorAt(1,peach);
-    } else { // 90 degrees: peach top / blue bottom
+    } else { // Quick Settings + top-bar pages: peach top / blue bottom
         gradient = QLinearGradient(bounds.left(),bounds.top(),bounds.left(),bounds.bottom());
         gradient.setColorAt(0,peach); gradient.setColorAt(.5,offWhite);
         gradient.setColorAt(1,blue);
@@ -150,40 +154,33 @@ struct TextRun {
 };
 
 struct Step {
-    QString heading;
-    QVector<TextRun> lines;
-    QString instruction;
+    QVector<TextRun> lines; // Exact wording from PowerPoint annotation textboxes
 };
 
 const QVector<Step> &guide() {
     static const QVector<Step> steps = {
-        {"Welcome", {{"Welcome,",White},{"tap or click to continue..",White}},
-          "Tap or click anywhere to start the interactive desktop tour."},
-        {"App Launcher", {{"Swipe up",Purple},{"=",Plain},{"App Launcher",Plain},
-                          {"or",Plain},{"tap the icon",Green,3}},
-          "Swipe up anywhere on the desktop, or tap the real launcher icon."},
-        {"Taskbar & Keyboard", {{"Application Taskbar",Green},
-                                 {"Toggle Keyboard",Green}},
-          "The bottom bar is your taskbar. Tap its keyboard icon to open and hide the keyboard."},
-        {"Running Apps", {{"Swipe Right",Purple},{"=",Plain},{"Running Apps",Plain}},
-          "Swipe right from the left edge to open Running Apps."},
-        {"Notifications", {{"Swipe Left",Purple},{"=",Plain},{"Notifications",Plain}},
-          "Swipe left from the right edge to open Notifications."},
-        {"Quick Settings", {{"Pull down",Green},{"or",Plain},
-                              {"Swipe on desktop",Purple},{"=",Plain},
-                              {"Quick Settings",SoftWhite}},
-          "Pull down from either marked area on the top bar, or swipe down on the desktop."},
-        {"Top Bar", {{"Desktop Switcher & System Tray",Plain},
-                       {"Tap = Clock",Green,3},
-                       {"Window & Device Controls",Plain}},
-          "Tap the left, centre and right highlighted areas on the real top bar."},
+        // Original Welcome introduction, followed by welcomw.pptx slides 1-11.
+        {{{"Welcome,",White}, {"tap or click to continue..",White}}},
+        {{{"Swipe up",Purple}, {"Or",Plain}, {"Tap the icon",Green,3},
+          {"To open Apps",Plain}}},
+        {{{"Taskbar",Green}}},
+        {{{"To open Keyboard",Green}}},
+        {{{"Swipe from outside screen",Purple}, {"To Show Running Apps",Plain}}},
+        {{{"Swipe from outside screen",Purple}, {"To Show Notifications",Plain}}},
+        {{{"Swipe in areas",Green}, {"or swipe down on desktop",Purple},
+          {"to open Quick Settings",SoftWhite}}},
+        {{{"Desktop Switcher",Plain}}},
+        {{{"System Tray",Plain}}},
+        {{{"Tap to open Clock App",Green,3}}},
+        {{{"System Stats",Plain}}},
+        {{{"Window Controls",Plain}}},
     };
     return steps;
 }
 
 class WelcomeOverlay final : public QWidget {
 public:
-    explicit WelcomeOverlay(QWidget *parent=nullptr) : QWidget(parent) {
+    explicit WelcomeOverlay(QWidget *parent=nullptr) : QWidget(parent), fadeAnimation(this, "windowOpacity") {
         setWindowTitle("Welcome");
         setObjectName("welcome");
         // An override-redirect window is never added to Qtile's taskbar or
@@ -203,21 +200,15 @@ public:
         pollTimer.setInterval(16);
         QObject::connect(&pollTimer, &QTimer::timeout, this, [this]{ pollPointer(); });
 
-        // Animate the painted overlay, not its X11 window opacity. The guide
-        // already uses an ARGB/translucent window for desktop passthrough;
-        // painting with a rising alpha fades in every gradient, glow, bracket
-        // and navigation button together without changing its input shape.
-        fadeTimer.setInterval(16); // approximately 60 redraws per second
-        fadeTimer.setTimerType(Qt::PreciseTimer);
-        QObject::connect(&fadeTimer, &QTimer::timeout, this, [this] {
-            fadeOpacity = qMin(qreal(1.0), qreal(fadeClock.elapsed()) / 1500.0);
-            update();
-            if (fadeOpacity >= 1.0) fadeTimer.stop();
-        });
+        // Picom/X11 composites ONE finished ARGB frame while the window opacity
+        // changes. Repainting a fullscreen QPainter scene with eight glow strokes
+        // every 16 ms caused visible frame skips on integrated GPUs/tablets.
+        // InOutSine is continuous at both ends, without any opacity stepping.
+        fadeAnimation.setDuration(1500);
+        fadeAnimation.setEasingCurve(QEasingCurve::InOutSine);
     }
 
     ~WelcomeOverlay() override {
-        fadeTimer.stop();
         pollTimer.stop();
         socketNotifier.reset();
         if (display) XCloseDisplay(display);
@@ -279,10 +270,11 @@ public:
     }
 
     void beginFadeIn() {
-        fadeOpacity = 0.0;
-        fadeClock.start();
-        fadeTimer.start();
-        update();
+        fadeAnimation.stop();
+        setWindowOpacity(0.0);
+        fadeAnimation.setStartValue(0.0);
+        fadeAnimation.setEndValue(1.0);
+        fadeAnimation.start();
     }
 
 protected:
@@ -295,12 +287,11 @@ protected:
         QPainter p(this);
         p.setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing |
                          QPainter::SmoothPixmapTransform);
-        // Clear the previous frame first: otherwise partially transparent
-        // paint can accumulate and make the fade appear instantaneous.
+        // Painting is static during the fade; picom interpolates windowOpacity.
+        // Clear every backing-store paint to retain truly transparent target areas.
         p.setCompositionMode(QPainter::CompositionMode_Source);
         p.fillRect(rect(), Qt::transparent);
         p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        p.setOpacity(fadeOpacity);
         if (page==0) {
             // The introductory slide keeps its *entire* original PPT gradient.
             p.fillRect(rect(),deckGradient(0,rect()));
@@ -320,43 +311,25 @@ protected:
         p.save();
         p.setCompositionMode(QPainter::CompositionMode_Clear);
         for (const QRectF &hole : holes) {
-            if (page == 5) {
-                // The PowerPoint's Quick Settings slide shows exactly two
-                // rectangular top-bar regions, not one full-width strip or a
-                // floating desktop region. Keep their shape corners square.
-                p.fillRect(hole,Qt::transparent);
-            } else {
-                QPainterPath path;
-                path.addRoundedRect(hole, qMin(18.0,hole.height()*.25),
-                                    qMin(18.0,hole.height()*.25));
-                p.fillPath(path,Qt::transparent);
-            }
+            QPainterPath path;
+            const qreal radius=qMin(12.0,hole.height()*.25);
+            path.addRoundedRect(hole,radius,radius);
+            p.fillPath(path,Qt::transparent);
         }
         p.restore();
         p.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        const QColor edge = (page==3 || page==4) ? QColor(203,0,180) : QColor(57,212,1);
+        const QColor edge = (page==4 || page==5) ? QColor(203,0,180) : QColor(57,212,1);
         for (const QRectF &hole : holes) {
             p.setBrush(Qt::NoBrush);
-            if (page == 5) {
-                // Match slide 6's two open-top GREEN bracket outlines.
-                QPainterPath bracket;
-                bracket.moveTo(hole.left(),hole.top());
-                bracket.lineTo(hole.left(),hole.bottom());
-                bracket.lineTo(hole.right(),hole.bottom());
-                bracket.lineTo(hole.right(),hole.top());
-                p.setPen(QPen(QColor(57,212,1,80),12,Qt::SolidLine,
-                              Qt::RoundCap,Qt::RoundJoin));
-                p.drawPath(bracket);
-                p.setPen(QPen(QColor(57,212,1,235),4,Qt::SolidLine,
-                              Qt::RoundCap,Qt::RoundJoin));
-                p.drawPath(bracket);
-            } else {
-                p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),60),11));
-                p.drawRoundedRect(hole,17,17);
-                p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),220),3));
-                p.drawRoundedRect(hole,17,17);
-            }
+            const qreal radius=qMin(12.0,hole.height()*.25);
+            p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),60),10));
+            p.drawRoundedRect(hole,radius,radius);
+            p.setPen(QPen(QColor(edge.red(),edge.green(),edge.blue(),225),3));
+            p.drawRoundedRect(hole,radius,radius);
         }
+        // These directional arrows were added in slides 4 and 5, and are not
+        // background screenshots or extra click targets.
+        if (page==4 || page==5) drawSwipeArrow(p);
         drawInstructionCard(p);
         drawFooter(p);
     }
@@ -403,9 +376,7 @@ private:
     QPointF touchPress;
     QElapsedTimer interactionClock;
     QTimer pollTimer;
-    QTimer fadeTimer;
-    QElapsedTimer fadeClock;
-    qreal fadeOpacity = 0.0;
+    QPropertyAnimation fadeAnimation;
     Display *display=nullptr;
     Window root=0;
     int xiOpcode=0,xiEvent=0,xiError=0;
@@ -420,23 +391,68 @@ private:
         return Rect(x*width(),y*height(),w*width(),h*height());
     }
 
-    // Cards move away from the live areas they describe. No historical bar
-    // screenshots are drawn over the actual desktop controls.
+    // PowerPoint screenshots occupy only 90% of slide width (x=5..95%).
+    // Convert their annotation coordinates back to full desktop geometry.
+    Rect pptTarget(qreal x,qreal y,qreal w,qreal h) const {
+        return frac((x-.05)/.90, y, w/.90, h);
+    }
+
+    // Retain the original gradient-backed Welcome card, but place it at the
+    // annotated rounded textbox's centre and below the live target. The
+    // PowerPoint text-box SHAPE is not drawn or shipped: only its location and
+    // lettering are used. Cards expand on small screens so text/nav still fit.
     Rect cardRect() const {
-        qreal w=qMin(width()*.82,qreal(700));
-        w=qMax(qMin(width()-20.0,w),qreal(230));
-        qreal h=qBound(qreal(155),height()*.43,qreal(340));
-        if (height()<520) h=height()*.56;
-        qreal x=(width()-w)*.5;
-        qreal y=height()*.28;
-        if (page==1) y=height()*.15;
-        if (page==2) y=height()*.27;
-        if (page==3) x=qMin(width()-w-8.0,width()*.53);
-        if (page==4) x=qMax(8.0,width()*.04);
-        if (page==5) y=height()*.36;
-        if (page==6) y=height()*.37;
-        y=qMin(y,height()-h-12.0);
+        qreal w=qMin(qreal(650),qMax(qreal(280),width()*.365));
+        w=qMin(w,qMax(qreal(200),width()-24.0));
+        qreal h=qMin(qreal(320),qMax(qreal(175),height()*.29));
+        h=qMin(h,qMax(qreal(165),height()*.55));
+        qreal pptX=.342, pptY=.161, pptW=.317;
+        switch (page) {
+        case 1: pptY=.161; break;
+        case 2: case 3: pptY=.285; break;
+        case 4: pptX=.534; pptY=.288; break;
+        case 5: pptX=.095; pptY=.288; break;
+        case 6: pptY=.366; break;
+        case 7: pptX=.057; pptY=.098; pptW=.153; break;
+        case 8: pptX=.145; pptY=.099; pptW=.153; break;
+        case 9: pptX=.424; pptY=.099; pptW=.153; break;
+        case 10: pptX=.714; pptY=.101; pptW=.153; break;
+        case 11: pptX=.790; pptY=.099; pptW=.153; break;
+        default: break;
+        }
+        // Shorter cards for the one-line labels on top-bar steps (7-11).
+        if (page>=7) {
+            w=qMin(w,qreal(540));
+            h=qMin(h,qMax(qreal(162),height()*.24));
+        }
+        const qreal centre=((pptX+pptW*.5)-.05)/.90*width();
+        const qreal x=qBound(qreal(12),centre-w*.5,qMax(qreal(12),width()-w-12.0));
+        const qreal y=qBound(qreal(12),pptY*height(),qMax(qreal(12),height()-h-12.0));
         return Rect(x,y,w,h);
+    }
+
+    void drawSwipeArrow(QPainter &p) const {
+        // PPT shape: x=.149..257 on slide 4 (right), .741..849 on 5 (left)
+        const bool right=page==4;
+        Rect box=right ? pptTarget(.149,.436,.108,.127)
+                       : pptTarget(.741,.436,.108,.127);
+        const qreal dir=right ? 1.0:-1.0;
+        const QPointF start(box.center().x()-dir*box.width()*.35,box.center().y());
+        const QPointF tip(box.center().x()+dir*box.width()*.35,box.center().y());
+        const qreal head=qMin(box.width()*.20,box.height()*.34);
+        QPainterPath arrow;
+        arrow.moveTo(start);
+        arrow.lineTo(tip);
+        arrow.moveTo(tip.x()-dir*head,tip.y()-head);
+        arrow.lineTo(tip);
+        arrow.lineTo(tip.x()-dir*head,tip.y()+head);
+        p.save();
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(146,208,80,75),12,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+        p.drawPath(arrow);
+        p.setPen(QPen(QColor(146,208,80,245),4,Qt::SolidLine,Qt::RoundCap,Qt::RoundJoin));
+        p.drawPath(arrow);
+        p.restore();
     }
 
     Rect buttonBar() const {
@@ -459,21 +475,23 @@ private:
     }
 
     QVector<Rect> targetRegions() const {
+        // Square-dotted rectangles in welcomw.pptx, slides 1-11.
+        // Red-X regions are intentionally omitted. Side swipe previews remain
+        // on slides 4/5, which use arrow annotations rather than dotted boxes.
         switch (page) {
-        case 1:
-            // Swiping UP works anywhere on the desktop: do not show misleading
-            // left/right hotspots. Highlight only the real bottom launcher icon.
-            return {frac(.36,.915,.28,.08)};
-        case 2: return {frac(.00,.92,.40,.08),frac(.84,.91,.16,.09)};
-        case 3: return {frac(.00,.12,.09,.74)};
-        case 4: return {frac(.91,.12,.09,.74)};
-        case 5:
-            // Slide 6: the original green brackets mark top-bar spans
-            // approximately x=11%-44% and x=56%-89%, height 7.2%.
-            return {frac(.11,.00,.33,.072),frac(.56,.00,.33,.072)};
-        case 6: return {frac(.0,.0,.145,.085),frac(.43,.0,.14,.085),
-                        frac(.85,.0,.15,.085)};
-        default: return {};
+        case 1: return {pptTarget(.474,.955,.052,.045)}; // launcher only
+        case 2: return {pptTarget(.050,.955,.428,.045)}; // taskbar ONLY
+        case 3: return {pptTarget(.898,.955,.052,.045)}; // keyboard ONLY
+        case 4: return {frac(.00,.12,.09,.74)}; // left edge swipe
+        case 5: return {frac(.91,.12,.09,.74)}; // right edge swipe
+        case 6: return {pptTarget(.050,.000,.428,.045),
+                        pptTarget(.522,.000,.428,.045)}; // 2 top dropdowns
+        case 7: return {pptTarget(.050,.000,.048,.045)}; // desktop switcher
+        case 8: return {pptTarget(.092,.000,.125,.045)}; // system tray
+        case 9: return {pptTarget(.466,.000,.068,.045)}; // clock
+        case 10:return {pptTarget(.783,.000,.124,.045)}; // system stats
+        case 11:return {pptTarget(.891,.000,.059,.045)}; // window controls
+        default:return {};
         }
     }
 
@@ -571,26 +589,21 @@ private:
         const qreal dx=diff.x(),dy=diff.y();
         const bool click=std::hypot(dx,dy)<qMax(24.0,width()*.025);
         if (page==1) {
-            // Any deliberate upward swipe on the desktop opens the launcher;
-            // the centre-bottom icon remains an alternative tap target.
+            // Upward swipe can start ANYWHERE on the desktop.
             if ((dy < -height()*.12 && std::abs(dy)>std::abs(dx)*1.1) ||
-                (click && gestureStart.y()>height()*.89 &&
-                 std::abs(gestureStart.x()-width()*.5)<width()*.15)) mark(1);
-        } else if (page==2 && click && gestureStart.y()>height()*.89) {
-            if (gestureStart.x()>width()*.82) mark(2);
-            else if (gestureStart.x()<width()*.43) mark(1);
-        } else if (page==3) {
+                (click && targetRegions().first().contains(gestureStart))) mark(1);
+        } else if ((page==2 || page==3) && click) {
+            if (targetRegions().first().contains(gestureStart)) mark(1);
+        } else if (page==4) {
             if (gestureStart.x()<width()*.13 && dx>width()*.15 &&
                 std::abs(dx)>std::abs(dy)*1.2) mark(1);
-        } else if (page==4) {
+        } else if (page==5) {
             if (gestureStart.x()>width()*.87 && dx< -width()*.15 &&
                 std::abs(dx)>std::abs(dy)*1.2) mark(1);
-        } else if (page==5) {
+        } else if (page==6) {
             if (dy>height()*.13 && std::abs(dy)>std::abs(dx)*1.1) mark(1);
-        } else if (page==6 && click && gestureStart.y()<height()*.12) {
-            if (gestureStart.x()<width()*.16) mark(1);
-            else if (gestureStart.x()>width()*.42 && gestureStart.x()<width()*.58) mark(2);
-            else if (gestureStart.x()>width()*.83) mark(4);
+        } else if (page>=7 && page<=11 && click) {
+            if (targetRegions().first().contains(gestureStart)) mark(1);
         }
     }
 
@@ -706,17 +719,6 @@ private:
         p.restore();
     }
 
-    QString statusLine() const {
-        if (!seen) return "Try the highlighted control, then choose Next.";
-        if (page==2 && (seen&2))
-            return "Keyboard icon selected. You can hide it and continue.";
-        if (page==6) {
-            const int n=((seen&1)!=0)+((seen&2)!=0)+((seen&4)!=0);
-            return QString("Top-bar areas tried: %1 of 3. Keep exploring or continue.").arg(n);
-        }
-        return "Interaction detected. Explore the desktop or choose Next.";
-    }
-
     void drawInstructionCard(QPainter &p) const {
         const Rect c=cardRect();
         p.save();
@@ -724,37 +726,29 @@ private:
         p.drawRoundedRect(c.translated(4,7),20,20);
         QPainterPath path;
         path.addRoundedRect(c,20,20);
+        // Keep the exact PowerPoint-derived gradient directions and colours
+        // already used by Welcome, but DO NOT draw the annotation textbox shape.
         p.fillPath(path,deckGradient(page,c,247));
         p.setPen(QPen(QColor(40,61,68,135),1.4));
         p.drawPath(path);
         p.setClipPath(path);
-        const qreal margin=qBound(10.0,c.width()*.038,25.0);
-        const qreal barHeight=buttonBar().height();
-        const qreal infoHeight=qMin(qreal(72),c.height()*.24);
-        const qreal textHeight=c.height()-barHeight-infoHeight-margin*2;
+        const qreal margin=qBound(9.0,c.width()*.033,23.0);
+        const Rect nav=buttonBar();
+        const qreal textSpace=qMax(qreal(40),nav.top()-c.top()-margin*2);
         drawLines(p,Rect(c.left()+margin,c.top()+margin,
-                         c.width()-margin*2,textHeight),guide().at(page).lines,
-                  qMin(height()*.071,qreal(48)));
-        QFont font("Comfortaa");font.setPixelSize(qBound(10,qRound(height()*.018),17));
-        p.setFont(font);p.setPen(QColor("#182530"));
-        const Rect details(c.left()+margin,c.top()+margin+textHeight,
-                           c.width()-margin*2,infoHeight*.55);
-        p.drawText(details,Qt::AlignCenter|Qt::TextWordWrap,guide().at(page).instruction);
-        font.setPixelSize(qBound(9,qRound(height()*.014),13));p.setFont(font);
-        p.setPen(QColor("#27525b"));
-        p.drawText(Rect(c.left()+margin,details.bottom(),c.width()-margin*2,infoHeight*.40),
-                   Qt::AlignCenter|Qt::TextWordWrap,statusLine());
+                         c.width()-2*margin,textSpace),guide().at(page).lines,
+                  qMin(height()*.066,qreal(51)));
         p.restore();
         drawButton(p,backRect(),"Back",false);
         drawButton(p,exitRect(),"Exit",false);
-        drawButton(p,nextRect(),page==6 ? "Finish" : "Next",true);
+        drawButton(p,nextRect(),page==guide().size()-1 ? "Finish" : "Next",true);
     }
 
     void drawFooter(QPainter &p) const {
         p.save();
         const qreal r=qBound(qreal(2),height()*.004,qreal(5));
         const qreal gap=r*3.7;
-        const qreal start=width()*.5-gap*3;
+        const qreal start=width()*.5-gap*(guide().size()-1)*.5;
         const qreal y=height()-qMax(10.0,height()*.017);
         p.setPen(Qt::NoPen);
         for (int i=0;i<guide().size();++i) {
@@ -801,6 +795,7 @@ int main(int argc,char **argv) {
         // An X11 override-redirect covers the real screen without asking Qtile
         // to create a managed fullscreen app and without hiding its panels.
         overlay.fitScreen(screen->geometry());
+        overlay.setWindowOpacity(0.0); // compositor fade starts at zero, before mapping
         overlay.show();
         if (!overlay.attachX11()) {overlay.close();return;}
         overlay.raise();
