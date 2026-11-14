@@ -86,7 +86,7 @@ static QLabel* makeInfoLabel(const QString &txt, int px, bool bold = false,
     f.setBold(bold);
     lbl->setFont(f);
     lbl->setAlignment(align);
-    lbl->setStyleSheet("color:#ffffff;");
+    lbl->setStyleSheet("color:#ffffff; background:transparent; border:none;");
     lbl->setWordWrap(true);
     return lbl;
 }
@@ -218,7 +218,8 @@ static QFrame* makeMiniCard(const QString &line1, const QString &line2,
                             QLabel **valueOut = nullptr)
 {
     QFrame *card = new QFrame;
-    card->setStyleSheet("QFrame { background:#555555; border-radius:18px; }");
+    card->setObjectName("kernelMiniCard");
+    card->setStyleSheet("QFrame#kernelMiniCard { background:#555555; border:none; border-radius:18px; }");
     card->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 
     QVBoxLayout *v = new QVBoxLayout(card);
@@ -243,7 +244,8 @@ static QFrame* makeListCard(const QString &title,
                             QLabel **outCount)
 {
     QFrame *card = new QFrame;
-    card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+    card->setObjectName("kernelListCard");
+    card->setStyleSheet("QFrame#kernelListCard { background:#444444; border:none; border-radius:30px; }");
 
     QVBoxLayout *v = new QVBoxLayout(card);
     v->setContentsMargins(30, 30, 30, 30);
@@ -254,7 +256,7 @@ static QFrame* makeListCard(const QString &title,
     hdr->addWidget(t);
     hdr->addStretch();
     QLabel *count = makeInfoLabel("", 20, false, Qt::AlignRight);
-    count->setStyleSheet("color:#aaaaaa;");
+    count->setStyleSheet("color:#aaaaaa; background:transparent; border:none;");
     hdr->addWidget(count);
     v->addLayout(hdr);
 
@@ -263,6 +265,8 @@ static QFrame* makeListCard(const QString &title,
     sa->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     sa->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     sa->setFrameShape(QFrame::NoFrame);
+    sa->setStyleSheet("QScrollArea { border:none; background:transparent; }");
+    sa->viewport()->setStyleSheet("background:transparent; border:none;");
     sa->setFixedHeight(340);
 
     if (title.startsWith("Loaded"))        sa->setObjectName("inner_scroll_modules");
@@ -301,7 +305,8 @@ static void fillList(QVBoxLayout *list, QLabel *count,
 
     for (const QString &e : entries) {
         QFrame *row = new QFrame;
-        row->setStyleSheet("background:#3A3A3A; border-radius:16px;");
+        row->setObjectName("kernelListRow");
+        row->setStyleSheet("QFrame#kernelListRow { background:#3A3A3A; border:none; border-radius:16px; }");
         QVBoxLayout *h = new QVBoxLayout(row);
         h->setContentsMargins(16, 10, 16, 10);
         QLabel *lbl = makeInfoLabel(e, 17, false, Qt::AlignLeft);
@@ -320,8 +325,11 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
 {
     g_innerScrollAreas.clear();
 
+    // Scope the page background to the page itself. A bare background rule
+    // paints every descendant, producing dark square backing behind cards.
     QWidget *root = new QWidget(stack);
-    root->setStyleSheet("background:#282828; color:white; font-family:Sans;");
+    root->setObjectName("alternixKernelPage");
+    root->setStyleSheet("QWidget#alternixKernelPage { background:#282828; color:white; font-family:Sans; }");
 
     QVBoxLayout *rootLay = new QVBoxLayout(root);
     rootLay->setContentsMargins(40, 40, 40, 40);
@@ -329,7 +337,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
 
     QLabel *title = new QLabel("Kernel");
     title->setAlignment(Qt::AlignCenter);
-    title->setStyleSheet("font-size:42px; font-weight:bold;");
+    title->setStyleSheet("color:white; background:transparent; border:none; font-size:42px; font-weight:bold;");
     rootLay->addWidget(title);
 
     // Outer scroll area (manual drag, ignores inner cards — as in apps.cpp)
@@ -338,14 +346,18 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet("QScrollArea { border:none; background:transparent; }");
+    scroll->viewport()->setStyleSheet("background:transparent; border:none;");
 
     QWidget *wrap = new QWidget(scroll);
+    wrap->setStyleSheet("background:transparent; border:none;");
     QVBoxLayout *wrapLay = new QVBoxLayout(wrap);
     wrapLay->setSpacing(10);
     wrapLay->setContentsMargins(0, 0, 0, 0);
 
     QFrame *outer = new QFrame(wrap);
-    outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:40px; }");
+    outer->setObjectName("kernelOuterPanel");
+    outer->setStyleSheet("QFrame#kernelOuterPanel { background:#3a3a3a; border:none; border-radius:40px; }");
     QVBoxLayout *outerLay = new QVBoxLayout(outer);
     outerLay->setContentsMargins(50, 30, 50, 30);
     outerLay->setSpacing(30);
@@ -353,6 +365,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     // ── Kernel info section ─────────────────────────────
     {
         QWidget *sec = new QWidget;
+        sec->setStyleSheet("background:transparent; border:none;");
         QVBoxLayout *v = new QVBoxLayout(sec);
         v->setContentsMargins(0, 0, 0, 0);
         v->setSpacing(8);
@@ -361,6 +374,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
         v->addWidget(makeInfoLabel(getKernelBuild(), 20, false));
 
         QWidget *gridWrap = new QWidget;
+        gridWrap->setStyleSheet("background:transparent; border:none;");
         QGridLayout *grid = new QGridLayout(gridWrap);
         grid->setContentsMargins(0, 0, 0, 0);
         grid->setHorizontalSpacing(16);
@@ -379,7 +393,8 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     // ── Boot cmdline ────────────────────────────────────
     {
         QFrame *card = new QFrame;
-        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+        card->setObjectName("kernelBootCard");
+        card->setStyleSheet("QFrame#kernelBootCard { background:#444444; border:none; border-radius:30px; }");
         QVBoxLayout *v = new QVBoxLayout(card);
         v->setContentsMargins(30, 24, 30, 24);
         v->setSpacing(10);
