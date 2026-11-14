@@ -1335,6 +1335,7 @@ static void invalidate() { thumbnails.clear(); }
 class AppTile : public QFrame {
     LauncherItem data;
     QLabel *iconLabel = nullptr;
+    QLabel *nameLabel = nullptr;
     QWidget *hoverBox = nullptr;
     bool iconReady = false;
     bool moved = false;
@@ -1348,7 +1349,8 @@ public:
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAutoFillBackground(false);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        setMinimumSize(150, 160);
+        // Do not enforce a 150 px minimum: four cards must fit portrait screens.
+        setMinimumHeight(160);
         setStyleSheet("QFrame { background: #00000099; border: none; }");
         setContextMenuPolicy(Qt::DefaultContextMenu);
 
@@ -1369,17 +1371,41 @@ public:
         iconLabel->setPixmap(placeholder);
         v->addWidget(iconLabel);
 
-        QLabel *label = new QLabel(data.title, hoverBox);
-        label->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
-        label->setWordWrap(true);
-        label->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-        label->setMinimumHeight(60);
-        label->setMaximumHeight(200);
-        v->addWidget(label);
+        nameLabel = new QLabel(data.title, hoverBox);
+        nameLabel->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
+        nameLabel->setWordWrap(true);
+        // Long names must wrap inside the card instead of setting a minimum
+        // width that silently forces the complete grid beyond the viewport.
+        nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        nameLabel->setMinimumWidth(0);
+        nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+        nameLabel->setMinimumHeight(60);
+        nameLabel->setMaximumHeight(200);
+        v->addWidget(nameLabel);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
         outer->setContentsMargins(0, 0, 0, 0);
         outer->addWidget(hoverBox);
+    }
+
+    // Called whenever the screen rotates or the current folder is rebuilt.
+    // The grid always has four columns; only each cell's width changes.
+    void setResponsiveWidth(int cellWidth) {
+        cellWidth = qMax(1, cellWidth);
+        setFixedWidth(cellWidth);
+        // Keep icons and labels within narrow portrait cards.  Full-size
+        // icons and padding are preserved on landscape/large screens.
+        const int padding = cellWidth >= 110 ? 16 : (cellWidth >= 80 ? 8 : 2);
+        if (auto *v = qobject_cast<QVBoxLayout*>(hoverBox->layout())) {
+            v->setContentsMargins(padding, 12, padding, 12);
+            v->setSpacing(cellWidth < 100 ? 4 : 8);
+        }
+        const int preferredIcon = data.kind == LauncherItem::Folder ? 64 : 48;
+        const int iconWidth = qMin(preferredIcon, qMax(1, cellWidth - 2 * padding));
+        iconLabel->setFixedSize(iconWidth, iconWidth);
+        iconLabel->setScaledContents(true); // folder collages also scale down
+        if (nameLabel) nameLabel->updateGeometry();
+        updateGeometry();
     }
 
     const LauncherItem &item() const { return data; }
@@ -1642,6 +1668,7 @@ class LauncherGridController : public QObject {
     std::function<void()> onViewChanged;
     bool live = false;
     const int columns = 4;
+    int lastFittedWidth = -1; // avoid a full relayout on ordinary IPC opens
 
     void askRename(const QString &groupId) {
         const LauncherGroup *g = groups.byId(groupId);
@@ -1703,6 +1730,30 @@ public:
         connect(ungroupButton, &QPushButton::clicked, this,
                 [this]() { askUngroup(currentGroup); });
         render();
+    }
+
+    // QScrollArea deliberately does not resize its widget: constrain the
+    // content to its viewport explicitly, rather than relying on the grid's
+    // sizeHint (which can retain the old landscape tile widths).
+    void fitToWidth(int viewportWidth) {
+        const int width = qMax(1, viewportWidth);
+        if (width == lastFittedWidth) return;
+        lastFittedWidth = width;
+        // Recalculate height as well: the previous orientation or folder may
+        // have left a much taller minimum on the reusable scroll widget.
+        container->setMinimumHeight(0);
+        const QMargins m = grid->contentsMargins();
+        const int spacing = qMax(0, grid->horizontalSpacing());
+        const int cellWidth = qMax(1, (width - m.left() - m.right()
+                                     - (columns - 1) * spacing) / columns);
+        for (AppTile *tile : tiles)
+            if (tile) tile->setResponsiveWidth(cellWidth);
+        container->setFixedWidth(width);
+        grid->invalidate();
+        grid->activate();
+        const int contentHeight = qMax(1, container->sizeHint().height() + 200);
+        container->setMinimumHeight(contentHeight);
+        container->resize(width, contentHeight);
     }
 
     void setLive(std::function<void()> viewChanged) {
@@ -1867,11 +1918,12 @@ public:
             tile->show();  // Dynamically created children need an explicit show.
             tiles.append(tile);
         }
-        // QScrollArea::setWidgetResizable(false) expects the child to size to
-        // its grid. Reset the old min-height when the folder has fewer cards.
-        container->setMinimumHeight(0);
-        container->adjustSize();
-        container->setMinimumHeight(container->sizeHint().height() + 200);
+        // These are new tiles, so size them even when the screen width has
+        // not changed since the previous app/folder view.
+        lastFittedWidth = -1;
+        // The scroll content is resized explicitly, even for smaller folders;
+        // no previous (e.g. landscape) width can survive into portrait mode.
+        fitToWidth(scroll->width());
         scroll->verticalScrollBar()->setValue(0);
         if (live && onViewChanged) onViewChanged();
     }
@@ -2264,7 +2316,7 @@ int main(int argc, char **argv) {
         contentWidth = static_cast<int>(screenWidth * 0.9);
 
     scroll->setFixedWidth(contentWidth);
-    container->setMinimumWidth(contentWidth);
+    container->setFixedWidth(contentWidth);
     container->setMinimumHeight(container->sizeHint().height() + 200);
 
     scroll->setWidget(container);
@@ -2478,7 +2530,7 @@ int main(int argc, char **argv) {
         const int contentWidth = screenWidth <= 800
             ? screenWidth - 40 : int(screenWidth * 0.9);
         scroll->setFixedWidth(contentWidth);
-        container->setMinimumWidth(contentWidth);
+        controller.fitToWidth(contentWidth);
         for (AppTile *tile : tiles) if (tile) tile->loadIcon(false);
 
         // No new grid or desktop-entry scan is performed here.
@@ -2490,6 +2542,18 @@ int main(int argc, char **argv) {
         window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
         window.setUpdatesEnabled(true);
     };
+
+    // A resident launcher can remain open while xrandr changes orientation.
+    // Qtile updates the fullscreen window itself; resize the existing cards
+    // without rebuilding the grid or disturbing app/group membership.
+    QObject::connect(QApplication::primaryScreen(), &QScreen::geometryChanged,
+                     &window, [&](const QRect &geometry) {
+        const int screenWidth = geometry.width();
+        const int contentWidth = screenWidth <= 800
+            ? screenWidth - 40 : int(screenWidth * 0.9);
+        scroll->setFixedWidth(contentWidth);
+        controller.fitToWidth(contentWidth);
+    });
 
     auto hideLauncher = [&]() {
         if (window.isVisible() && !window.isTransitioning())
