@@ -324,15 +324,6 @@ static void enablePowerSaver() {
         "powerprofilesctl set power-saver; fi"});
 }
 
-static bool isPowerSaver() {
-    QProcess p;
-    p.start("bash", {"-c",
-        "if command -v powerprofilesctl >/dev/null 2>&1; then "
-        "powerprofilesctl get; else echo unknown; fi"});
-    p.waitForFinished(222);
-    return (QString::fromUtf8(p.readAll()).trimmed() == "power-saver");
-}
-
 static void togglePowerSaver() {
     QProcess::startDetached("bash", {"-c",
         "if command -v powerprofilesctl >/dev/null 2>&1; then "
@@ -798,7 +789,12 @@ public:
     QGridLayout *systemGrid = nullptr;
     QRect lastScreenGeo;
     QMap<QWidget*, QRect> finalGeomMap;
-    QMap<QWidget*, QGraphicsOpacityEffect*> opacityMap;
+    QPointer<QSequentialAnimationGroup> panelAnimation;
+    QString lastBatteryIconName;
+    QProcess *powerSaverQuery = nullptr;
+    QString powerSaverExecutable = QStandardPaths::findExecutable("powerprofilesctl");
+    bool cachedPowerSaver = false;
+    qint64 nextPowerSaverProbe = 0;
     bool closing;
     std::function<void()> onPanelClosed;
 
@@ -919,10 +915,12 @@ public:
             main->addWidget(topCard);
 
             QTimer *t = new QTimer(this);
-            QObject::connect(t, &QTimer::timeout, [this]() {
-                clockLabel->setText(QTime::currentTime().toString("HH:mm:ss"));
+            QObject::connect(t, &QTimer::timeout, this, [this]() {
+                if (!isVisible()) return;
+                const QString value = QTime::currentTime().toString("HH:mm:ss");
+                if (clockLabel->text() != value) clockLabel->setText(value);
             });
-            t->start(100);
+            t->start(1000);
         }
 
         // ───────── System Row (Wi-Fi, BT, Ethernet, GPS, Battery)
@@ -1030,6 +1028,7 @@ public:
                 auto onClick = [=]() {
                     // Toggle power saver profile
                     togglePowerSaver();
+                    nextPowerSaverProbe = 0; // refresh after requested profile change
 
                     // Give powerprofilesctl time to update:
                     //  - first quick refresh at 150ms
@@ -1104,20 +1103,24 @@ public:
 
         // ───────── Controlled periodic refresh (battery etc.)
         refreshTimer = new QTimer(this);
-        refreshTimer->setInterval(500);   // 500ms global refresh
+        refreshTimer->setInterval(1800);  // icons/text only need periodic updates
         QObject::connect(refreshTimer, &QTimer::timeout, this, [=]() {
             if (!refreshEnabled) return;
             if (!this->isVisible()) return;
 
             if (!batPath.isEmpty()) {
-                if (batteryInfoLabel)
-                    batteryInfoLabel->setText(batteryMainText(batPath));
-                if (batteryTimeLabel)
-                    batteryTimeLabel->setText(batteryTimeText(batPath));
+                const QString mainText = batteryMainText(batPath);
+                const QString timeText = batteryTimeText(batPath);
+                const QString statusText = batteryStatusLine(batPath);
+                if (batteryInfoLabel && batteryInfoLabel->text() != mainText)
+                    batteryInfoLabel->setText(mainText);
+                if (batteryTimeLabel && batteryTimeLabel->text() != timeText)
+                    batteryTimeLabel->setText(timeText);
                 if (batteryStatusLabel) {
-                    QString st = batteryStatusLine(batPath);
-                    batteryStatusLabel->setText(st);
-                    batteryStatusLabel->setVisible(!st.isEmpty());
+                    if (batteryStatusLabel->text() != statusText)
+                        batteryStatusLabel->setText(statusText);
+                    if (batteryStatusLabel->isVisible() != !statusText.isEmpty())
+                        batteryStatusLabel->setVisible(!statusText.isEmpty());
                 }
             }
             updateBatteryIconColor();
@@ -1126,7 +1129,7 @@ public:
         // Device probes are asynchronous. They cannot stall animation or
         // trigger authentication merely by querying status.
         deviceTimer = new QTimer(this);
-        deviceTimer->setInterval(1500);
+        deviceTimer->setInterval(4000);  // initial probe also occurs as panel opens
         connect(deviceTimer, &QTimer::timeout, this, [this]() {
             if (refreshEnabled && isVisible()) refreshDeviceStates();
         });
@@ -1556,238 +1559,159 @@ public:
     }
 
     void openPanel() {
+        if (closing || isVisible()) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
         if (brightnessController) brightnessController->panelOpened();
-        if (closing) return;
-
-        if (refreshTimer) {
-            refreshEnabled = false;
-            refreshTimer->stop();
-        }
+        if (refreshTimer) { refreshEnabled = false; refreshTimer->stop(); }
         if (deviceTimer) deviceTimer->stop();
+        if (panelAnimation) { panelAnimation->stop(); panelAnimation->deleteLater(); panelAnimation = nullptr; }
 
-        if (isVisible()) {
-            hide();
-            lower();
-        }
-
-        closing = false;
-
-        for (QWidget *w : orderedWidgets) {
-            if (!w) continue;
-            if (auto *eff =
-                    qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect())) {
-                eff->setOpacity(0.0);
-            }
-            w->setVisible(false);
-        }
-
-        showFullScreen();
-        refreshDeviceStates();
-        updateBatteryIconColor();
+        // Keep the fullscreen-sized geometry without toggling EWMH fullscreen
+        // state on every swipe (and without an unnecessary hide/show pair).
+        for (QWidget *w : orderedWidgets) if (w) w->hide();
+        clockLabel->setText(QTime::currentTime().toString("HH:mm:ss"));
+        show();
         raise();
+        // Network probes are intentionally delayed until the slide-in has
+        // finished, avoiding subprocess startup during animation frames.
     }
 
     void playOpenAnimation() {
-        updateBatteryIconColor();
-
-        const double startScale = 0.3;
-
-        for (QWidget *w : orderedWidgets) {
-            if (w) w->setVisible(true);
-        }
-
+        if (!isVisible() || closing) return;
+        if (panelAnimation) { panelAnimation->stop(); panelAnimation->deleteLater(); panelAnimation = nullptr; }
         finalGeomMap.clear();
-
         for (QWidget *w : orderedWidgets) {
-            if (!w) continue;
-
-            QRect endRect = w->geometry();
-            if (!endRect.isValid()) continue;
-
-            finalGeomMap[w] = endRect;
-
-            QGraphicsOpacityEffect *eff =
-                qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect());
-            if (!eff) {
-                eff = new QGraphicsOpacityEffect(w);
-                w->setGraphicsEffect(eff);
-            }
-            eff->setOpacity(0.0);
-            opacityMap[w] = eff;
-
-            int newW = qMax(1, int(endRect.width() * startScale));
-            int newH = qMax(1, int(endRect.height() * startScale));
-            QPoint c = endRect.center();
-            QRect startRect(c.x() - newW/2, c.y() - newH/2, newW, newH);
-
-            w->setGeometry(startRect);
+            if (w) w->show();
         }
+        // Give the layout one opportunity to settle at the final geometry.
+        if (layout()) layout()->activate();
+        for (QWidget *w : orderedWidgets)
+            if (w) finalGeomMap.insert(w, w->geometry());
 
-        // Sequential cascade, but faster than the original
-        QSequentialAnimationGroup *seq = new QSequentialAnimationGroup(this);
-
+        // Move intact widgets instead of simultaneously resizing every card
+        // and rasterising each entire child subtree through an opacity effect.
+        // The original combination saturated Xorg/Picom on low-end tablets.
+        auto *seq = new QSequentialAnimationGroup(this);
+        panelAnimation = seq;
         for (QWidget *w : orderedWidgets) {
-            if (!w) continue;
-
-            QGraphicsOpacityEffect *eff = opacityMap.value(w, nullptr);
-            if (!eff) continue;
-
-            QParallelAnimationGroup *par = new QParallelAnimationGroup(seq);
-
-            QPropertyAnimation *gAnim = new QPropertyAnimation(w, "geometry");
-            gAnim->setDuration(80); // was 110
-            gAnim->setStartValue(w->geometry());
-            gAnim->setEndValue(finalGeomMap[w]);
-            gAnim->setEasingCurve(QEasingCurve::OutCubic);
-
-            QPropertyAnimation *oAnim = new QPropertyAnimation(eff, "opacity");
-            oAnim->setDuration(70); // was 100
-            oAnim->setStartValue(0.0);
-            oAnim->setEndValue(1.0);
-            oAnim->setEasingCurve(QEasingCurve::OutQuad);
-
-            par->addAnimation(gAnim);
-            par->addAnimation(oAnim);
-
-            seq->addAnimation(par);
-            seq->addPause(10); // was 20
+            if (!w || !finalGeomMap.contains(w)) continue;
+            const QPoint destination = finalGeomMap.value(w).topLeft();
+            const QPoint initial = destination + QPoint(0, 28);
+            w->move(initial);
+            auto *anim = new QPropertyAnimation(w, "pos", seq);
+            anim->setDuration(90);
+            anim->setStartValue(initial);
+            anim->setEndValue(destination);
+            anim->setEasingCurve(QEasingCurve::OutCubic);
+            seq->addAnimation(anim);
+            seq->addPause(8);
         }
-
         QObject::connect(seq, &QSequentialAnimationGroup::finished,
-                         this, [this]() {
-            if (refreshTimer) {
-                refreshEnabled = true;
-                refreshTimer->start();
-            }
+                         this, [this, seq]() {
+            if (panelAnimation != seq || closing || !isVisible()) return;
+            panelAnimation = nullptr;
+            for (QWidget *w : orderedWidgets)
+                if (w && finalGeomMap.contains(w)) w->setGeometry(finalGeomMap.value(w));
+            if (refreshTimer) { refreshEnabled = true; refreshTimer->start(); }
             if (deviceTimer) deviceTimer->start();
             refreshDeviceStates();
+            updateBatteryIconColor();
         });
-
         seq->start(QAbstractAnimation::DeleteWhenStopped);
     }
+
     void animatedClose() {
-        if (closing) return;
+        if (closing || !isVisible()) return;
         closing = true;
-
-        if (refreshTimer) {
-            refreshEnabled = false;
-            refreshTimer->stop();
-        }
+        if (refreshTimer) { refreshEnabled = false; refreshTimer->stop(); }
         if (deviceTimer) deviceTimer->stop();
+        if (panelAnimation) { panelAnimation->stop(); panelAnimation->deleteLater(); panelAnimation = nullptr; }
 
-        const double endScale = 0.3;
-
-        if (finalGeomMap.isEmpty()) {
-            for (QWidget *w : orderedWidgets) {
-                if (w && w->geometry().isValid())
-                    finalGeomMap[w] = w->geometry();
-            }
-        }
-
+        // The close runs backwards; no graphics opacity layers or 30%-size
+        // relayouts need to be recomputed for every animation frame.
         QList<QWidget*> closeOrder = orderedWidgets;
         std::reverse(closeOrder.begin(), closeOrder.end());
-
-        // Sequential close (reverse order), faster than original
-        QSequentialAnimationGroup *seq = new QSequentialAnimationGroup(this);
-
+        auto *seq = new QSequentialAnimationGroup(this);
+        panelAnimation = seq;
         for (QWidget *w : closeOrder) {
             if (!w) continue;
-
-            QRect baseRect = finalGeomMap.value(w, w->geometry());
-            if (!baseRect.isValid()) continue;
-
-            QGraphicsOpacityEffect *eff = opacityMap.value(w, nullptr);
-            if (!eff) {
-                eff = new QGraphicsOpacityEffect(w);
-                w->setGraphicsEffect(eff);
-                eff->setOpacity(1.0);
-                opacityMap[w] = eff;
-            }
-
-            int newW = qMax(1, int(baseRect.width() * endScale));
-            int newH = qMax(1, int(baseRect.height() * endScale));
-            QPoint c = baseRect.center();
-            QRect small(c.x() - newW/2, c.y() - newH/2, newW, newH);
-
-            QParallelAnimationGroup *par = new QParallelAnimationGroup(seq);
-
-            QPropertyAnimation *gAnim = new QPropertyAnimation(w, "geometry");
-            gAnim->setDuration(70); // was 100
-            gAnim->setStartValue(w->geometry());
-            gAnim->setEndValue(small);
-            gAnim->setEasingCurve(QEasingCurve::InCubic);
-
-            QPropertyAnimation *oAnim = new QPropertyAnimation(eff, "opacity");
-            oAnim->setDuration(60); // was 90
-            oAnim->setStartValue(eff->opacity());
-            oAnim->setEndValue(0.0);
-            oAnim->setEasingCurve(QEasingCurve::InQuad);
-
-            par->addAnimation(gAnim);
-            par->addAnimation(oAnim);
-
-            seq->addAnimation(par);
-            seq->addPause(8); // was 15
+            const QPoint initial = w->pos();
+            const QPoint destination = initial + QPoint(0, -28);
+            auto *anim = new QPropertyAnimation(w, "pos", seq);
+            anim->setDuration(85);
+            anim->setStartValue(initial);
+            anim->setEndValue(destination);
+            anim->setEasingCurve(QEasingCurve::InCubic);
+            seq->addAnimation(anim);
+            seq->addPause(8);
         }
-
         QObject::connect(seq, &QSequentialAnimationGroup::finished,
-            this, [this]() {
-
+                         this, [this, seq]() {
+            if (panelAnimation != seq) return;
+            panelAnimation = nullptr;
             for (QWidget *w : orderedWidgets) {
                 if (!w) continue;
-
-                QRect r = finalGeomMap.value(w);
-                if (r.isValid())
-                    w->setGeometry(r);
-
-                if (auto *eff = qobject_cast<QGraphicsOpacityEffect*>(w->graphicsEffect()))
-                    eff->setOpacity(0.0);
-
-                w->setVisible(false);
+                if (finalGeomMap.contains(w)) w->setGeometry(finalGeomMap.value(w));
+                w->hide();
             }
-
-            closing = false;
-
             hide();
             lower();
-            setVisible(false);
-            setEnabled(true);
-            // Qtile may have restacked the bar while the panel was visible.
-            // Put its two invisible activation zones back in front immediately.
+            closing = false;
             if (onPanelClosed) onPanelClosed();
-
-            QTimer::singleShot(10, this, [this]() {
-                this->repaint();
-            });
+            // Do not repaint() an already-hidden fullscreen ARGB window.
         });
-
         seq->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
     // ──────────────────────────────  Update battery icon from icons
     void updateBatteryIconColor() {
         if (!batteryIconLabel) return;
-
-        QString batPath = detectBatteryPath();
+        const QString batPath = detectBatteryPath();
         if (batPath.isEmpty()) return;
 
-        int pct = batteryPercent(batPath);
-        QString rawStatus = batteryStatus(batPath);
-        QString status = rawStatus.trimmed();
-        bool saver = isPowerSaver();
-
-        QString iconName = selectBatteryIconName(pct, status, saver);
-        QString fullPath = QDir::homePath() + "/.config/qtile/images/" + iconName;
-
-        QPixmap px(fullPath);
-        if (!px.isNull()) {
-            batteryIconLabel->setPixmap(
-                px.scaled(42, 42, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        } else {
-            // fallback so we don't leave it blank
-            batteryIconLabel->setText("🔋");
+        // powerprofilesctl can hang for 222ms in the old implementation,
+        // blocking animations and dragging on the GUI thread. Query it
+        // asynchronously and at most once every 5s.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (!powerSaverExecutable.isEmpty() && !powerSaverQuery &&
+            now >= nextPowerSaverProbe) {
+            nextPowerSaverProbe = now + 5000;
+            auto *p = new QProcess(this);
+            powerSaverQuery = p;
+            connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [this, p](int code, QProcess::ExitStatus status) {
+                if (powerSaverQuery == p) powerSaverQuery = nullptr;
+                const bool saver = status == QProcess::NormalExit && code == 0 &&
+                    QString::fromUtf8(p->readAllStandardOutput()).trimmed() == "power-saver";
+                p->deleteLater();
+                if (cachedPowerSaver != saver) {
+                    cachedPowerSaver = saver;
+                    updateBatteryIconColor();
+                }
+            });
+            connect(p, &QProcess::errorOccurred, this,
+                    [this, p](QProcess::ProcessError error) {
+                if (error == QProcess::FailedToStart) {
+                    if (powerSaverQuery == p) powerSaverQuery = nullptr;
+                    p->deleteLater();
+                }
+            });
+            p->start(powerSaverExecutable, {"get"});
+            QTimer::singleShot(1200, p, [p]() {
+                if (p->state() != QProcess::NotRunning) p->kill();
+            });
         }
+
+        const int pct = batteryPercent(batPath);
+        const QString rawStatus = batteryStatus(batPath);
+        const QString iconName = selectBatteryIconName(pct, rawStatus, cachedPowerSaver);
+        if (iconName == lastBatteryIconName) return;
+        lastBatteryIconName = iconName;
+        const QString fullPath = QDir::homePath() + "/.config/qtile/images/" + iconName;
+        QPixmap px(fullPath);
+        if (px.isNull()) batteryIconLabel->setText("🔋");
+        else batteryIconLabel->setPixmap(
+            px.scaled(42, 42, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     }
 
 protected:
@@ -1842,7 +1766,7 @@ protected:
     void showEvent(QShowEvent *e) override {
         QWidget::showEvent(e);
         QTimer::singleShot(0, this, [this]() {
-            playOpenAnimation();
+            if (isVisible() && !closing) playOpenAnimation();
         });
     }
 };
@@ -1883,9 +1807,11 @@ public:
         ensureInFront();
     }
 
-    void syncEdgeGeometry(int x, int y, int w, int h) {
+    bool syncEdgeGeometry(int x, int y, int w, int h) {
         const QRect target(x, y, qMax(1, w), qMax(1, h));
-        if (geometry() != target) setGeometry(target);
+        if (geometry() == target) return false;
+        setGeometry(target);
+        return true;
     }
 
     void ensureInFront() {
@@ -2077,14 +2003,15 @@ int main(int argc, char **argv) {
         const int leftWidth = qMax(1, usable / 2);
         const int rightWidth = qMax(1, usable - leftWidth);
         const int barHeight = qMin(50, g.height());
-        leftBar.syncEdgeGeometry(g.x() + edgeExclusion, g.y(),
-                                 leftWidth, barHeight);
-        rightBar.syncEdgeGeometry(g.x() + edgeExclusion + leftWidth + centerExclusion,
-                                  g.y(), rightWidth, barHeight);
-        // Qtile's bar, Picom, and XRandR can change stacking independently of
-        // Qt's geometry notifications.  Reassert only while the panel is shut.
-        leftBar.ensureInFront();
-        rightBar.ensureInFront();
+        const bool leftChanged = leftBar.syncEdgeGeometry(
+            g.x() + edgeExclusion, g.y(), leftWidth, barHeight);
+        const bool rightChanged = rightBar.syncEdgeGeometry(
+            g.x() + edgeExclusion + leftWidth + centerExclusion,
+            g.y(), rightWidth, barHeight);
+        // Restack only after a real resize/rotation. The old 750ms timer
+        // issued two unconditional XRaiseWindow/XFlush calls forever.
+        if (leftChanged) leftBar.ensureInFront();
+        if (rightChanged) rightBar.ensureInFront();
     };
     overlay.onPanelClosed = [&leftBar, &rightBar]() {
         leftBar.ensureInFront();

@@ -15,6 +15,7 @@
 #include <QDir>
 #include <QDebug>
 #include <QPropertyAnimation>
+#include <QPointer>
 #include <QEasingCurve>
 #include <QFile>
 #include <QFileInfo>
@@ -38,6 +39,8 @@
 #include <QtDBus/QDBusMetaType>
 
 #include <functional>
+#include <algorithm>
+#include <memory>
 
 // Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
 // None, Status and Unsorted that corrupt Qt5's QUrl/QTextStream/QDir enums
@@ -231,6 +234,7 @@ public:
     explicit StatusPanel(QWidget *parent=nullptr);
 
     void refreshNotifications();
+    QGraphicsDropShadowEffect *shadow() const { return m_shadow; }
     void removeNotification(const QString &path);
     void resizeToItems(int count);
     void syncScreenGeometry(const QRect &screen);
@@ -268,6 +272,9 @@ private:
     QString      m_dirPath;
     int          m_notificationCount;
     QSet<QString> m_seenPaths;
+    QStringList m_fileSnapshot;
+    bool m_snapshotReady = false;
+    QGraphicsDropShadowEffect *m_shadow = nullptr;
     bool          m_firstScan = true;
 };
 
@@ -303,7 +310,6 @@ protected:
 private:
     OverlayRoot *m_overlay;
     int          m_count;
-    QTimer      *m_raiseTimer;
 };
 
 // ───────────────────────────────────────────── StatusPanel impl
@@ -368,6 +374,7 @@ StatusPanel::StatusPanel(QWidget *parent)
     sh->setOffset(0, 0);
     sh->setColor(QColor(0, 0, 0, 220));
     m_inner->setGraphicsEffect(sh);
+    m_shadow = sh;
 
     // notifications folder
     m_dirPath = QDir::homePath() + "/.osm-notify";
@@ -433,13 +440,6 @@ void StatusPanel::syncScreenGeometry(const QRect &screen) {
 }
 
 void StatusPanel::refreshNotifications() {
-    // clear list
-    QLayoutItem *it;
-    while((it = m_list->takeAt(0))) {
-        if(it->widget()) it->widget()->deleteLater();
-        delete it;
-    }
-
     QDir dir(m_dirPath);
     dir.setNameFilters(QStringList() << "*.txt");
 
@@ -450,6 +450,26 @@ void StatusPanel::refreshNotifications() {
 
     // newest first
     std::reverse(files.begin(), files.end());
+
+    // Only rebuild the widget tree when files have actually been added,
+    // deleted or modified. The original 600ms loop destroyed and recreated
+    // every notification card, even while the panel was closed.
+    QStringList snapshot;
+    snapshot.reserve(files.size());
+    for (const QFileInfo &fi : files) {
+        snapshot << fi.fileName() + QLatin1Char(':') +
+                    QString::number(fi.size()) + QLatin1Char(':') +
+                    QString::number(fi.lastModified().toMSecsSinceEpoch());
+    }
+    if (m_snapshotReady && snapshot == m_fileSnapshot) return;
+    m_snapshotReady = true;
+    m_fileSnapshot = snapshot;
+
+    QLayoutItem *it;
+    while ((it = m_list->takeAt(0))) {
+        if (QWidget *w = it->widget()) delete w;
+        delete it;
+    }
 
     QStringList titles;
     QSet<QString> newSeen;
@@ -640,8 +660,7 @@ void NotificationCard::mousePressEvent(QMouseEvent *e) {
 NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     : QWidget(nullptr),        // force top-level window
       m_overlay(overlay),
-      m_count(0),
-      m_raiseTimer(nullptr)
+      m_count(0)
 {
     Q_UNUSED(parent);
 
@@ -657,13 +676,7 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
 
     hide();
 
-    m_raiseTimer = new QTimer(this);
-    m_raiseTimer->setInterval(1500);
-    connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-        if (isVisible())
-            this->raise();
-    });
-    m_raiseTimer->start();
+    // Avoid repeatedly raising this ARGB window over the compositor and lockscreen.
 }
 
 void NotificationBadge::syncScreenGeometry(const QRect &g) {
@@ -676,14 +689,17 @@ void NotificationBadge::syncScreenGeometry(const QRect &g) {
 }
 
 void NotificationBadge::setCount(int c) {
+    c = qMax(0, c);
+    if (c == m_count && isVisible() == (c > 0)) return;
+    const bool countChanged = c != m_count;
     m_count = c;
     if (m_count <= 0) {
-        hide();
-    } else {
+        if (isVisible()) hide();
+    } else if (!isVisible()) {
         show();
-        raise();
+        raise(); // only on a hidden -> visible transition
     }
-    update();
+    if (countChanged && isVisible()) update();
 }
 
 void NotificationBadge::paintEvent(QPaintEvent *e) {
@@ -734,49 +750,31 @@ void NotificationBadge::paintEvent(QPaintEvent *e) {
 class OverlayRoot : public QWidget {
 public:
     explicit OverlayRoot()
-        : m_panel(nullptr),
-          m_badge(nullptr),
-          m_panelVisible(false)
+        : m_panel(nullptr), m_badge(nullptr), m_panelVisible(false)
     {
         setWindowFlags(Qt::FramelessWindowHint |
                        Qt::Tool |
                        Qt::WindowStaysOnTopHint |
                        Qt::X11BypassWindowManagerHint |
                        Qt::WindowDoesNotAcceptFocus);
-
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_DeleteOnClose);
 
         m_screenGeo = alternixActiveScreenGeometry();
         setGeometry(m_screenGeo);
-
         m_panel = new StatusPanel(this);
-
-        QRect finalGeo = m_panel->geometry();
-        QRect startGeo = finalGeo;
-        // start off-screen to the RIGHT
-        startGeo.moveLeft(m_screenGeo.width());
-        m_panel->setGeometry(startGeo);
+        m_shadow = m_panel->shadow();
+        m_panel->move(m_screenGeo.width(), m_panel->y());
         m_panel->hide();
+        m_panel->setCloseCallback([this]() { hidePanel(); });
 
-        m_panel->setCloseCallback([this]() {
-            hidePanel();
-        });
-
-        // badge window (separate always-on-top widget)
         m_badge = new NotificationBadge(this);
-
-        // sync badge count with panel
         m_panel->onCountChanged = [this](int n) {
-            if (!m_badge) return;
-            if (!this->isVisible() || !m_panel->isVisible()) {
-                m_badge->setCount(n);  // overlay closed ⇒ show badge
-            } else {
-                m_badge->setCount(0);  // overlay open ⇒ hide badge
-            }
+            if (m_badge) m_badge->setCount(m_panelVisible ? 0 : n);
         };
-
-        hide(); // start hidden
+        // StatusPanel's initial scan happened before onCountChanged was set.
+        m_badge->setCount(m_panel->notificationCount());
+        hide();
     }
 
     void syncScreenGeometry(const QRect &g) {
@@ -786,76 +784,85 @@ public:
         setGeometry(g);
         if (m_panel) {
             m_panel->syncScreenGeometry(g);
-            if (m_panelVisible) m_panel->move(g.width() - m_panel->width(), m_panel->y());
-            else m_panel->move(g.width(), m_panel->y());
+            if (!m_animation || m_animation->state() != QAbstractAnimation::Running)
+                m_panel->move(m_panelVisible ? g.width() - m_panel->width() : g.width(),
+                              m_panel->y());
         }
         if (m_badge) m_badge->syncScreenGeometry(g);
     }
 
     void showPanel() {
+        if (m_panelVisible || !m_panel) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
-        if (m_panelVisible) return;
+        m_panel->refreshNotifications();
+        if (!m_panel->notificationCount()) return;
+
+        const bool reversing = m_animation &&
+                               m_animation->state() == QAbstractAnimation::Running;
+        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
         m_panelVisible = true;
-
-        setGeometry(m_screenGeo);
-        show();
-        raise();
-
-        QRect finalGeo = m_panel->geometry();
-        finalGeo = QRect(m_screenGeo.width() - finalGeo.width(),
-                         finalGeo.y(), finalGeo.width(), finalGeo.height());
-        QRect startGeo = finalGeo;
-        startGeo.moveLeft(m_screenGeo.width());
-        m_panel->setGeometry(startGeo);
+        if (!isVisible()) { show(); raise(); }
+        const QRect end(m_screenGeo.width() - m_panel->width(), m_panel->y(),
+                        m_panel->width(), m_panel->height());
+        QRect start = m_panel->geometry();
+        if (!reversing) start.moveLeft(m_screenGeo.width());
+        m_panel->setGeometry(start);
+        if (m_shadow) m_shadow->setEnabled(false);
         m_panel->show();
+        if (m_badge) m_badge->setCount(0);
 
-        if (m_badge)
-            m_badge->setCount(0); // hide while open
-
-        QPropertyAnimation *anim = new QPropertyAnimation(m_panel,"geometry",this);
-        anim->setDuration(220);
-        anim->setStartValue(startGeo);
-        anim->setEndValue(finalGeo);
+        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
+        m_animation = anim;
+        anim->setDuration(180);
+        anim->setStartValue(start);
+        anim->setEndValue(end);
         anim->setEasingCurve(QEasingCurve::OutCubic);
+        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
+            if (m_animation != anim || !m_panelVisible) return;
+            m_animation = nullptr;
+            if (m_shadow) m_shadow->setEnabled(true);
+        });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
     void hidePanel() {
         if (!m_panelVisible || !m_panel) return;
         m_panelVisible = false;
+        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
+        if (m_shadow) m_shadow->setEnabled(false);
+        const QRect start = m_panel->geometry();
+        QRect end = start;
+        end.moveLeft(m_screenGeo.width());
 
-        QRect cur = m_panel->geometry();
-        QRect endGeo = cur;
-        endGeo.moveLeft(m_screenGeo.width());
-
-        QPropertyAnimation *anim = new QPropertyAnimation(m_panel,"geometry",this);
-        anim->setDuration(220);
-        anim->setStartValue(cur);
-        anim->setEndValue(endGeo);
+        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
+        m_animation = anim;
+        anim->setDuration(170);
+        anim->setStartValue(start);
+        anim->setEndValue(end);
         anim->setEasingCurve(QEasingCurve::InCubic);
-        connect(anim,&QPropertyAnimation::finished,[this](){
-            if (m_panel) m_panel->hide();
+        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
+            if (m_animation != anim || m_panelVisible) return;
+            m_animation = nullptr;
+            m_panel->hide();
             hide();
-            if (m_badge)
-                m_badge->setCount(m_panel->notificationCount());
+            if (m_badge) m_badge->setCount(m_panel->notificationCount());
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
 protected:
     void mousePressEvent(QMouseEvent *e) override {
-        if (m_panel && !m_panel->geometry().contains(e->pos()))
-            hidePanel();
-        else
-            QWidget::mousePressEvent(e);
+        if (m_panel && !m_panel->geometry().contains(e->pos())) hidePanel();
+        else QWidget::mousePressEvent(e);
     }
 
 private:
-    StatusPanel       *m_panel;
+    StatusPanel *m_panel;
     NotificationBadge *m_badge;
-    bool               m_panelVisible;
-    QRect              m_screenGeo;
-
+    bool m_panelVisible;
+    QRect m_screenGeo;
+    QPointer<QPropertyAnimation> m_animation;
+    QGraphicsDropShadowEffect *m_shadow = nullptr;
     friend class NotificationBadge;
 };
 
@@ -898,13 +905,7 @@ public:
         show();
         raise();
 
-        // keep stubbornly on top, like osm-running
-        m_raiseTimer = new QTimer(this);
-        m_raiseTimer->setInterval(1500);
-        connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-            this->raise();
-        });
-        m_raiseTimer->start();
+        // No periodic raising: avoid repeatedly restacking above osm-lockscreen.
     }
 
     void syncScreenGeometry(const QRect &g) {
@@ -945,7 +946,7 @@ protected:
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
             m_pressPos = e->globalPos();
-            raise();  // assert on top when touched
+            // Do not restack when touched; the lockscreen takes precedence.
         }
         QWidget::mousePressEvent(e);
     }
@@ -981,7 +982,6 @@ private:
     OverlayRoot *m_overlay;
     bool         m_dragging;
     QPoint       m_pressPos;
-    QTimer      *m_raiseTimer;
 };
 
 // ───────────────────────────────────────────── Notification helpers
