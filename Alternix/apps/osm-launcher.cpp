@@ -52,10 +52,66 @@
 #include <QElapsedTimer>
 #include <QDateTime>
 #include <QUrl>
+#include <QSocketNotifier>
 #include <algorithm>
 #include <functional>
 #include <utility>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <cerrno>
+#include <cstring>
+#include <cstddef>
+
+// A QtNetwork-free local IPC endpoint. Qtile may invoke the regular
+// `osm-launcher` command at any time: the existing resident instance receives
+// one byte and toggles immediately. The second invocation exits before it
+// constructs QApplication or scans any desktop entries.
+namespace LauncherIpc {
+static QByteArray socketPath() {
+    // Use the same stable location as the existing QLockFile; independent of
+    // whether Qtile/terminal processes inherited XDG_RUNTIME_DIR identically.
+    QByteArray path = (QDir::homePath() +
+                       "/Alternix/.cache/osm-launcher.sock").toLocal8Bit();
+    sockaddr_un addr{};
+    if (path.size() >= int(sizeof(addr.sun_path)))
+        path = (QString("/tmp/osm-launcher-%1.sock").arg(getuid())).toLocal8Bit();
+    return path;
+}
+
+static bool sendCommand(const QByteArray &path, char command) {
+    const int fd = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.constData(), size_t(path.size()) + 1);
+    const socklen_t length = socklen_t(offsetof(sockaddr_un, sun_path) + path.size() + 1);
+    const bool sent = ::sendto(fd, &command, 1, MSG_NOSIGNAL,
+                               reinterpret_cast<sockaddr*>(&address), length) == 1;
+    ::close(fd);
+    return sent;
+}
+
+// Only call this after acquiring the per-user QLockFile. This makes unlinking a
+// dead instance's leftover socket safe even if two launch attempts race.
+static int listen(const QByteArray &path) {
+    const int fd = ::socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+    ::unlink(path.constData());
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.constData(), size_t(path.size()) + 1);
+    const socklen_t length = socklen_t(offsetof(sockaddr_un, sun_path) + path.size() + 1);
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&address), length) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    ::chmod(path.constData(), 0600); // only this desktop user may send requests
+    return fd;
+}
+} // namespace LauncherIpc
 
 // Shared cascade timings: opening now matches the previous closing speed,
 // then BOTH directions have been accelerated 2x. Keep the stages synchronized
@@ -228,12 +284,14 @@ class LauncherWindow : public QWidget {
     // Load icons in exactly the order rows enter the opening cascade, not
     // in .desktop alphabetical order (which used to go top to bottom).
     std::function<void(int)> requestRowIcons;
+    std::function<void()> onHidden;
     // Retain the live layout targets so every close action, including a
     // pull-down gesture, can reverse the currently visible opening cascade.
     QPointer<QScrollArea> animationScroll;
     QVector<QPointer<QWidget>> animationTiles;
     QPointer<QWidget> animationCloseButton;
     int animationColumns = 4;
+    bool scrollRevealSignalsConnected = false;
 
     // Every grid row owns effects from the first frame, including rows well
     // below the scroll viewport. Previously only visibleRows() received
@@ -251,6 +309,9 @@ public:
     using QWidget::QWidget;
 
     bool isTransitioning() const { return opening || dismissing; }
+    void setHiddenCallback(std::function<void()> callback) {
+        onHidden = std::move(callback);
+    }
     bool editingDrag = false;
     void replaceViewTiles(const QVector<QWidget*> &tiles, int columns) {
         if (isTransitioning()) return;
@@ -428,10 +489,13 @@ public:
         update();
 
         // Keep the delayed reveal for rows initially outside the viewport.
-        connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
-                this, [this](int) { revealVisiblePendingRows(); });
-        connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged,
-                this, [this](int, int) { revealVisiblePendingRows(); });
+        if (!scrollRevealSignalsConnected) {
+            scrollRevealSignalsConnected = true;
+            connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+                    this, [this](int) { revealVisiblePendingRows(); });
+            connect(scroll->verticalScrollBar(), &QScrollBar::rangeChanged,
+                    this, [this](int, int) { revealVisiblePendingRows(); });
+        }
 
         // Let fullscreen Show/Resize/LayoutRequest events settle. The first
         // animation tick must query the ACTUAL scroll viewport, never its
@@ -630,8 +694,24 @@ public:
             gradientOpacity = 1.0 - easeInCubic((elapsed - gradientStart) / gradientMs);
             update();
         });
-        connect(animation, &QVariantAnimation::finished, this,
-                [this]() { close(); });
+        connect(animation, &QVariantAnimation::finished, this, [this]() {
+            // Unlike the old one-shot launcher, keep the entire UI in memory.
+            // Clear effects before the next opening, so they cannot stack up.
+            hide();
+            for (const auto &tile : animationTiles) {
+                if (!tile) continue;
+                for (QLabel *label : tile->findChildren<QLabel*>())
+                    label->setGraphicsEffect(nullptr);
+                tile->setGraphicsEffect(nullptr);
+            }
+            if (animationCloseButton)
+                animationCloseButton->setGraphicsEffect(nullptr);
+            rowReveals.clear();
+            gradientOpacity = 1.0;
+            backdropOpacity = 1.0;
+            dismissing = false;
+            if (onHidden) onHidden(); // rebuild All Apps while hidden, not at next show
+        });
         animation->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
@@ -1226,12 +1306,37 @@ static void activateLauncherApp(const AppEntry &app, LauncherWindow *window) {
     else qWarning() << "osm-launcher: failed to start desktop command:" << command;
 }
 
+// Decode each icon once per resident session, rather than running many icon
+// theme/disk probes while the 25ms cascade stages are being painted. Pixmaps
+// must be created on Qt's GUI thread. The idle warm-up timer below does this
+// outside transitions; the opening cascade only reads this in-memory map.
+namespace LauncherIconCache {
+static QHash<QString, QPixmap> thumbnails;
+
+static bool isReady(const QString &field) {
+    return thumbnails.contains(field);
+}
+
+static QPixmap get(const QString &field, bool allowDecode) {
+    auto it = thumbnails.constFind(field);
+    if (it != thumbnails.cend()) return it.value();
+    if (!allowDecode) return {};
+    const QIcon icon = DesktopIconResolver::resolve(field, 48);
+    const QPixmap pixmap = icon.pixmap(48, 48);
+    thumbnails.insert(field, pixmap); // null pixmaps are cached, too
+    return pixmap;
+}
+
+static void invalidate() { thumbnails.clear(); }
+} // namespace LauncherIconCache
+
 // A card can represent either an application or an app folder. The nested
 // icon/label widgets never steal mouse events from this card's gesture handler.
 class AppTile : public QFrame {
     LauncherItem data;
     QLabel *iconLabel = nullptr;
     QWidget *hoverBox = nullptr;
+    bool iconReady = false;
     bool moved = false;
     QPoint pressedAt;
     std::function<void(const LauncherItem &)> activated;
@@ -1291,9 +1396,17 @@ public:
             : "#hoverBox { background: #80708099; border-radius: 20px; }"
               "#hoverBox:hover { background-color: #282828; border: 1px solid white; }");
     }
-    void loadIcon() {
-        if (!iconLabel) return;
+    bool loadIcon(bool decodeMissing = true) {
+        if (iconReady) return true;
+        if (!iconLabel) return false;
         if (data.kind == LauncherItem::Folder) {
+            // Wait until all four thumbnails are in memory; never trigger
+            // filesystem/icon-theme lookups from an animation frame.
+            if (!decodeMissing) {
+                for (int i = 0; i < data.preview.size() && i < 4; ++i)
+                    if (!LauncherIconCache::isReady(data.preview.at(i).icon))
+                        return false;
+            }
             const int canvasSize = 64;
             const int iconSize = 27;
             QPixmap collage(canvasSize, canvasSize);
@@ -1308,9 +1421,10 @@ public:
                 const AppEntry &app = data.preview.at(i);
                 const int x = 4 + (i % 2) * 31;
                 const int y = 4 + (i / 2) * 31;
-                const QIcon icon = DesktopIconResolver::resolve(app.icon, iconSize);
-                const QPixmap picture = icon.pixmap(iconSize, iconSize);
-                if (!picture.isNull()) painter.drawPixmap(x, y, picture);
+                const QPixmap picture = LauncherIconCache::get(app.icon, decodeMissing);
+                if (!picture.isNull())
+                    painter.drawPixmap(x, y, picture.scaled(iconSize, iconSize,
+                                       Qt::KeepAspectRatio, Qt::SmoothTransformation));
                 else {
                     painter.setBrush(QColor(255, 255, 255, 90));
                     painter.drawRoundedRect(QRectF(x + 3, y + 3, 21, 21), 4, 4);
@@ -1319,10 +1433,12 @@ public:
             painter.end();
             iconLabel->setText(QString());
             iconLabel->setPixmap(collage);
-            return;
+            iconReady = true;
+            return true;
         }
-        const QIcon icon = DesktopIconResolver::resolve(data.app.icon, 48);
-        const QPixmap picture = icon.pixmap(48, 48);
+        if (!decodeMissing && !LauncherIconCache::isReady(data.app.icon))
+            return false;
+        const QPixmap picture = LauncherIconCache::get(data.app.icon, decodeMissing);
         if (!picture.isNull()) {
             iconLabel->setText(QString());
             iconLabel->setStyleSheet(QString());
@@ -1333,6 +1449,8 @@ public:
             iconLabel->setText(QString::fromUtf8("🧩"));
             iconLabel->setStyleSheet("font-size: 48px;");
         }
+        iconReady = true;
+        return true;
     }
 
 protected:
@@ -1516,6 +1634,7 @@ class LauncherGridController : public QObject {
     QPushButton *renameButton;
     QPushButton *ungroupButton;
     LauncherGroups groups;
+    QString groupFilePath;
     QList<AppEntry> apps;
     QHash<QString, AppEntry> lookup;
     QVector<AppTile*> &tiles;
@@ -1590,6 +1709,18 @@ public:
         onViewChanged = std::move(viewChanged);
         live = true;
     }
+    void updateApps(const QList<AppEntry> &updated) {
+        // App installation/removal is refreshed only while the window is hidden.
+        // Preserve saved folder memberships, rather than creating another set.
+        apps = updated;
+        lookup.clear();
+        for (const AppEntry &app : apps) lookup.insert(appKey(app), app);
+        groups = LauncherGroups(groupFilePath, apps);
+        if (!currentGroup.isEmpty() && !groups.byId(currentGroup))
+            currentGroup.clear();
+        render();
+    }
+
     bool insideGroup() const { return !currentGroup.isEmpty(); }
     QPushButton *groupBackButton() const {
         return insideGroup() ? backButton : nullptr;
@@ -1991,7 +2122,23 @@ protected:
 
 // ──────────────────────────────  main
 int main(int argc, char **argv) {
+    // Dispatch to the already running launcher before QApplication is created.
+    // Default/--toggle toggles; --daemon starts a hidden instance at login.
+    char command = 't';
+    for (int i = 1; i < argc; ++i) {
+        const QByteArray arg(argv[i]);
+        if (arg == "--daemon" || arg == "--background") command = 'b';
+        else if (arg == "--show") command = 's';
+        else if (arg == "--hide") command = 'h';
+        else if (arg == "--quit") command = 'q';
+        else if (arg == "--toggle") command = 't';
+    }
+    const QByteArray ipcPath = LauncherIpc::socketPath();
+    if (LauncherIpc::sendCommand(ipcPath, command)) return 0;
+    if (command == 'h' || command == 'q') return 0;
+
     QApplication a(argc, argv);
+    a.setQuitOnLastWindowClosed(false); // hide must not exit the resident process
     // Qtile often runs without a platform icon theme. In particular,
     // AppImageLauncher may install appimagekit_* icons under ~/.local/share.
     DesktopIconResolver::configureThemeSearch();
@@ -2022,9 +2169,15 @@ int main(int argc, char **argv) {
     lock.setStaleLockTime(0);  // never auto-steal stale locks
 
     if (!lock.tryLock(0)) {
-        // Another osm-launcher is already running
+        // Another launcher is running (or an old version still holds the lock).
+        // Retry the IPC once if the socket wasn't ready on the first attempt.
+        LauncherIpc::sendCommand(ipcPath, command);
         return 0;
     }
+    const int ipcFd = LauncherIpc::listen(ipcPath);
+    if (ipcFd < 0)
+        qWarning() << "osm-launcher: unable to create resident control socket"
+                   << QString::fromLocal8Bit(ipcPath) << strerror(errno);
 
     bool usedAppCache = false;
     const QString appsCachePath = cacheDir.absoluteFilePath("osm-launcher-apps-v1.cache");
@@ -2165,22 +2318,21 @@ int main(int argc, char **argv) {
     window.installEventFilter(kf);
 
     if (!usedAppCache) {
-        // Cache work is done after the launcher has appeared. Even the first
-        // run won't wait for the extra directory scan and atomic disk write.
-        QTimer::singleShot(450, &window,
-                           [appsCachePath, apps, pendingCacheFiles]() {
+        // A cold cache is written while hidden, never mid-cascade. Also avoid
+        // walking /proc to start PolicyKit agents during the animation; the
+        // existing authentication path starts the agent on demand as needed.
+        QTimer *persistCache = new QTimer(&a);
+        persistCache->setInterval(500);
+        QObject::connect(persistCache, &QTimer::timeout, &a,
+                         [persistCache, &window, &appsCachePath, &apps,
+                          &pendingCacheFiles]() {
+            if (window.isVisible() || window.isTransitioning()) return;
             writeDesktopCache(appsCachePath, apps, desktopDirectoryStamps(),
                               pendingCacheFiles);
+            persistCache->stop();
         });
+        persistCache->start();
     }
-
-    // Do not walk /proc or spawn PolicyKit agents before the first frame.
-    // Application clicks still perform their own synchronous authentication
-    // checks, so this deferred best-effort startup cannot bypass permission.
-    QTimer::singleShot(650, &window, []() {
-        if (polkitPamUsesAlternix() && !polkitAgentRunning())
-            startPolkitAgent();
-    });
 
     // ──────────────────────────────  Lazy icons, scheduled by the row cascade
     // The opening animation already discovers the real bottommost visible row
@@ -2205,7 +2357,7 @@ int main(int argc, char **argv) {
         const int index = pendingIcons.at(nextPendingIcon++);
         if (index >= 0 && index < tiles.size()) {
             if (AppTile *tile = tiles.at(index))
-                tile->loadIcon();
+                tile->loadIcon(false); // cached pixmaps only: no disk I/O in cascade
         }
         if (nextPendingIcon >= pendingIcons.size()) {
             iconTimer->stop();
@@ -2263,15 +2415,114 @@ int main(int argc, char **argv) {
     QObject::connect(scroll->verticalScrollBar(), &QScrollBar::valueChanged,
                      &window, [&](int) { requestVisibleIcons(); });
 
-    // Suppress the first fullscreen paint until the row effects are installed;
-    // otherwise the entire launcher can flash for one frame before cascading.
-    window.setUpdatesEnabled(false);
-    window.showFullScreen();
-    QVector<QWidget*> tileWidgets;
-    tileWidgets.reserve(tiles.size());
-    for (AppTile *tile : tiles) tileWidgets.append(tile);
-    window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
-    window.setUpdatesEnabled(true);
+    // A folder view can contain a different widget grid. Restore All Apps
+    // after the closing fade, while hidden, so reopening never rebuilds cards.
+    window.setHiddenCallback([&controller]() {
+        if (controller.insideGroup()) controller.openGroup(QString());
+    });
+
+    // Prepare icons gradually while hidden and keep decoded pixmaps in RAM.
+    // On a cold first run, missing icons remain placeholders during the short
+    // animation, and become visible after it rather than freezing its frames.
+    int nextWarmIcon = 0;
+    QTimer warmTimer(&a);
+    warmTimer.setInterval(12);
+    QObject::connect(&warmTimer, &QTimer::timeout, &a, [&]() {
+        if (window.isTransitioning()) return;
+        if (nextWarmIcon < apps.size()) {
+            // The slow icon-theme search happens only outside animations.
+            LauncherIconCache::get(apps.at(nextWarmIcon++).icon, true);
+        }
+        // Tiles that are already drawn retain their pixmaps. Fill new/uncached
+        // tiles without forcing invisible rows to repaint during scrolling.
+        QWidget *viewport = scroll->viewport();
+        for (AppTile *tile : tiles) {
+            if (!tile) continue;
+            if (window.isVisible()) {
+                const QRect visible(tile->mapTo(viewport, QPoint(0, 0)), tile->size());
+                if (!visible.intersects(viewport->rect())) continue;
+            }
+            tile->loadIcon(false);
+        }
+        if (nextWarmIcon >= apps.size()) warmTimer.stop();
+    });
+    warmTimer.start();
+
+    // A resident launcher must notice apps added/removed after login. Inspect
+    // the existing timestamp cache periodically ONLY while hidden, and rebuild
+    // the grid only after a genuine desktop-file/directory change.
+    QTimer refreshTimer(&a);
+    refreshTimer.setInterval(15000);
+    QObject::connect(&refreshTimer, &QTimer::timeout, &a, [&]() {
+        if (window.isVisible() || window.isTransitioning()) return;
+        QList<AppEntry> current;
+        if (readDesktopCache(appsCachePath, current)) return;
+        QVector<DesktopCacheStamp> files;
+        QList<AppEntry> changed = scanDesktopEntries(files);
+        excludePicom(changed);
+        writeDesktopCache(appsCachePath, changed, desktopDirectoryStamps(), files);
+        apps = changed;
+        LauncherIconCache::invalidate();
+        nextWarmIcon = 0;
+        controller.updateApps(apps);
+        warmTimer.start();
+    });
+    refreshTimer.start();
+
+    auto showLauncher = [&]() {
+        if (window.isTransitioning()) return;
+        if (window.isVisible()) { window.raise(); window.activateWindow(); return; }
+        // Qtile may have rotated the display or changed its resolution since
+        // daemon startup. Recompute geometry before fullscreen placement.
+        const int screenWidth = QApplication::primaryScreen()->size().width();
+        const int contentWidth = screenWidth <= 800
+            ? screenWidth - 40 : int(screenWidth * 0.9);
+        scroll->setFixedWidth(contentWidth);
+        container->setMinimumWidth(contentWidth);
+        for (AppTile *tile : tiles) if (tile) tile->loadIcon(false);
+
+        // No new grid or desktop-entry scan is performed here.
+        window.setUpdatesEnabled(false);
+        window.showFullScreen();
+        QVector<QWidget*> tileWidgets;
+        tileWidgets.reserve(tiles.size());
+        for (AppTile *tile : tiles) tileWidgets.append(tile);
+        window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
+        window.setUpdatesEnabled(true);
+    };
+
+    auto hideLauncher = [&]() {
+        if (window.isVisible() && !window.isTransitioning())
+            window.dismissWithAnimation();
+    };
+    auto toggleLauncher = [&]() {
+        if (window.isVisible()) hideLauncher();
+        else showLauncher();
+    };
+
+    // QSocketNotifier integrates the UNIX datagram socket into Qt's event loop:
+    // no polling, QtNetwork dependency, additional service or helper executable.
+    QSocketNotifier *ipcNotifier = nullptr;
+    if (ipcFd >= 0) {
+        ipcNotifier = new QSocketNotifier(ipcFd, QSocketNotifier::Read, &a);
+        QObject::connect(ipcNotifier,
+                         QOverload<int>::of(&QSocketNotifier::activated),
+                         &a, [&](int) {
+            char request = 0;
+            while (::recv(ipcFd, &request, 1, 0) == 1) {
+                switch (request) {
+                case 't': toggleLauncher(); break;
+                case 's': showLauncher(); break;
+                case 'h': hideLauncher(); break;
+                case 'q': a.quit(); break;
+                case 'b': break; // already running: remain in current state
+                default: break;
+                }
+            }
+        });
+    }
+
+    if (command != 'b') showLauncher();
 
     // Observe touches and mouse drags anywhere in the scrollable app list.
     PullDownDismissFilter *pullFilter = new PullDownDismissFilter(&window, scroll, &window);
@@ -2282,8 +2533,15 @@ int main(int argc, char **argv) {
                                                             scroll, &window);
     a.installEventFilter(dragFilter);
     if (profileStartup)
-        qInfo() << "osm-launcher startup: fullscreen requested in"
-                << startupClock.elapsed() << "ms";
+        qInfo() << "osm-launcher startup: resident UI prepared in"
+                << startupClock.elapsed() << "ms (starts hidden:" << (command == 'b') << ")";
 
-    return a.exec();
+    const int result = a.exec();
+    // Remove the socket only when the owner process really exits.
+    if (ipcNotifier) ipcNotifier->setEnabled(false);
+    if (ipcFd >= 0) {
+        ::close(ipcFd);
+        ::unlink(ipcPath.constData());
+    }
+    return result;
 }
