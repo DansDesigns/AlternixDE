@@ -1741,6 +1741,9 @@ else
     fi
 fi
 
+echo "• Building osm-power..."
+g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 osm-power /usr/local/bin/
 
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
@@ -1762,6 +1765,10 @@ fi
 if id lockscreen >/dev/null 2>&1; then
     sudo pkill -u lockscreen
 fi
+
+echo "• Building osm-lock..."
+g++ apps/osm-lock.cpp -o osm-lock -fPIC $(pkg-config --cflags --libs Qt5Widgets)
+sudo install -m 755 osm-lock /usr/local/bin/
 
 echo "• Updating osm-lockd..."
 sudo tee /usr/local/bin/osm-lockd >/dev/null <<'LOCKD'
