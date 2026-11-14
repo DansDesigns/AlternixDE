@@ -302,6 +302,16 @@ public:
     explicit AdaptiveRow(int threshold, QWidget *parent = nullptr)
         : QWidget(parent), switchWidth(threshold)
     {
+        // This widget only arranges the tiles. It must never paint its own
+        // rectangular background: that would show behind the rounded tile
+        // corners and create a dark outline around every multi-card row.
+        // The standalone "Available" memory tile is the visual reference.
+        setObjectName("alternixAdaptiveRow");
+        setAutoFillBackground(false);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setStyleSheet(
+            "QWidget#alternixAdaptiveRow { background:transparent; border:none; }");
+
         items = new QBoxLayout(QBoxLayout::LeftToRight, this);
         items->setContentsMargins(0, 0, 0, 0);
         items->setSpacing(14);
