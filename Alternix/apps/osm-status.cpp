@@ -579,9 +579,10 @@ void StatusPanel::refreshNotifications() {
     if (onCountChanged)
         onCountChanged(m_notificationCount);
 
-    // Original behaviour: close whenever there are no notifications,
-    // including when the tray was already empty before this refresh.
-    if (count == 0 && onClose)
+    // Preserve auto-close when the notification list becomes empty. The
+    // callback distinguishes an intentionally opened empty tray (briefly
+    // displayed) from deleting the final notification (close immediately).
+    if (count == 0 && isVisible() && onClose)
         onClose();
 }
 
@@ -779,10 +780,16 @@ public:
         m_shadow = m_panel->shadow();
         m_panel->move(m_screenGeo.width(), m_panel->y());
         m_panel->hide();
-        m_panel->setCloseCallback([this]() { hidePanel(); });
+        // Empty trays must still respond to a swipe, as in the original.
+        // Only a tray that was opened empty gets a short grace period before
+        // automatically closing; deleting the last notification closes now.
+        m_panel->setCloseCallback([this]() {
+            if (m_panelVisible && !m_openedEmpty) hidePanel();
+        });
 
         m_badge = new NotificationBadge(this);
         m_panel->onCountChanged = [this](int n) {
+            if (n > 0) m_openedEmpty = false;
             if (m_badge) m_badge->setCount(m_panelVisible ? 0 : n);
         };
         // StatusPanel's initial scan happened before onCountChanged was set.
@@ -807,11 +814,12 @@ public:
     void showPanel() {
         if (m_panelVisible || !m_panel) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
-        // Check the actual notification directory before showing the tray.
-        // The original tray closes itself when empty; avoid flashing an
-        // empty panel just to close it on the next 600ms refresh.
+        // Refresh first so newly created notifications are shown at once.
+        // Unlike V4, NEVER reject opening just because the tray is empty.
+        // The original allowed the swipe to open it and then auto-closed it.
         m_panel->refreshNotifications();
-        if (m_panel->notificationCount() == 0) return;
+        m_openedEmpty = m_panel->notificationCount() == 0;
+        const quint64 openingId = ++m_openingId;
 
         const bool reversing = m_animation &&
                                m_animation->state() == QAbstractAnimation::Running;
@@ -839,11 +847,24 @@ public:
             if (m_shadow) m_shadow->setEnabled(true);
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
+
+        if (m_openedEmpty) {
+            // The 600 ms background poll can otherwise interrupt the slide-in
+            // immediately, making the handle appear broken. Allow the original
+            // slide animation to be visible before automatically closing.
+            QTimer::singleShot(750, this, [this, openingId]() {
+                if (openingId == m_openingId && m_panelVisible && m_panel &&
+                    m_panel->notificationCount() == 0)
+                    hidePanel();
+            });
+        }
     }
 
     void hidePanel() {
         if (!m_panelVisible || !m_panel) return;
+        ++m_openingId; // cancel any pending empty-tray close from this opening
         m_panelVisible = false;
+        m_openedEmpty = false;
         if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
         if (m_shadow) m_shadow->setEnabled(false);
         const QRect start = m_panel->geometry();
@@ -876,6 +897,8 @@ private:
     StatusPanel *m_panel;
     NotificationBadge *m_badge;
     bool m_panelVisible;
+    bool m_openedEmpty = false;
+    quint64 m_openingId = 0;
     QRect m_screenGeo;
     QPointer<QPropertyAnimation> m_animation;
     QGraphicsDropShadowEffect *m_shadow = nullptr;
