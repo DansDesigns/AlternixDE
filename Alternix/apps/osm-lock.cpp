@@ -18,6 +18,7 @@ test with:
 #include <QApplication>
 #include <QWidget>
 #include <QPainter>
+#include <QPainterPath>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QVector>
@@ -56,6 +57,7 @@ class LockScreen : public QWidget {
     QVector<QString> patternHash;
     QString passwordHash;
     bool enhancedSecurity = false;
+    bool colourblindMode = false; // Only changes presentation, never credential hashes.
     bool secureAuth = false;
     bool pamPrompt = false;
 
@@ -80,6 +82,7 @@ class LockScreen : public QWidget {
     QLabel *titleLabel = nullptr;
     QLabel *countdownLabel = nullptr;
     QPushButton *securityToggle = nullptr;
+    QPushButton *colourblindToggle = nullptr;
     QPushButton *cancelButton = nullptr;
     QPushButton *pinButton = nullptr;
     QWidget *pinWidget = nullptr;
@@ -120,6 +123,37 @@ public:
             } else {
                 update();
             }
+        });
+
+        // An accessibility option, separate from enhanced-security enrollment.
+        // It is always available, including for an already enrolled pattern.
+        colourblindToggle = new QPushButton("Colourblind Mode", this);
+        colourblindToggle->setFlat(true);
+        colourblindToggle->setGeometry(10, 42, 220, 30);
+        colourblindToggle->setToolTip(
+            "Display the 16 pattern choices as clubs, hearts, spades and diamonds, "
+            "with A/K/Q/J ranks instead of colours.");
+        {
+            QSettings settings(QDir::homePath() +
+                               "/.config/Alternix/osm-settings.conf",
+                               QSettings::IniFormat);
+            colourblindMode = settings.value("Accessibility/ColourblindLockMode", false).toBool();
+        }
+        updateColourblindToggleStyle();
+        connect(colourblindToggle, &QPushButton::clicked, this, [this]() {
+            if (authenticationTimedOut()) return;
+            colourblindMode = !colourblindMode;
+            updateColourblindToggleStyle();
+            QDir().mkpath(QDir::homePath() + "/.config/Alternix");
+            QSettings settings(QDir::homePath() +
+                               "/.config/Alternix/osm-settings.conf",
+                               QSettings::IniFormat);
+            settings.setValue("Accessibility/ColourblindLockMode", colourblindMode);
+            settings.sync();
+            // Restart only the visible pattern sequence. During first-run PIN
+            // setup, preserve the completed pattern waiting to be enrolled.
+            if (!pinModeActive) currentSeq.clear();
+            update();
         });
 
         cancelButton = new QPushButton("Cancel", this);
@@ -163,6 +197,8 @@ public:
             }
         }
 
+        colourblindToggle->setGeometry(10, securityToggle->isVisible() ? 42 : 5, 220, 30);
+
         if (firstRun && secureAuth)
             titleLabel->setText("Pattern not enrolled. Run Alternix installer as root.");
         else if (firstRun)
@@ -198,6 +234,8 @@ public:
 protected:
     void resizeEvent(QResizeEvent *) override {
         securityToggle->setGeometry(10, 5, 220, 30);
+        if (colourblindToggle)
+            colourblindToggle->setGeometry(10, securityToggle->isVisible() ? 42 : 5, 220, 30);
         if (cancelButton)
             cancelButton->setGeometry(width() - 130, 5, 120, 30);
         if (pinButton)
@@ -222,6 +260,10 @@ protected:
 
         if (!pinModeActive) {
             for (const auto &s : shapes) {
+                if (colourblindMode) {
+                    drawCardSuit(p, s);
+                    continue;
+                }
                 p.setBrush(s.color);
                 p.setPen(QPen(Qt::white, 2));
                 int x = s.rect.x(), y = s.rect.y(), w = s.rect.width(), h = s.rect.height();
@@ -277,7 +319,8 @@ protected:
 
     void mousePressEvent(QMouseEvent *ev) override {
         if (authenticationTimedOut()) return;
-        if (securityToggle->isVisible() && securityToggle->geometry().contains(ev->pos())) {
+        if ((securityToggle->isVisible() && securityToggle->geometry().contains(ev->pos())) ||
+            (colourblindToggle->isVisible() && colourblindToggle->geometry().contains(ev->pos()))) {
             QWidget::mousePressEvent(ev);
             return;
         }
@@ -628,6 +671,97 @@ private:
             securityToggle->setStyleSheet("QPushButton { background:transparent; color:#00ff00; font-size:16px; }");
         else
             securityToggle->setStyleSheet("QPushButton { background:transparent; color:white; font-size:16px; }");
+    }
+
+    void updateColourblindToggleStyle() {
+        // Text also conveys state; don't rely on the green highlight alone.
+        colourblindToggle->setText(colourblindMode ? "Colourblind Mode: ON" : "Colourblind Mode: OFF");
+        colourblindToggle->setStyleSheet(colourblindMode
+            ? "QPushButton { background:transparent; color:#8ff5a6; font-size:16px; } "
+              "QPushButton:hover { color:white; }"
+            : "QPushButton { background:transparent; color:white; font-size:16px; } "
+              "QPushButton:hover { color:#cccccc; }");
+    }
+
+    // Each existing shape/colour credential maps to one distinct card.
+    // The original shape + colour string is STILL hashed on selection, so
+    // switching modes cannot invalidate enrolled patterns or change entropy.
+    // circle=clubs, triangle=hearts, square=spades, pentagon=diamonds;
+    // red=A, blue=K, green=Q, white=J.
+    void drawCardSuit(QPainter &p, const ShapeItem &s) const {
+        p.save();
+        const QRectF card = QRectF(s.rect).adjusted(2, 2, -2, -2);
+        p.setPen(QPen(QColor("#bbbbbb"), 2));
+        p.setBrush(QColor("#191919"));
+        p.drawRoundedRect(card, 9, 9);
+
+        const QString rank = s.color == Qt::red ? "A"
+                           : s.color == Qt::blue ? "K"
+                           : s.color == Qt::green ? "Q" : "J";
+        QFont rankFont = p.font();
+        rankFont.setBold(true);
+        rankFont.setPixelSize(qMax(16, s.rect.height() * 22 / 100));
+        p.setFont(rankFont);
+        p.setPen(Qt::white);
+        p.drawText(QRectF(card.left() + 8, card.top() + 5, 24, 25),
+                   Qt::AlignLeft | Qt::AlignVCenter, rank);
+        p.drawText(QRectF(card.right() - 32, card.bottom() - 30, 24, 25),
+                   Qt::AlignRight | Qt::AlignVCenter, rank);
+
+        // Use vector-drawn suits: font fallbacks may not include card glyphs,
+        // especially on minimal Qtile/Devuan installations.
+        QPainterPath suit;
+        suit.setFillRule(Qt::WindingFill); // Unite the club's overlapping lobes and stem.
+        if (s.shape == "circle") { // Clubs
+            suit.addEllipse(QPointF(50, 28), 17, 17);
+            suit.addEllipse(QPointF(33, 49), 17, 17);
+            suit.addEllipse(QPointF(67, 49), 17, 17);
+            QPainterPath stem;
+            stem.moveTo(46, 53);
+            stem.lineTo(54, 53);
+            stem.lineTo(56, 73);
+            stem.quadTo(58, 80, 67, 81);
+            stem.lineTo(67, 86);
+            stem.lineTo(33, 86);
+            stem.lineTo(33, 81);
+            stem.quadTo(42, 80, 44, 73);
+            stem.closeSubpath();
+            suit.addPath(stem);
+        } else if (s.shape == "triangle") { // Hearts
+            suit.moveTo(50, 84);
+            suit.cubicTo(28, 66, 9, 49, 12, 31);
+            suit.cubicTo(15, 10, 39, 8, 50, 29);
+            suit.cubicTo(61, 8, 85, 10, 88, 31);
+            suit.cubicTo(91, 49, 72, 66, 50, 84);
+            suit.closeSubpath();
+        } else if (s.shape == "square") { // Spades
+            suit.moveTo(50, 7);
+            suit.cubicTo(37, 28, 9, 41, 14, 59);
+            suit.cubicTo(18, 77, 39, 74, 47, 61);
+            suit.lineTo(47, 70);
+            suit.quadTo(46, 81, 33, 83);
+            suit.lineTo(33, 87);
+            suit.lineTo(67, 87);
+            suit.lineTo(67, 83);
+            suit.quadTo(54, 81, 53, 70);
+            suit.lineTo(53, 61);
+            suit.cubicTo(61, 74, 82, 77, 86, 59);
+            suit.cubicTo(91, 41, 63, 28, 50, 7);
+            suit.closeSubpath();
+        } else { // Diamonds (pentagon)
+            suit.moveTo(50, 7);
+            suit.lineTo(83, 50);
+            suit.lineTo(50, 93);
+            suit.lineTo(17, 50);
+            suit.closeSubpath();
+        }
+        p.translate(s.rect.x() + s.rect.width() * 0.24,
+                    s.rect.y() + s.rect.height() * 0.19);
+        p.scale(s.rect.width() * 0.0052, s.rect.height() * 0.0062);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::white);
+        p.drawPath(suit);
+        p.restore();
     }
 
     // ---------- PATTERN ----------
