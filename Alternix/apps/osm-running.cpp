@@ -335,9 +335,13 @@ void SidePanel::activateWindow(Window w) {
 }
 
 void SidePanel::closeAppWindow(Window w) {
-    XKillClient(m_dpy,w);
+    XKillClient(m_dpy, w);
     XFlush(m_dpy);
-    refreshWindows();
+    // XKillClient is asynchronous. Rebuilding the list synchronously here
+    // can destroy the button/card whose click handler is still executing.
+    // Recheck after X11 has had time to remove the client; the regular timer
+    // will also catch slower shutdowns and externally closed windows.
+    QTimer::singleShot(180, this, [this]() { refreshWindows(); });
 }
 
 void SidePanel::handleEntryActivateAndClose(Window w) {
@@ -406,6 +410,9 @@ void SidePanel::refreshWindows() {
     // No X icon transfers, QWidget allocation, deleteLater backlog or layout
     // invalidation if the set of windows/titles has not actually changed.
     if (m_snapshotReady && snapshot == m_windowSnapshot) {
+        // Cached empty lists still need to request auto-close. Skipping this
+        // callback was the regression that left the panel stuck open.
+        if (entries.isEmpty() && isVisible() && onClose) onClose();
         return;
     }
     m_snapshotReady = true;
@@ -427,7 +434,9 @@ void SidePanel::refreshWindows() {
     const QRect g = geometry();
     if (g.width() != m_width) setGeometry(g.x(), g.y(), m_width, g.height());
     resizeToItems(entries.size());
-    // A list that is temporarily empty should not make swipes look broken.
+    // The overlay decides whether this is an initially empty swipe (allow a
+    // brief opening animation) or the last window disappearing (close now).
+    if (entries.isEmpty() && isVisible() && onClose) onClose();
 }
 
 // ───────────────────────────────────────────── WindowCard impl
@@ -519,7 +528,9 @@ public:
         m_shadow = m_panel->shadow();
         m_panel->move(-m_panel->width(), m_panel->y());
         m_panel->hide();
-        m_panel->setCloseCallback([this]() { hidePanel(); });
+        m_panel->setCloseCallback([this]() {
+            if (m_panelVisible && !m_openedEmpty) hidePanel();
+        });
         hide();
     }
 
@@ -537,9 +548,12 @@ public:
     void showPanel() {
         if (m_panelVisible || !m_panel) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
-        // Open the panel even if no clients are currently listed.
-        // Some X11 WMs publish _NET_CLIENT_LIST asynchronously.
+        // Always permit a swipe, including when there are no window cards.
+        // An initially empty panel closes after its entrance animation,
+        // while losing the last window closes the panel as soon as detected.
         m_panel->refreshWindows();
+        m_openedEmpty = !m_panel->hasWindows();
+        const quint64 openingId = ++m_openingId;
 
         // Stop an in-flight close before it can hide a newly reopened panel.
         const bool reversing = m_animation &&
@@ -567,10 +581,24 @@ public:
             if (m_shadow) m_shadow->setEnabled(true);
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
+
+        if (m_openedEmpty) {
+            // Give the swipe a visible response. Re-read at the deadline in
+            // case an application window appeared during the animation.
+            QTimer::singleShot(750, this, [this, openingId]() {
+                if (openingId != m_openingId || !m_panelVisible || !m_panel)
+                    return;
+                m_panel->refreshWindows();
+                if (!m_panel->hasWindows()) hidePanel();
+                else m_openedEmpty = false;
+            });
+        }
     }
 
     void hidePanel() {
         if (!m_panelVisible || !m_panel) return;
+        ++m_openingId;  // invalidate any pending empty-panel close
+        m_openedEmpty = false;
         m_panelVisible = false;
         m_panel->stopMonitoring();
         if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
@@ -603,6 +631,8 @@ protected:
 private:
     SidePanel *m_panel;
     bool m_panelVisible;
+    bool m_openedEmpty = false;
+    quint64 m_openingId = 0;
     QRect m_screenGeo;
     QPointer<QPropertyAnimation> m_animation;
     // A shadow effect is rendered into an expensive offscreen pixmap while
