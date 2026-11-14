@@ -461,13 +461,25 @@ void StatusPanel::refreshNotifications() {
                     QString::number(fi.size()) + QLatin1Char(':') +
                     QString::number(fi.lastModified().toMSecsSinceEpoch());
     }
-    if (m_snapshotReady && snapshot == m_fileSnapshot) return;
+    if (m_snapshotReady && snapshot == m_fileSnapshot) {
+        // The original tray automatically closes whenever it is empty.
+        // Keep this check even on a cache hit, otherwise an already-empty
+        // visible panel can stay open indefinitely.
+        if (m_notificationCount == 0 && isVisible() && onClose)
+            onClose();
+        return;
+    }
     m_snapshotReady = true;
     m_fileSnapshot = snapshot;
 
     QLayoutItem *it;
     while ((it = m_list->takeAt(0))) {
-        if (QWidget *w = it->widget()) delete w;
+        // A close-button click can trigger this refresh from inside a card's
+        // own event handler. Defer destruction, as the original did.
+        if (QWidget *w = it->widget()) {
+            w->hide();
+            w->deleteLater();
+        }
         delete it;
     }
 
@@ -550,7 +562,6 @@ void StatusPanel::refreshNotifications() {
     m_seenPaths = newSeen;
     m_firstScan = false;
 
-    const int previousCount = m_notificationCount;
     m_notificationCount = count;
 
     // compute and apply width (same logic as osm-running)
@@ -568,8 +579,9 @@ void StatusPanel::refreshNotifications() {
     if (onCountChanged)
         onCountChanged(m_notificationCount);
 
-    // auto-close when empty, same behaviour as SidePanel’s onClose
-    if (count == 0 && previousCount > 0 && onClose)
+    // Original behaviour: close whenever there are no notifications,
+    // including when the tray was already empty before this refresh.
+    if (count == 0 && onClose)
         onClose();
 }
 
@@ -795,8 +807,11 @@ public:
     void showPanel() {
         if (m_panelVisible || !m_panel) return;
         syncScreenGeometry(alternixActiveScreenGeometry());
-        // Empty notification trays are valid and must still open.
+        // Check the actual notification directory before showing the tray.
+        // The original tray closes itself when empty; avoid flashing an
+        // empty panel just to close it on the next 600ms refresh.
         m_panel->refreshNotifications();
+        if (m_panel->notificationCount() == 0) return;
 
         const bool reversing = m_animation &&
                                m_animation->state() == QAbstractAnimation::Running;
