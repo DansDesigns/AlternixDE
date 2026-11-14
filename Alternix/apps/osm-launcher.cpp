@@ -2505,9 +2505,12 @@ int main(int argc, char **argv) {
     QSocketNotifier *ipcNotifier = nullptr;
     if (ipcFd >= 0) {
         ipcNotifier = new QSocketNotifier(ipcFd, QSocketNotifier::Read, &a);
+        // Qt 5.15 on Devuan exposes activated(QSocketDescriptor, Type, ...),
+        // not activated(int). Ignore the signal arguments and drain our fd;
+        // this is also compatible with Qt builds using the older signature.
         QObject::connect(ipcNotifier,
-                         QOverload<int>::of(&QSocketNotifier::activated),
-                         &a, [&](int) {
+                         &QSocketNotifier::activated,
+                         &a, [&]() {
             char request = 0;
             while (::recv(ipcFd, &request, 1, 0) == 1) {
                 switch (request) {
