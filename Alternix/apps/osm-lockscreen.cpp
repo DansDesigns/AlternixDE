@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QPainter>
 #include <QMouseEvent>
+#include <QKeyEvent>
 #include <QTouchEvent>
 #include <QEvent>
 #include <QScreen>
@@ -21,6 +22,34 @@
 #include <QCloseEvent>
 #include <QtMath>
 #include <QWindow>
+#include <QLockFile>
+#include <QCryptographicHash>
+
+// Shared, session-scoped overlay coordination. QLockFile automatically clears
+// a marker when its owning process exits and checks for stale markers after a
+// crash. This needs only QtCore/QtWidgets, not a new X11 library dependency.
+static QString overlayMarkerPath(const QString &name) {
+    const QByteArray display = qgetenv("DISPLAY").isEmpty()
+        ? qgetenv("WAYLAND_DISPLAY") : qgetenv("DISPLAY");
+    const QByteArray session = QCryptographicHash::hash(display, QCryptographicHash::Sha256)
+                                   .toHex().left(16);
+    const QString dir = QDir::homePath() + "/.cache/Alternix/overlay-locks";
+    QDir().mkpath(dir);
+    return dir + "/" + name + "-" + QString::fromLatin1(session) + ".lock";
+}
+
+static bool overlayMarkerActive(const QString &name) {
+    const QString marker = overlayMarkerPath(name);
+    if (!QFileInfo::exists(marker))
+        return false;
+    QLockFile probe(marker);
+    probe.setStaleLockTime(0); // never treat a live, long-running lock as expired
+    if (probe.tryLock(0)) {
+        probe.unlock(); // absent or stale marker
+        return false;
+    }
+    return probe.error() == QLockFile::LockFailedError;
+}
 
 // Utility
 static QString readFirstLine(const QString &path) {
@@ -43,7 +72,8 @@ public:
           batteryPercent(-1),
           sliderOffset(0.0),
           sliding(false),
-          slidingBack(false)
+          slidingBack(false),
+          lockMarker(overlayMarkerPath("osm-lockscreen"))
     {
         // === FULLSCREEN LOCKDOWN MODE ===
         setWindowFlags(Qt::FramelessWindowHint
@@ -144,22 +174,19 @@ public:
         slideBackTimer->setInterval(16); // ~60fps
         connect(slideBackTimer, &QTimer::timeout, this, &LockScreenWidget::onSlideBackStep);
 
-        // KEYBOARD GRAB — DO NOT REMOVE
-        // Qtile's shortcuts (Win+Enter for a terminal and the rest) are
-        // grabbed on the root window, so they fire whichever window has
-        // focus. Swallowing keys in keyPressEvent cannot stop them. An
-        // active keyboard grab does: while this window holds it, every
-        // key comes here and Qtile's shortcuts cannot trigger. It also
-        // stops typing reaching the window underneath. The grab only
-        // works once the window is on screen, and fails while another
-        // program holds one, so keep retrying until it succeeds.
-        grabTimer = new QTimer(this);
-        grabTimer->setInterval(200);
-        connect(grabTimer, &QTimer::timeout, this, [this]() {
-            if (windowHandle() && windowHandle()->setKeyboardGrabEnabled(true))
-                grabTimer->stop();
-        });
-        grabTimer->start();
+        // A lock must intercept BOTH input streams: the Qtile root
+        // shortcuts (keyboard), and osm-notify's edge handles (mouse).
+        // Additionally, an override-redirect panel may try to raise itself
+        // above us later, so refresh the lockscreen's X11 stacking position.
+        // osm-power advertises a short-lived overlay marker; while it is
+        // running we yield both grabs and stacking priority to that menu.
+        lockMarker.setStaleLockTime(0);
+        lockMarker.tryLock(0);
+        enforcementTimer = new QTimer(this);
+        enforcementTimer->setInterval(120);
+        connect(enforcementTimer, &QTimer::timeout, this,
+                [this]() { enforceLock(); });
+        enforcementTimer->start();
 
         adjustScaling();
     }
@@ -173,6 +200,11 @@ protected:
 
     // ─── SWALLOW ALL KEYBOARD INPUT ───
     void keyPressEvent(QKeyEvent *e) override {
+        // The physical Power key must still be able to open the approved
+        // power menu even when the lockscreen has the global keyboard grab.
+        if (e->key() == Qt::Key_PowerOff && !e->isAutoRepeat()
+            && !powerMenuActive)
+            QProcess::startDetached("osm-power", QStringList());
         e->accept();
     }
     void keyReleaseEvent(QKeyEvent *e) override {
@@ -336,7 +368,56 @@ private:
     qreal swipeStartOffset = 0.0;
     int activeTouchId = -1;
     QTimer *slideBackTimer;
-    QTimer *grabTimer;
+    QTimer *enforcementTimer;
+    QLockFile lockMarker;
+    bool powerMenuActive = false;
+    bool unlockDialogActive = false;
+    bool haveKeyboardGrab = false;
+    bool haveMouseGrab = false;
+    unsigned int enforcementCount = 0;
+
+    // The Qt native grabs are released only for osm-power and osm-lock auth.
+    void releaseInputGrabs() {
+        if (windowHandle()) {
+            windowHandle()->setMouseGrabEnabled(false);
+            windowHandle()->setKeyboardGrabEnabled(false);
+        }
+        haveKeyboardGrab = false;
+        haveMouseGrab = false;
+    }
+
+    void enforceLock() {
+        if (unlockDialogActive)
+            return; // osm-lock --auth must receive its own input
+
+        const bool powerVisible = overlayMarkerActive("osm-power");
+        if (powerVisible) {
+            if (!powerMenuActive) {
+                powerMenuActive = true;
+                releaseInputGrabs();
+            }
+            return; // osm-power, not osm-notify, is the permitted top overlay
+        }
+        if (powerMenuActive) {
+            powerMenuActive = false;
+            haveKeyboardGrab = false;
+            haveMouseGrab = false;
+        }
+
+        // Override-redirect windows are outside Qtile's regular 'above'
+        // layer. Raising periodically keeps the lockscreen above transient
+        // osm-notify edge handles without editing osm-notify itself.
+        raise();
+        if (windowHandle()) {
+            // Reassert occasionally as grabs may be lost across suspend or
+            // an X11 activation change. Keep retrying if another grab wins.
+            const bool retry = (++enforcementCount % 5) == 0;
+            if (!haveKeyboardGrab || retry)
+                haveKeyboardGrab = windowHandle()->setKeyboardGrabEnabled(true);
+            if (!haveMouseGrab || (retry && !sliding && activeTouchId == -1))
+                haveMouseGrab = windowHandle()->setMouseGrabEnabled(true);
+        }
+    }
 
     qreal scaleFactor = 1.0; // devicePixelRatio()
 
@@ -511,11 +592,11 @@ private:
     // SLIDER UNLOCK LOGIC
     // ──────────────────────────────────────
     void triggerUnlock() {
-        // Let go of the keyboard while osm-lock asks for the pattern or
-        // PIN, so it can take its own grab and receive typed PINs.
-        grabTimer->stop();
-        if (windowHandle())
-            windowHandle()->setKeyboardGrabEnabled(false);
+        // The trusted osm-lock pattern/PIN prompt needs mouse/touch as well
+        // as keyboard. Suspend stacking enforcement while it is on screen,
+        // then regain both grabs after any denial or timeout.
+        unlockDialogActive = true;
+        releaseInputGrabs();
 
         QProcess proc;
         proc.start("osm-lock", QStringList() << "--auth");
@@ -540,7 +621,8 @@ private:
         } else {
             sliderOffset = 0;
             update();
-            grabTimer->start();   // locked again: take the keyboard back
+            unlockDialogActive = false;
+            enforceLock(); // immediately restore priority and both input grabs
         }
     }
 
@@ -576,6 +658,7 @@ int main(int argc, char *argv[]) {
     w.raise();
     w.activateWindow();
     w.showFullScreen();
+    QTimer::singleShot(0, &w, [&w]() { w.raise(); w.activateWindow(); });
 
     return app.exec();
 }
