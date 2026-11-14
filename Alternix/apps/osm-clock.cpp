@@ -34,6 +34,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <functional>
+#include <memory>
 
 static const int CARD_PADDING = 22;
 static const int ICON_COLUMN_WIDTH = 54;
@@ -453,7 +454,7 @@ private:
                 a.timePart() + (a.sound.isEmpty() ? "" : " \xF0\x9F\x8E\xB5"));
             timeLbl->setStyleSheet(
                 "font-size:44px; font-weight:bold; color:white;");
-            timeLbl->setFixedWidth(a.sound.isEmpty() ? 220 : 280);
+            timeLbl->setFixedWidth(a.sound.isEmpty() ? 210 : 245);
 
             QWidget *textWrapper = new QWidget;
             QVBoxLayout *textCol = new QVBoxLayout(textWrapper);
@@ -471,6 +472,20 @@ private:
             textCol->addWidget(ttl);
             textCol->addWidget(subt);
 
+            int idx = i;
+            QPushButton *edit = new QPushButton("✎");
+            edit->setToolTip("Edit alarm");
+            edit->setAccessibleName("Edit alarm");
+            edit->setFixedSize(58, 64);
+            edit->setStyleSheet(
+                "QPushButton { color:white; border:none; font-size:32px;"
+                " background:transparent; }"
+                "QPushButton:hover { background:#505050; border-radius:18px; }"
+                "QPushButton:pressed { background:#666666; border-radius:18px; }");
+            QObject::connect(edit, &QPushButton::clicked, [this, idx]() {
+                openPage(makeAddAlarmPage(idx));
+            });
+
             QPushButton *del = new QPushButton(" ❌");
             del->setFixedSize(64, 64);
             del->setStyleSheet(
@@ -481,7 +496,6 @@ private:
                 "QPushButton:pressed { color:#ffffff; background:#550000;"
                 " border-radius:18px; }");
 
-            int idx = i;
             QObject::connect(del, &QPushButton::clicked, [this, idx]() {
                 QList<Alarm> all = loadAlarms();
                 if (idx >= 0 && idx < all.size())
@@ -492,6 +506,7 @@ private:
 
             row->addWidget(timeLbl);
             row->addWidget(textWrapper, 1);
+            row->addWidget(edit);
             row->addWidget(del);
 
             col->addWidget(card, 0, Qt::AlignHCenter);
@@ -517,8 +532,28 @@ private:
     }
 
     // --------------------------------------------------
-    // ALARMS — add page (touch friendly +/- spinners)
-    QWidget *makeAddAlarmPage() {
+    // ALARMS — create/edit page (touch friendly +/- spinners)
+    QWidget *makeAddAlarmPage(int editIndex = -1) {
+        QList<Alarm> existing = loadAlarms();
+        const bool editing = editIndex >= 0 && editIndex < existing.size();
+        const Alarm original = editing ? existing.at(editIndex) : Alarm{};
+        QTime initialTime = editing
+            ? QTime::fromString(original.when.right(5), "HH:mm")
+            : QTime::currentTime();
+        if (!initialTime.isValid()) initialTime = QTime::currentTime();
+
+        // Owned by the editor's signal callbacks: no leaked spinner state on close.
+        struct AlarmEditState {
+            int hour;
+            int minute;
+            bool daily;
+            QString sound;
+        };
+        auto state = std::make_shared<AlarmEditState>();
+        state->hour = initialTime.hour();
+        state->minute = editing ? initialTime.minute() : 0;
+        state->daily = editing && original.daily();
+        state->sound = editing ? original.sound : QString();
         TouchScrollArea *scroll = new TouchScrollArea;
         QWidget *inner = new QWidget;
         QVBoxLayout *col = new QVBoxLayout(inner);
@@ -526,23 +561,18 @@ private:
         col->setSpacing(24);
         col->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-        QLabel *title = new QLabel("New Alarm");
+        QLabel *title = new QLabel(editing ? "Edit Alarm" : "New Alarm");
         title->setAlignment(Qt::AlignCenter);
         title->setStyleSheet("font-size:32px; font-weight:bold; color:white;");
         col->addWidget(title);
 
-        // shared state
-        int *hour   = new int(QTime::currentTime().hour());
-        int *minute = new int(0);
-        bool *daily = new bool(false);
-
         QLabel *timeLbl = new QLabel;
         timeLbl->setAlignment(Qt::AlignCenter);
         timeLbl->setStyleSheet("font-size:96px; font-weight:bold; color:white;");
-        auto refreshTime = [timeLbl, hour, minute]() {
+        auto refreshTime = [timeLbl, state]() {
             timeLbl->setText(QString("%1:%2")
-                .arg(*hour, 2, 10, QChar('0'))
-                .arg(*minute, 2, 10, QChar('0')));
+                .arg(state->hour, 2, 10, QChar('0'))
+                .arg(state->minute, 2, 10, QChar('0')));
         };
         refreshTime();
 
@@ -588,33 +618,46 @@ private:
         };
 
         col->addWidget(timeLbl);
-        col->addWidget(makeSpin("Hour",   hour,   24, 1));
-        col->addWidget(makeSpin("Minute", minute, 60, 5));
+        col->addWidget(makeSpin("Hour",   &state->hour,   24, 1));
+        col->addWidget(makeSpin("Minute", &state->minute, 60, 1));
 
         // title entry
         QLineEdit *name = new QLineEdit;
         name->setPlaceholderText("Alarm title (optional)");
+        if (editing) name->setText(original.title);
         name->setFixedSize(CARD_WIDTH, 80);
         name->setStyleSheet(
             "QLineEdit { background:#303030; color:white; font-size:26px;"
             " border:3px dashed #777; border-radius:12px; padding:0 18px; }");
         col->addWidget(name, 0, Qt::AlignHCenter);
 
-        // sound picker
-        QString *sound = new QString;
-        QPushButton *sndBtn = new QPushButton(soundButtonText(""));
+        // sound picker; an existing custom sound can also be reset to default
+        QPushButton *sndBtn = new QPushButton(soundButtonText(state->sound));
         sndBtn->setFixedSize(CARD_WIDTH, 80);
         sndBtn->setStyleSheet(bigButtonStyle() +
                               "QPushButton { font-size:26px; }");
+        QPushButton *defaultSound = new QPushButton("↩  Use Default Sound");
+        defaultSound->setFixedSize(CARD_WIDTH, 64);
+        defaultSound->setStyleSheet(bigButtonStyle() +
+                                    "QPushButton { font-size:24px; }");
         QObject::connect(sndBtn, &QPushButton::clicked,
-            [this, sound, sndBtn]() {
+            [this, state, sndBtn, defaultSound]() {
                 QString f = pickSoundFile(this);
                 if (!f.isEmpty()) {
-                    *sound = f;
+                    state->sound = f;
                     sndBtn->setText(soundButtonText(f));
+                    defaultSound->show();
                 }
             });
+        QObject::connect(defaultSound, &QPushButton::clicked,
+            [state, sndBtn, defaultSound]() {
+                state->sound.clear();
+                sndBtn->setText(soundButtonText(QString()));
+                defaultSound->hide();
+            });
         col->addWidget(sndBtn, 0, Qt::AlignHCenter);
+        col->addWidget(defaultSound, 0, Qt::AlignHCenter);
+        defaultSound->setVisible(!state->sound.isEmpty());
 
         // daily toggle
         QPushButton *repeat = new QPushButton("🔁  Repeat daily: OFF");
@@ -623,44 +666,81 @@ private:
         repeat->setStyleSheet(bigButtonStyle() +
             "QPushButton:checked { background:#2d5a2d; }");
         QObject::connect(repeat, &QPushButton::toggled,
-            [repeat, daily](bool on) {
-                *daily = on;
+            [repeat, state](bool on) {
+                state->daily = on;
                 repeat->setText(on ? "🔁  Repeat daily: ON"
                                    : "🔁  Repeat daily: OFF");
             });
+        repeat->setChecked(state->daily);
         col->addWidget(repeat, 0, Qt::AlignHCenter);
 
         col->addSpacing(10);
 
         // save
-        QPushButton *save = new QPushButton("✅  Save Alarm");
+        QPushButton *save = new QPushButton(editing ? "✅  Save Changes" : "✅  Save Alarm");
         save->setFixedSize(CARD_WIDTH, 90);
         save->setStyleSheet(bigButtonStyle());
         QObject::connect(save, &QPushButton::clicked,
-            [this, hour, minute, daily, name, sound]() {
+            [this, editIndex, editing, original, state, name]() {
                 QString hm = QString("%1:%2")
-                    .arg(*hour, 2, 10, QChar('0'))
-                    .arg(*minute, 2, 10, QChar('0'));
+                    .arg(state->hour, 2, 10, QChar('0'))
+                    .arg(state->minute, 2, 10, QChar('0'));
 
-                Alarm a;
-                if (*daily) {
-                    a.when = "daily " + hm;
-                } else {
-                    // if the time already passed today, date it for tomorrow
-                    QTime t(*hour, *minute);
-                    QDate d = QDate::currentDate();
-                    if (t <= QTime::currentTime()) d = d.addDays(1);
-                    if (d == QDate::currentDate())
-                        a.when = hm;
-                    else
-                        a.when = d.toString("yyyy-MM-dd") + " " + hm;
+                // Keep the existing body and any unchanged one-shot date.
+                Alarm a = editing ? original : Alarm{};
+                const bool unchangedSchedule = editing
+                    && state->daily == original.daily()
+                    && hm == original.when.right(5);
+                if (!unchangedSchedule) {
+                    if (state->daily) {
+                        a.when = "daily " + hm;
+                    } else {
+                        // Keep a future scheduled date when editing its time.
+                        // Otherwise schedule the next occurrence today/tomorrow.
+                        QTime t(state->hour, state->minute);
+                        QDate d = QDate::currentDate();
+                        if (editing && !original.daily()) {
+                            QDate originalDate = QDate::fromString(
+                                original.when.left(10), "yyyy-MM-dd");
+                            if (originalDate.isValid() && originalDate > d)
+                                d = originalDate;
+                        }
+                        if (d == QDate::currentDate() && t <= QTime::currentTime())
+                            d = d.addDays(1);
+                        if (d == QDate::currentDate())
+                            a.when = hm;
+                        else
+                            a.when = d.toString("yyyy-MM-dd") + " " + hm;
+                    }
                 }
                 a.title = name->text().trimmed();
                 if (a.title.isEmpty()) a.title = "Alarm";
-                a.sound = *sound;
+                a.sound = state->sound;
 
                 QList<Alarm> all = loadAlarms();
-                all << a;
+                if (editing) {
+                    // The alarm watcher can change the list while this editor
+                    // is open. Never overwrite a different alarm at that index.
+                    int target = -1;
+                    if (editIndex < all.size()
+                        && all.at(editIndex).toLine() == original.toLine()) {
+                        target = editIndex;
+                    } else {
+                        for (int i = 0; i < all.size(); ++i) {
+                            if (all.at(i).toLine() == original.toLine()) {
+                                target = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (target < 0) {
+                        openPage(makeAlarmsPage());
+                        return;
+                    }
+                    all[target] = a;
+                } else {
+                    all << a;
+                }
                 saveAlarms(all);
                 openPage(makeAlarmsPage());
             });
