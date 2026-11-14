@@ -38,10 +38,13 @@
   #gameCanvas { display:block; width:100%; height:100%; touch-action:none; -webkit-touch-callout:none; }
   .hint { text-align:center; font-size:12px; color:var(--muted); line-height:1.45; min-height:18px; flex:none; }
   /* Diagnostic strip stays outside the playing field, including fullscreen. */
-  .performance-strip { display:none; flex:none; min-height:23px; padding:3px 8px; border:1px solid var(--edge); border-radius:7px;
-    background:var(--panel); color:#cbd5e1; font:600 clamp(9px,1.35vw,11px) system-ui,sans-serif;
-    align-items:center; justify-content:center; gap:3px 12px; flex-wrap:wrap; font-variant-numeric:tabular-nums; }
-  .performance-strip.visible { display:flex; }
+  .performance-strip { display:none; flex:none; min-height:42px; padding:4px 6px; border:1px solid var(--edge); border-radius:7px;
+    background:var(--panel); color:#cbd5e1; font:600 clamp(9px,1.15vw,11px) system-ui,sans-serif;
+    grid-template-columns:repeat(5,minmax(0,1fr)); align-items:center; column-gap:5px; row-gap:3px;
+    font-variant-numeric:tabular-nums; }
+  .performance-strip.visible { display:grid; }
+  .performance-strip span { min-width:0; white-space:nowrap; text-align:center; }
+  @media (max-width:900px) { .performance-strip { grid-template-columns:repeat(3,minmax(0,1fr)); min-height:57px; } }
   .performance-strip strong { color:var(--cyan); }
   .performance-strip .slow { color:#fbbf24; }
   .performance-strip .critical { color:#fb7185; }
@@ -162,10 +165,13 @@
   </div>
   <div class="performance-strip" id="performance-strip" aria-live="off">
     <span>FPS <strong id="perf-fps">—</strong></span>
-    <span>Logic <strong id="perf-logic">—</strong></span>
-    <span>Draw <strong id="perf-draw">—</strong></span>
-    <span>Worst <strong id="perf-worst">—</strong></span>
+    <span>Gap peak <strong id="perf-worst">—</strong></span>
+    <span>Logic avg/max <strong id="perf-logic">—</strong></span>
+    <span>Draw avg/max <strong id="perf-draw">—</strong></span>
+    <span>Save peak <strong id="perf-save">—</strong></span>
+    <span>JS stalls <strong id="perf-stalls">—</strong></span>
     <span>Skipped <strong id="perf-skipped">0</strong></span>
+    <span>Canvas resizes <strong id="perf-resizes">0</strong></span>
     <span>Quality <strong id="perf-quality">High</strong></span>
   </div>
   <div class="playfield-row">
@@ -203,7 +209,7 @@
           <div class="toggle" id="toggle-autoquality" role="switch" tabindex="0" aria-checked="true"><span>Automatic graphics quality</span><span class="switch"></span></div>
         </div>
         <div class="row"><div class="toggle" id="toggle-perfmeter" role="switch" tabindex="0" aria-checked="true"><span>Show FPS / performance meter</span><span class="switch"></span></div></div>
-        <p class="tiny" style="text-align:left;margin:-10px 0 13px">The performance meter is outside the game. Auto quality reduces rendering resolution and glow during sustained slowdowns without changing the match or controls.</p>
+        <p class="tiny" style="text-align:left;margin:-10px 0 13px">The performance meter is outside the game. Peaks cover the last 10 seconds; JS stalls may be unavailable in some browsers. Auto quality reduces resolution and glow during sustained slowdowns.</p>
         <button class="btn" id="btn-settings-back">Back</button>
         <p class="tiny">Difficulty, paddle size, and winning score apply to the next new match. Colours update immediately. Names apply to the next match.</p>
       </div>
@@ -280,7 +286,7 @@
   var highScores=readJSON('pong.highscores',[]);
   if(!Array.isArray(highScores))highScores=[];
   highScores=highScores.filter(function(r){return r&&Array.isArray(r.names)&&Array.isArray(r.score)&&r.names.length===2&&r.score.length===2;}).slice(0,10);
-  function saveHighScores(){store.set('pong.highscores',JSON.stringify(highScores));}
+  function saveHighScores(){timedStore('pong.highscores',JSON.stringify(highScores));}
   var stats=Object.assign({wins:[0,0],longest:0},readJSON('pong.stats',{}));
   if(!Array.isArray(stats.wins)||stats.wins.length!==2)stats.wins=[0,0];
   var saved=readJSON('pong.match',null);
@@ -297,13 +303,13 @@
   var state='menu',hasMatch=false,prevState='countdown',suspendBall=false,clock=0,countdownCount=3;
   var keys={},padMove=[0,0],padStartDown=[false,false],playerPointers=[null,null],pointerOwners=new Map();
   var mouseSide=-1,elapsedSave=0,lastTime=performance.now(),accumulator=0;
-  var pendingAutosave=false;
+  var checkpointId=null,checkpointUsesIdle=false,pendingMatchSave=false,pendingStatsSave=false;
   var audioContext=null;
   var difficultySpeed={easy:.77,normal:1,hard:1.25,insane:1.52};
   var paddleFactors={small:.17,normal:.225,large:.29};
   function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
   function persistSettings(){store.set('pong.settings',JSON.stringify(settings));}
-  function persistStats(){store.set('pong.stats',JSON.stringify(stats));}
+  function persistStats(){pendingStatsSave=false;timedStore('pong.stats',JSON.stringify(stats));}
   function sound(freq,seconds,type){
     if(!settings.sound||state==='menu')return;
     try{
@@ -323,7 +329,24 @@
   var bgColours='',graphicsLevel=0,rasterDpr=0;
   var performanceStrip=document.getElementById('performance-strip');
   var perf={fps:60,frames:0,sampleStart:performance.now(),logicTotal:0,drawTotal:0,
-    worstMs:0,skipped:0,lastAdjust:0,badSamples:0,goodSamples:0};
+    worstMs:0,logicWorst:0,drawWorst:0,saveWorst:0,resizes:0,
+    skipped:0,lastAdjust:0,badSamples:0,goodSamples:0,
+    longTaskCount:0,longTaskWorst:0,history:[]};
+  var longTaskSupported=false;
+  try {
+    if(typeof PerformanceObserver!=='undefined' && PerformanceObserver.supportedEntryTypes &&
+      PerformanceObserver.supportedEntryTypes.indexOf('longtask')!==-1){
+      var taskObserver=new PerformanceObserver(function(list){
+        list.getEntries().forEach(function(entry){perf.longTaskCount++;perf.longTaskWorst=Math.max(perf.longTaskWorst,entry.duration);});
+      });
+      taskObserver.observe({entryTypes:['longtask']});
+      longTaskSupported=true;
+    }
+  }catch(e){}
+  function timedStore(key,value){
+    var before=performance.now();store.set(key,value);
+    perf.saveWorst=Math.max(perf.saveWorst,performance.now()-before);
+  }
   var qualityNames=['High','Medium','Low'];
   function refreshPerfVisibility(){performanceStrip.classList.toggle('visible',!!settings.showPerf);}
   function drawStaticBackground(){
@@ -355,10 +378,13 @@
     if(canvas.width===pw&&canvas.height===ph&&bgColours===colours)return;
     if(canvas.width!==pw||canvas.height!==ph){
       canvas.width=pw;canvas.height=ph;
-      ctx.setTransform(pw/W,0,0,ph/H,0,0);
       bgCanvas.width=pw;bgCanvas.height=ph;
-      rasterDpr=pw/W;
+      perf.resizes++;
     }
+    // Also update the logical transform when geometry changed but the rounded
+    // raster dimensions happen to be identical.
+    ctx.setTransform(pw/W,0,0,ph/H,0,0);
+    rasterDpr=pw/W;
     drawStaticBackground();
   }
   function fitCanvas(forceGeometry){
@@ -388,15 +414,21 @@
     bgColours='';configureCanvasPixels();
     if(state==='menu'||state==='gameover')draw();
   }
+  var resizeQueued=false;
+  function scheduleCanvasFit(){
+    if(resizeQueued)return;
+    resizeQueued=true;
+    requestAnimationFrame(function(){resizeQueued=false;fitCanvas(false);});
+  }
   function adaptGraphics(timestamp,fps){
     if(!settings.autoQuality||!hasMatch||state==='menu'||document.hidden)return;
-    if(fps<48){perf.badSamples++;perf.goodSamples=0;}
+    if(fps<45){perf.badSamples++;perf.goodSamples=0;}
     else if(fps>57){perf.goodSamples++;perf.badSamples=0;}
     else{perf.badSamples=0;perf.goodSamples=0;}
-    if(perf.badSamples>=2&&graphicsLevel<2&&timestamp-perf.lastAdjust>1500){
+    if(perf.badSamples>=3&&graphicsLevel<2&&timestamp-perf.lastAdjust>2500){
       graphicsLevel++;perf.lastAdjust=timestamp;perf.badSamples=0;
       configureCanvasPixels();
-    }else if(perf.goodSamples>=10&&graphicsLevel>0&&timestamp-perf.lastAdjust>9000){
+    }else if(perf.goodSamples>=12&&graphicsLevel>0&&timestamp-perf.lastAdjust>12000){
       graphicsLevel--;perf.lastAdjust=timestamp;perf.goodSamples=0;
       configureCanvasPixels();
     }
@@ -405,17 +437,31 @@
     var elapsed=timestamp-perf.sampleStart;
     if(elapsed<950)return;
     perf.fps=Math.round(perf.frames*1000/Math.max(1,elapsed));
+    perf.history.push({gap:perf.worstMs,logic:perf.logicWorst,draw:perf.drawWorst,
+      save:perf.saveWorst,resizes:perf.resizes,stalls:perf.longTaskCount,stallMs:perf.longTaskWorst});
+    if(perf.history.length>10)perf.history.shift();
+    var peak={gap:0,logic:0,draw:0,save:0,resizes:0,stalls:0,stallMs:0};
+    perf.history.forEach(function(p){
+      peak.gap=Math.max(peak.gap,p.gap);peak.logic=Math.max(peak.logic,p.logic);
+      peak.draw=Math.max(peak.draw,p.draw);peak.save=Math.max(peak.save,p.save);
+      peak.resizes+=p.resizes;peak.stalls+=p.stalls;peak.stallMs=Math.max(peak.stallMs,p.stallMs);
+    });
     if(settings.showPerf){
       var fpsEl=document.getElementById('perf-fps');fpsEl.textContent=perf.fps;
       fpsEl.className=perf.fps<30?'critical':perf.fps<50?'slow':'';
-      document.getElementById('perf-logic').textContent=(perf.logicTotal/Math.max(1,perf.frames)).toFixed(1)+'ms';
-      document.getElementById('perf-draw').textContent=(perf.drawTotal/Math.max(1,perf.frames)).toFixed(1)+'ms';
-      document.getElementById('perf-worst').textContent=perf.worstMs.toFixed(0)+'ms';
+      document.getElementById('perf-logic').textContent=(perf.logicTotal/Math.max(1,perf.frames)).toFixed(1)+'/'+peak.logic.toFixed(1)+'ms';
+      document.getElementById('perf-draw').textContent=(perf.drawTotal/Math.max(1,perf.frames)).toFixed(1)+'/'+peak.draw.toFixed(1)+'ms';
+      document.getElementById('perf-worst').textContent=peak.gap.toFixed(0)+'ms';
+      document.getElementById('perf-save').textContent=peak.save.toFixed(1)+'ms';
+      document.getElementById('perf-stalls').textContent=longTaskSupported?peak.stalls+' / '+peak.stallMs.toFixed(0)+'ms':'n/a';
       document.getElementById('perf-skipped').textContent=perf.skipped;
+      document.getElementById('perf-resizes').textContent=peak.resizes;
       document.getElementById('perf-quality').textContent=qualityNames[graphicsLevel]+' ('+Math.round(rasterDpr*100)+'%)';
     }
     adaptGraphics(timestamp,perf.fps);
-    perf.frames=0;perf.sampleStart=timestamp;perf.logicTotal=0;perf.drawTotal=0;perf.worstMs=0;
+    perf.frames=0;perf.sampleStart=timestamp;perf.logicTotal=0;perf.drawTotal=0;
+    perf.worstMs=perf.logicWorst=perf.drawWorst=perf.saveWorst=0;
+    perf.longTaskCount=perf.longTaskWorst=perf.resizes=0;
   }
   function centerPaddles(){for(var i=0;i<2;i++){paddles[i].y=(H-paddles[i].h)/2;paddles[i].dy=0;}}
   function centerBall(){ball.x=W/2;ball.y=H/2;ball.vx=0;ball.vy=0;ball.trail=[];ball.rally=0;ball.sticky=null;extraBalls=[];}
@@ -578,18 +624,45 @@
     if(prevState==='point'||pointWinner>=0){pointWinner=-1;centerBall();startCountdown(2,false);}
     else startCountdown(3,Math.abs(ball.vx)>0);
   }
-  function queueAutosave(){
-    if(pendingAutosave)return;
-    pendingAutosave=true;
-    var job=function(){pendingAutosave=false;if(hasMatch&&state==='playing')saveMatch();};
-    if(window.requestIdleCallback)window.requestIdleCallback(job,{timeout:1500});
-    else window.setTimeout(job,80);
+  function cancelCheckpoint(){
+    if(checkpointId===null)return;
+    if(checkpointUsesIdle&&window.cancelIdleCallback)window.cancelIdleCallback(checkpointId);
+    else window.clearTimeout(checkpointId);
+    checkpointId=null;
   }
+  function queueCheckpoint(matchDue,statsDue){
+    if(matchDue)pendingMatchSave=true;
+    if(statsDue)pendingStatsSave=true;
+    if(checkpointId!==null)return;
+    function run(deadline){
+      checkpointId=null;
+      // A synchronous storage write at the very end of the browser's idle
+      // window can cost another rendered frame, so retry when practical.
+      if(deadline&&!deadline.didTimeout&&deadline.timeRemaining()<8){
+        queueCheckpoint(false,false);return;
+      }
+      if(pendingMatchSave&&hasMatch)saveMatch();
+      else if(pendingStatsSave)persistStats();
+      pendingMatchSave=false;
+    }
+    if(typeof window.requestIdleCallback==='function'){
+      checkpointUsesIdle=true;
+      checkpointId=window.requestIdleCallback(run,{timeout:6000});
+    }else{
+      checkpointUsesIdle=false;
+      checkpointId=window.setTimeout(run,350);
+    }
+  }
+  function queueAutosave(){queueCheckpoint(true,false);}
   function saveMatch(){
+    cancelCheckpoint();pendingMatchSave=false;
+    if(pendingStatsSave)persistStats();
     if(!hasMatch)return;
+    var started=performance.now();
     saved={v:3,rules:Object.assign({},matchRules),names:matchNames.slice(),score:score.slice(),serveDir:serveDir,pointWinner:pointWinner,paddles:paddles.map(function(p){return (p.y+p.h/2)/H;}),
       ball:saveBall(ball),extraBalls:extraBalls.map(saveBall),effects:Object.assign({},effects)};
-    store.set('pong.match',JSON.stringify(saved));
+    timedStore('pong.match',JSON.stringify(saved));
+    perf.saveWorst=Math.max(perf.saveWorst,performance.now()-started);
   }
   function recordHighScore(winner){
     highScores.push({names:matchNames.slice(),score:score.slice(),winner:winner,difficulty:matchRules.difficulty,date:Date.now()});
@@ -605,6 +678,7 @@
     return matchRules.winByTwo&&score[leader]-score[1-leader]<2?-1:leader;
   }
   function endMatch(winner){
+    cancelCheckpoint();pendingMatchSave=false;
     finishEffect(true);state='gameover';hasMatch=false;store.remove('pong.match');saved=null;
     stats.wins[winner]++;stats.longest=Math.max(stats.longest,ball.rally);persistStats();recordHighScore(winner);
     document.getElementById('winner-title').textContent=matchNames[winner]+' Wins!';
@@ -617,25 +691,25 @@
     // In multiball, every missed ball awards a separate point. Keep every
     // remaining ball in play (even when the winning score has been reached).
     score[winner]++;pointWinner=winner;serveDir=winner===0?1:-1;
-    stats.longest=Math.max(stats.longest,scoredBall.rally||0);persistStats();
+    stats.longest=Math.max(stats.longest,scoredBall.rally||0);queueCheckpoint(false,true);
     sound(winner===0?560:460,.19,'triangle');updateHUD();
     if(effects.phase==='active'&&effects.type==='multi'){
       if(scoredBall===ball){
         if(extraBalls.length){
           var next=extraBalls.shift();
           Object.assign(ball,next); // Promote a surviving ball as the main ball.
-          saveMatch();return;
+          queueAutosave();return;
         }
       }else{
         var idx=extraBalls.indexOf(scoredBall);
-        if(idx!==-1){extraBalls.splice(idx,1);saveMatch();return;}
+        if(idx!==-1){extraBalls.splice(idx,1);queueAutosave();return;}
       }
       // No balls remain: now, and only now, decide the point/match.
     }
     if(effects.phase==='active'||effects.phase==='warning')finishEffect(true);
     var winning=matchWinner();
     if(winning>=0){endMatch(winning);return;}
-    state='point';clock=0;saveMatch();
+    state='point';clock=0;queueAutosave();
   }
   function gamepadInput(){
     if(!navigator.getGamepads)return;
@@ -733,7 +807,7 @@
         updateBall(currentBalls[k],dt);
       }
       elapsedSave+=dt;
-      if(elapsedSave>=5){elapsedSave=0;queueAutosave();}
+      if(elapsedSave>=12){elapsedSave=0;queueAutosave();}
     }
   }
   function roundedRect(x,y,w,h,r){
@@ -798,24 +872,40 @@
       label('POINT · PLAYER '+(pointWinner+1),36,paddles[pointWinner].colour,H/2,Math.min(1,(1.25-clock)*3));
     }
   }
+  // 120 Hz simulation: a 100 ms frame gap requires twelve small physics ticks.
+  // Keep bounded catch-up work, but don't discard ticks merely because one
+  // requestAnimationFrame was delayed by normal browser scheduling.
+  var FIXED_STEP=1/120,MAX_CATCHUP=0.20,MAX_STEPS=24,SIM_BUDGET_MS=8;
   function loop(t){
-    var raw=Math.max(0,(t-lastTime)/1000);lastTime=t;
-    // Keep up with short browser stalls. The original 50ms clamp and 7-step
-    // limit caused literal slow motion whenever rendering fell below ~20fps.
-    // A long tab suspension is not simulated in fast-forward.
-    if(raw>.5){accumulator=0;raw=0;}
-    var dt=Math.min(raw,.12),step=1/120;
-    if(raw>.12)perf.skipped+=Math.floor((raw-.12)/step);
+    var rawMs=Math.max(0,t-lastTime);lastTime=t;
+    if(rawMs>750||document.hidden){accumulator=0;rawMs=0;}
     var a=performance.now();
-    gamepadInput();accumulator+=dt;
-    var steps=0;
-    while(accumulator>=step&&steps<15){update(step);accumulator-=step;steps++;}
-    if(accumulator>=step){perf.skipped+=Math.floor(accumulator/step);accumulator=accumulator%step;}
+    gamepadInput();
+    if(state==='menu'||state==='gameover'||state==='exited')accumulator=0;
+    else {
+      accumulator+=Math.min(rawMs/1000,MAX_CATCHUP);
+      if(rawMs>MAX_CATCHUP*1000)perf.skipped+=Math.floor((rawMs-MAX_CATCHUP*1000)/(FIXED_STEP*1000));
+      var steps=0;
+      while(accumulator>=FIXED_STEP&&steps<MAX_STEPS){
+        update(FIXED_STEP);accumulator-=FIXED_STEP;steps++;
+        if(state==='menu'||state==='gameover'||state==='exited'){accumulator=0;break;}
+        if(steps>=5&&performance.now()-a>SIM_BUDGET_MS)break;
+      }
+      // Hold up to four pending ticks for the following frame; discard any
+      // bigger backlog so the simulation cannot enter a catch-up death spiral.
+      if(accumulator>=FIXED_STEP*5){
+        var carry=Math.min(accumulator,FIXED_STEP*4);
+        perf.skipped+=Math.floor((accumulator-carry)/FIXED_STEP);
+        accumulator=carry;
+      }
+    }
     var b=performance.now();
-    if(state!=='menu'&&state!=='gameover')draw();
+    if(state!=='menu'&&state!=='gameover'&&state!=='exited')draw();
     var c=performance.now();
     perf.frames++;perf.logicTotal+=b-a;perf.drawTotal+=c-b;
-    if(raw*1000>perf.worstMs)perf.worstMs=raw*1000;
+    perf.logicWorst=Math.max(perf.logicWorst,b-a);
+    perf.drawWorst=Math.max(perf.drawWorst,c-b);
+    perf.worstMs=Math.max(perf.worstMs,rawMs);
     showPerformance(t);
     requestAnimationFrame(loop);
   }
@@ -902,7 +992,10 @@
   document.addEventListener('keyup',function(e){delete keys[e.code];});
   window.addEventListener('blur',function(){keys={};if(playingSurface())openMenu();});
   document.addEventListener('visibilitychange',function(){if(document.hidden&&playingSurface())openMenu();});
-  window.addEventListener('pagehide',function(){saveMatch();});
+  window.addEventListener('pagehide',function(){
+    if(pendingStatsSave)persistStats();
+    saveMatch();
+  });
   function requestLandscape(){
     // Browser support is restricted to fullscreen on some platforms.
     // The portrait CSS fallback works even when this is rejected.
@@ -1053,8 +1146,10 @@
     });
     refreshPerfVisibility();
   }
-  if(window.ResizeObserver)new ResizeObserver(fitCanvas).observe(arena);
-  window.addEventListener('resize',fitCanvas);
+  // ResizeObserver receives a nonempty entries array and resize events pass
+  // an Event. Neither should be mistaken for the forceGeometry=true flag.
+  if(window.ResizeObserver)new ResizeObserver(scheduleCanvasFit).observe(arena);
+  window.addEventListener('resize',scheduleCanvasFit);
   fitCanvas();centerPaddles();centerBall();
   updateHUD();refreshSettings();refreshMain();showPanel('main');
   draw();requestAnimationFrame(loop);
