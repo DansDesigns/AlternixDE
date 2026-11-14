@@ -11,16 +11,17 @@
   html,body { margin:0; width:100%; height:100%; overflow:hidden; }
   body { background:var(--bg); color:var(--ink); font:15px 'Segoe UI',system-ui,sans-serif; touch-action:none; }
   button { font:inherit; -webkit-tap-highlight-color:transparent; }
-  .game-container { width:min(1200px,100%); height:100vh; height:100dvh; max-height:960px; margin:auto; display:flex; flex-direction:column; gap:10px; padding:12px 12px max(9px,env(safe-area-inset-bottom)); user-select:none; -webkit-user-select:none; }
-  .topbar { display:grid; grid-template-columns:1fr auto; align-items:center; gap:10px; min-height:52px; flex:none; }
+  .game-container { width:100vw; width:100dvw; height:100vh; height:100dvh; margin:0; display:flex; flex-direction:column; gap:6px; padding:6px max(6px,env(safe-area-inset-right)) max(6px,env(safe-area-inset-bottom)) max(6px,env(safe-area-inset-left)); user-select:none; -webkit-user-select:none; }
+  .topbar { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:6px; min-height:48px; flex:none; }
   .hud { display:flex; align-items:center; justify-content:center; gap:clamp(8px,2vw,22px); min-width:0; height:52px; padding:6px 14px; border-radius:9px; background:var(--panel); border:1px solid var(--edge); }
   .player-hud { display:flex; align-items:center; gap:10px; min-width:0; }
   .player-hud.right { flex-direction:row-reverse; }
-  .player-badge { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700; white-space:nowrap; }
+  .player-badge { display:flex; align-items:center; gap:7px; font-size:13px; font-weight:700; white-space:nowrap; min-width:0; }
+  .player-badge .player-label { max-width:clamp(52px,15vw,200px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .player-dot { width:10px; height:10px; border-radius:50%; flex:none; background:var(--player); box-shadow:0 0 9px var(--player); }
   .hud-score { font-size:29px; font-weight:800; font-variant-numeric:tabular-nums; line-height:1; color:var(--player); min-width:26px; text-align:center; }
   .hud-vs { text-align:center; color:#64748b; font-size:11px; font-weight:700; letter-spacing:2px; white-space:nowrap; }
-  .top-actions { display:flex; gap:7px; }
+  /* Menu is left of the scoreboard; fullscreen is right of it. */
   .icon-button { min-width:48px; height:48px; padding:0 12px; border:1px solid var(--edge); border-radius:9px; background:var(--panel); color:var(--ink); display:flex; align-items:center; justify-content:center; gap:7px; cursor:pointer; font-size:13px; font-weight:700; }
   .icon-button svg { width:20px; height:20px; flex:none; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
   .icon-button:hover { border-color:var(--cyan); background:#263449; }
@@ -71,6 +72,15 @@
   .stats { display:flex; justify-content:space-between; padding:10px 14px; background:var(--panel); border:1px solid var(--edge); border-radius:8px; margin-bottom:9px; }
   .stats b { color:var(--cyan); }
   .tiny { font-size:11px; color:#64748b; line-height:1.5; margin-top:10px; }
+  .name-input { width:100%; min-width:0; color:#f8fafc; background:#0b1120; border:1px solid var(--edge); border-radius:7px; padding:10px 11px; font:600 15px 'Segoe UI',system-ui,sans-serif; outline:none; touch-action:manipulation; user-select:text; -webkit-user-select:text; }
+  .name-input:focus { border-color:var(--cyan); }
+  .record-list { list-style:none; padding:0; margin:0 0 12px; text-align:left; }
+  .record-list li { padding:9px 10px; margin-bottom:7px; border:1px solid var(--edge); border-radius:8px; background:rgba(30,41,59,.8); }
+  .record-list .record-head { display:flex; align-items:center; justify-content:space-between; gap:9px; font-size:14px; font-weight:750; }
+  .record-list .record-head span:first-child { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .record-list .record-score { color:var(--cyan); flex:none; font-variant-numeric:tabular-nums; }
+  .record-list .record-sub { margin-top:3px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+  .record-empty { color:var(--muted); text-align:center; padding:18px 6px; }
   @media (max-width:580px) {
     .game-container { padding:7px 7px max(7px,env(safe-area-inset-bottom)); gap:7px; }
     .topbar { gap:6px; }
@@ -111,32 +121,36 @@
   @media (max-height:300px) {
     .touch-zone small { display:none; }
   }
+  /* Portrait browsers are rendered as a full-screen landscape game even if
+     the platform refuses the Fullscreen Screen Orientation API. */
+  @media (orientation:portrait) {
+    .game-container { position:fixed; top:0; left:100vw; width:100dvh; height:100dvw; transform-origin:top left; transform:rotate(90deg); max-width:none; max-height:none; }
+    .player-badge .player-label { max-width:clamp(45px,13vh,170px); }
+  }
 </style>
 </head>
 <body>
 <div class="game-container">
   <div class="topbar">
+    <button class="icon-button" id="top-menu" title="Menu / Pause" aria-label="Open menu">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="action-label">Menu</span>
+    </button>
     <div class="hud" aria-live="polite">
       <div class="player-hud" style="--player:var(--cyan)">
-        <div class="player-badge"><span class="player-dot" id="dot-1"></span><span>PLAYER 1</span></div>
+        <div class="player-badge"><span class="player-dot" id="dot-1"></span><span class="player-label" id="hud-name-1">PLAYER 1</span></div>
         <span class="hud-score" id="score-1">0</span>
       </div>
       <div class="hud-vs" id="match-status">FIRST TO 7</div>
       <div class="player-hud right" style="--player:var(--pink)">
-        <div class="player-badge"><span class="player-dot" id="dot-2"></span><span>PLAYER 2</span></div>
+        <div class="player-badge"><span class="player-dot" id="dot-2"></span><span class="player-label" id="hud-name-2">PLAYER 2</span></div>
         <span class="hud-score" id="score-2">0</span>
       </div>
     </div>
-    <div class="top-actions">
-      <button class="icon-button" id="top-menu" title="Menu / Pause" aria-label="Open menu">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="action-label">Menu</span>
-      </button>
-      <button class="icon-button" id="top-fullscreen" title="Toggle fullscreen" aria-label="Toggle fullscreen">
-        <svg id="fs-open-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/></svg>
-        <svg id="fs-close-icon" viewBox="0 0 24 24" aria-hidden="true" style="display:none"><path d="M3 9h6V3M21 9h-6V3M3 15h6v6M21 15h-6v6"/></svg>
-        <span class="action-label" id="fs-text">Fullscreen</span>
-      </button>
-    </div>
+    <button class="icon-button" id="top-fullscreen" title="Toggle fullscreen" aria-label="Toggle fullscreen">
+      <svg id="fs-open-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5"/></svg>
+      <svg id="fs-close-icon" viewBox="0 0 24 24" aria-hidden="true" style="display:none"><path d="M3 9h6V3M21 16v5h-5M3 15h6v6M21 9h-6V3"/></svg>
+      <span class="action-label" id="fs-text">Fullscreen</span>
+    </button>
   </div>
   <div class="playfield-row">
     <div class="touch-zone left" id="touch-zone-1" role="group" aria-label="Player 1 touch area: drag up or down to move the left paddle"><span><strong>P1</strong><small>TOUCH AREA</small></span></div>
@@ -150,12 +164,15 @@
         <button class="btn" id="btn-new">New Match</button>
         <button class="btn" id="btn-settings">Settings</button>
         <button class="btn" id="btn-how">How to Play</button>
+        <button class="btn" id="btn-scores">High Scores / Versus Records</button>
         <button class="btn" id="btn-stats">Match Statistics</button>
         <button class="btn" id="btn-exit">Exit</button>
         <p class="tiny">Esc / P: menu · F: fullscreen</p>
       </div>
       <div class="panel hidden" id="panel-settings">
         <h2>Settings</h2>
+        <div class="row"><div class="row-label">Player 1 name</div><input class="name-input" id="player-name-1" type="text" maxlength="16" placeholder="Player 1" autocomplete="off" spellcheck="false"></div>
+        <div class="row"><div class="row-label">Player 2 name</div><input class="name-input" id="player-name-2" type="text" maxlength="16" placeholder="Player 2" autocomplete="off" spellcheck="false"></div>
         <div class="row"><div class="row-label">Difficulty</div><div class="seg" id="difficulty-options"></div></div>
         <div class="row"><div class="row-label">Points to win</div><div class="seg" id="points-options"></div></div>
         <div class="row"><div class="row-label">Paddle size</div><div class="seg" id="paddle-options"></div></div>
@@ -163,11 +180,11 @@
         <div class="row"><div class="row-label">Player 2 colour</div><div class="swatches" id="colours-2"></div></div>
         <div class="row"><div class="toggle" id="toggle-winby2" role="switch" tabindex="0" aria-checked="true"><span>Win by 2 points</span><span class="switch"></span></div></div>
         <div class="row"><div class="toggle" id="toggle-random" role="switch" tabindex="0" aria-checked="true"><span>Random effects</span><span class="switch"></span></div></div>
-        <p class="tiny" style="text-align:left;margin:-10px 0 14px">Both paddles flash for 2 seconds before a random 8-second effect: multiball, sticky paddles, speed boost or paddle shrink.</p>
+        <p class="tiny" style="text-align:left;margin:-10px 0 14px">Both paddles flash for 2 seconds before an effect. Sticky, speedup and shrink last 8 seconds; multiball lasts until every ball scores.</p>
         <div class="row"><div class="toggle" id="toggle-sound" role="switch" tabindex="0" aria-checked="true"><span>Sound effects</span><span class="switch"></span></div></div>
         <div class="row"><div class="toggle" id="toggle-startfs" role="switch" tabindex="0" aria-checked="false"><span>Start in fullscreen</span><span class="switch"></span></div></div>
         <button class="btn" id="btn-settings-back">Back</button>
-        <p class="tiny">Difficulty, paddle size, and winning score apply to the next new match. Colours update immediately.</p>
+        <p class="tiny">Difficulty, paddle size, and winning score apply to the next new match. Colours update immediately. Names apply to the next match.</p>
       </div>
       <div class="panel hidden" id="panel-how">
         <h2>How to Play</h2>
@@ -175,10 +192,17 @@
           <p><strong>Two-player touchscreen:</strong> Player 1 drags up/down in the left touch area; Player 2 uses the right touch area. Both fingers work at the same time. You can also drag directly within your half of the playfield. The outside touch areas move paddles without obscuring the ball.</p>
           <p><strong>Keyboard:</strong> Player 1 uses <strong>W / S</strong>; Player 2 uses <strong>↑ / ↓</strong>. Two connected gamepads can also use their left sticks or D-pads.</p>
           <p><strong>Rules:</strong> Get the ball past the other paddle to score. Paddle contact angle changes the return. First player to the selected score wins (by two, if enabled).</p>
-          <p><strong>Random effects:</strong> Both paddles flash for two seconds before one of four temporary effects starts. <strong>Multiball</strong> adds two balls (the first ball past either paddle scores the point), <strong>Sticky</strong> catches and automatically releases balls, <strong>Speedup</strong> makes all balls faster, and <strong>Shrink</strong> makes both paddles shorter. Effects last eight seconds and are fair to both players. You can switch them off in Settings.</p>
+          <p><strong>Random effects:</strong> Both paddles flash for two seconds before one of four temporary effects starts. <strong>Multiball</strong> adds two balls (Every goal scores separately; the remaining balls keep playing), <strong>Sticky</strong> catches and automatically releases balls, <strong>Speedup</strong> makes all balls faster, and <strong>Shrink</strong> makes both paddles shorter. Multiball continues until every ball has scored; the other effects last eight seconds. All effects apply to both players. You can switch them off in Settings.</p>
           <p><strong>Game controls:</strong> Menu button or Esc / P pauses. Fullscreen button or F toggles fullscreen.</p>
         </div>
         <button class="btn" id="btn-how-back">Back</button>
+      </div>
+      <div class="panel hidden" id="panel-scores">
+        <h2>High Scores</h2>
+        <p class="sub">Completed versus matches · ranked by winning score</p>
+        <ol class="record-list" id="highscores-list"></ol>
+        <button class="btn" id="btn-clear-scores">Clear High Scores</button>
+        <button class="btn" id="btn-scores-back">Back</button>
       </div>
       <div class="panel hidden" id="panel-stats">
         <h2>Match Statistics</h2>
@@ -212,9 +236,9 @@
   var canvas=document.getElementById('gameCanvas'), ctx=canvas.getContext('2d');
   var arena=document.getElementById('arena'), menu=document.getElementById('menu');
   var touchZones=[document.getElementById('touch-zone-1'),document.getElementById('touch-zone-2')];
-  var panels={main:document.getElementById('panel-main'),settings:document.getElementById('panel-settings'),how:document.getElementById('panel-how'),stats:document.getElementById('panel-stats'),over:document.getElementById('panel-over'),exit:document.getElementById('panel-exit')};
+  var panels={main:document.getElementById('panel-main'),settings:document.getElementById('panel-settings'),how:document.getElementById('panel-how'),scores:document.getElementById('panel-scores'),stats:document.getElementById('panel-stats'),over:document.getElementById('panel-over'),exit:document.getElementById('panel-exit')};
   var palette=['#38bdf8','#f472b6','#4ade80','#fbbf24','#fb7185','#a78bfa','#2dd4bf','#f97316'];
-  var defaults={difficulty:'normal',points:7,paddle:'normal',p1Colour:palette[0],p2Colour:palette[1],winByTwo:true,randomEffects:true,sound:true,startFullscreen:false};
+  var defaults={difficulty:'normal',points:7,paddle:'normal',p1Colour:palette[0],p2Colour:palette[1],p1Name:'Player 1',p2Name:'Player 2',winByTwo:true,randomEffects:true,sound:true,startFullscreen:false};
   var store=(function(){var fallback={},enabled=true;try{localStorage.setItem('pong.test','1');localStorage.removeItem('pong.test');}catch(e){enabled=false;}return{
     get:function(key){try{return enabled?localStorage.getItem(key):(fallback[key]||null);}catch(e){return fallback[key]||null;}},
     set:function(key,value){try{if(enabled)localStorage.setItem(key,value);else fallback[key]=value;}catch(e){fallback[key]=value;}},
@@ -227,6 +251,14 @@
   if(!['small','normal','large'].includes(settings.paddle))settings.paddle='normal';
   if(!palette.includes(settings.p1Colour))settings.p1Colour=palette[0];
   if(!palette.includes(settings.p2Colour)||settings.p2Colour===settings.p1Colour)settings.p2Colour=palette[1];
+  function cleanName(s,i){return String(s||'').trim().replace(/[\x00-\x1f\x7f]/g,'').slice(0,16)||'Player '+(i+1);}
+  settings.p1Name=cleanName(settings.p1Name,0);settings.p2Name=cleanName(settings.p2Name,1);
+  function configuredNames(){return [cleanName(settings.p1Name,0),cleanName(settings.p2Name,1)];}
+  var matchNames=configuredNames();
+  var highScores=readJSON('pong.highscores',[]);
+  if(!Array.isArray(highScores))highScores=[];
+  highScores=highScores.filter(function(r){return r&&Array.isArray(r.names)&&Array.isArray(r.score)&&r.names.length===2&&r.score.length===2;}).slice(0,10);
+  function saveHighScores(){store.set('pong.highscores',JSON.stringify(highScores));}
   var stats=Object.assign({wins:[0,0],longest:0},readJSON('pong.stats',{}));
   if(!Array.isArray(stats.wins)||stats.wins.length!==2)stats.wins=[0,0];
   var saved=readJSON('pong.match',null);
@@ -263,11 +295,13 @@
     }catch(e){}
   }
   function fitCanvas(){
-    var rect=arena.getBoundingClientRect(),nw=Math.max(1,rect.width-4),nh=Math.max(1,rect.height-4);
+    var rect=arena.getBoundingClientRect(),portrait=window.matchMedia('(orientation: portrait)').matches;
+    var nw=Math.max(1,(portrait?rect.height:rect.width)-4),nh=Math.max(1,(portrait?rect.width:rect.height)-4);
     if(nw<20||nh<20)return;
     var oldW=W,oldH=H;
     W=nw;H=nh;
-    var dpr=clamp(window.devicePixelRatio||1,1,2.5);
+    // Bound total pixels on large 4K/8K monitors without leaving unused space.
+    var dpr=clamp(window.devicePixelRatio||1,1,Math.max(1,Math.min(2.5,Math.sqrt(6000000/(W*H)))));
     canvas.width=Math.round(W*dpr);canvas.height=Math.round(H*dpr);
     ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);
     scale=clamp(Math.min(W/850,H/540),.6,1.5);
@@ -354,8 +388,8 @@
       effects.timer-=dt;
       if(effects.timer<=0)activateEffect();
     }else if(effects.phase==='active'){
-      effects.timer-=dt;
-      if(effects.timer<=0)finishEffect(false);
+      if(effects.type!=='multi')effects.timer-=dt;
+      if(effects.timer<=0&&effects.type!=='multi')finishEffect(false);
     }
   }
   function saveBall(b){return {x:b.x/W,y:b.y/H,vx:b.vx/W,vy:b.vy/H,rally:b.rally,
@@ -366,6 +400,7 @@
     b.rally=Number(src.rally)||0;b.trail=[];
     b.sticky=src.sticky?{side:src.sticky.side===1?1:0,time:clamp(Number(src.sticky.time)||0,0,1),offset:(Number(src.sticky.offset)||0)*H}:null;
   }
+  function colourRGBA(hex,alpha){var raw=hex.replace('#','');return 'rgba('+parseInt(raw.slice(0,2),16)+','+parseInt(raw.slice(2,4),16)+','+parseInt(raw.slice(4,6),16)+','+alpha+')';}
   function updateHUD(){
     document.getElementById('score-1').textContent=score[0];document.getElementById('score-2').textContent=score[1];
     document.getElementById('match-status').textContent='FIRST TO '+(hasMatch?matchRules.points:settings.points);
@@ -376,6 +411,13 @@
     document.querySelectorAll('.player-hud')[0].style.setProperty('--player',settings.p1Colour);
     document.querySelectorAll('.player-hud')[1].style.setProperty('--player',settings.p2Colour);
     paddles[0].colour=settings.p1Colour;paddles[1].colour=settings.p2Colour;
+    document.getElementById('hud-name-1').textContent=hasMatch?matchNames[0]:cleanName(settings.p1Name,0);
+    document.getElementById('hud-name-2').textContent=hasMatch?matchNames[1]:cleanName(settings.p2Name,1);
+    touchZones.forEach(function(zone,i){
+      var hex=i===0?settings.p1Colour:settings.p2Colour;
+      zone.style.setProperty('--zone-color',hex);
+      zone.style.setProperty('--zone-rgb',parseInt(hex.slice(1,3),16)+','+parseInt(hex.slice(3,5),16)+','+parseInt(hex.slice(5,7),16));
+    });
   }
   function clearPointers(){
     pointerOwners.clear();playerPointers=[null,null];mouseSide=-1;
@@ -401,7 +443,7 @@
     if(Math.abs(ball.vy)<speed*.13)ball.vy=(Math.random()<.5?-1:1)*speed*.13;
   }
   function resetMatch(){
-    matchRules=configuredRules();score=[0,0];hasMatch=true;pointWinner=-1;lastWinner=-1;
+    matchRules=configuredRules();matchNames=configuredNames();score=[0,0];hasMatch=true;pointWinner=-1;lastWinner=-1;
     resetEffects();fitCanvas();
     serveDir=Math.random()<.5?-1:1;centerPaddles();centerBall();updateHUD();saveMatch();startCountdown(3,false);
   }
@@ -409,7 +451,8 @@
   function newMatch(){clearPointers();saved=null;store.remove('pong.match');resetMatch();hideMenu();maybeFullscreen();}
   function restoreMatch(data){
     if(!data||!Array.isArray(data.score)||data.score.length!==2)return false;
-    matchRules=Object.assign(configuredRules(),data.rules||{});hasMatch=true;
+    matchRules=Object.assign(configuredRules(),data.rules||{});
+    matchNames=Array.isArray(data.names)&&data.names.length===2?data.names.map(cleanName):configuredNames();hasMatch=true;
     resetEffects();
     if(data.effects&&settings.randomEffects){
       var d=data.effects;
@@ -440,26 +483,54 @@
   }
   function saveMatch(){
     if(!hasMatch)return;
-    saved={v:2,rules:Object.assign({},matchRules),score:score.slice(),serveDir:serveDir,pointWinner:pointWinner,paddles:paddles.map(function(p){return (p.y+p.h/2)/H;}),
+    saved={v:3,rules:Object.assign({},matchRules),names:matchNames.slice(),score:score.slice(),serveDir:serveDir,pointWinner:pointWinner,paddles:paddles.map(function(p){return (p.y+p.h/2)/H;}),
       ball:saveBall(ball),extraBalls:extraBalls.map(saveBall),effects:Object.assign({},effects)};
     store.set('pong.match',JSON.stringify(saved));
   }
+  function recordHighScore(winner){
+    highScores.push({names:matchNames.slice(),score:score.slice(),winner:winner,difficulty:matchRules.difficulty,date:Date.now()});
+    highScores.sort(function(a,b){
+      var as=Math.max.apply(null,a.score),bs=Math.max.apply(null,b.score);
+      return bs-as||Math.abs(b.score[0]-b.score[1])-Math.abs(a.score[0]-a.score[1])||b.date-a.date;
+    });
+    highScores=highScores.slice(0,10);saveHighScores();
+  }
+  function matchWinner(){
+    var leader=score[0]>score[1]?0:score[1]>score[0]?1:-1;
+    if(leader<0||score[leader]<matchRules.points)return -1;
+    return matchRules.winByTwo&&score[leader]-score[1-leader]<2?-1:leader;
+  }
   function endMatch(winner){
     finishEffect(true);state='gameover';hasMatch=false;store.remove('pong.match');saved=null;
-    stats.wins[winner]++;stats.longest=Math.max(stats.longest,ball.rally);persistStats();
-    document.getElementById('winner-title').textContent='Player '+(winner+1)+' Wins!';
+    stats.wins[winner]++;stats.longest=Math.max(stats.longest,ball.rally);persistStats();recordHighScore(winner);
+    document.getElementById('winner-title').textContent=matchNames[winner]+' Wins!';
     document.getElementById('winner-title').style.color=paddles[winner].colour;
     document.getElementById('final-score').textContent=score[0]+' — '+score[1];
-    document.getElementById('over-sub').textContent='First to '+matchRules.points+(matchRules.winByTwo?' · win by 2':'')+' · '+(ball.rally)+' hits in the last rally';
+    document.getElementById('over-sub').textContent=matchNames[0]+' vs '+matchNames[1]+' · First to '+matchRules.points+(matchRules.winByTwo?' · win by 2':'')+' · '+(ball.rally)+' hits in the last rally';
     clearPointers();showPanel('over');
   }
-  function goal(winner){
-    // One missed ball ends the rally, even during multiball. Only one point is awarded.
-    if(effects.phase==='active'||effects.phase==='warning')finishEffect(true);
+  function goal(winner,scoredBall){
+    // In multiball, every missed ball awards a separate point. Keep every
+    // remaining ball in play (even when the winning score has been reached).
     score[winner]++;pointWinner=winner;serveDir=winner===0?1:-1;
-    stats.longest=Math.max(stats.longest,ball.rally);persistStats();
+    stats.longest=Math.max(stats.longest,scoredBall.rally||0);persistStats();
     sound(winner===0?560:460,.19,'triangle');updateHUD();
-    if(score[winner]>=matchRules.points&&(!matchRules.winByTwo||score[winner]-score[1-winner]>=2)){endMatch(winner);return;}
+    if(effects.phase==='active'&&effects.type==='multi'){
+      if(scoredBall===ball){
+        if(extraBalls.length){
+          var next=extraBalls.shift();
+          Object.assign(ball,next); // Promote a surviving ball as the main ball.
+          saveMatch();return;
+        }
+      }else{
+        var idx=extraBalls.indexOf(scoredBall);
+        if(idx!==-1){extraBalls.splice(idx,1);saveMatch();return;}
+      }
+      // No balls remain: now, and only now, decide the point/match.
+    }
+    if(effects.phase==='active'||effects.phase==='warning')finishEffect(true);
+    var winning=matchWinner();
+    if(winning>=0){endMatch(winning);return;}
     state='point';clock=0;saveMatch();
   }
   function gamepadInput(){
@@ -525,8 +596,8 @@
         return;
       }
     }
-    if(b.x+ballRadius<0){goal(1);return;}
-    if(b.x-ballRadius>W){goal(0);return;}
+    if(b.x+ballRadius<0){goal(1,b);return;}
+    if(b.x-ballRadius>W){goal(0,b);return;}
     if(state==='playing'){
       b.trail.push({x:b.x,y:b.y});
       if(b.trail.length>13)b.trail.shift();
@@ -552,7 +623,11 @@
     if(state==='playing'){
       updateEffects(dt);
       var currentBalls=[ball].concat(extraBalls);
-      for(var k=0;k<currentBalls.length&&state==='playing';k++)updateBall(currentBalls[k],dt);
+      for(var k=0;k<currentBalls.length&&state==='playing';k++){
+        // A scored extra ball can be removed (or promoted) during this frame.
+        if(k>0&&extraBalls.indexOf(currentBalls[k])===-1)continue;
+        updateBall(currentBalls[k],dt);
+      }
       elapsedSave+=dt;
       if(elapsedSave>=2){elapsedSave=0;saveMatch();}
     }
@@ -580,8 +655,8 @@
     ctx.clearRect(0,0,W,H);
     ctx.fillStyle='#0f172a';ctx.fillRect(0,0,W,H);
     // Subtle opposing player colours echo the Breakout palette.
-    var l=ctx.createLinearGradient(0,0,W/2,0);l.addColorStop(0,'rgba(56,189,248,.07)');l.addColorStop(1,'rgba(56,189,248,0)');ctx.fillStyle=l;ctx.fillRect(0,0,W/2,H);
-    var r=ctx.createLinearGradient(W,0,W/2,0);r.addColorStop(0,'rgba(244,114,182,.07)');r.addColorStop(1,'rgba(244,114,182,0)');ctx.fillStyle=r;ctx.fillRect(W/2,0,W/2,H);
+    var l=ctx.createLinearGradient(0,0,W/2,0);l.addColorStop(0,colourRGBA(paddles[0].colour,.07));l.addColorStop(1,colourRGBA(paddles[0].colour,0));ctx.fillStyle=l;ctx.fillRect(0,0,W/2,H);
+    var r=ctx.createLinearGradient(W,0,W/2,0);r.addColorStop(0,colourRGBA(paddles[1].colour,.07));r.addColorStop(1,colourRGBA(paddles[1].colour,0));ctx.fillStyle=r;ctx.fillRect(W/2,0,W/2,H);
     ctx.save();ctx.strokeStyle='rgba(148,163,184,.29)';ctx.lineWidth=2;ctx.setLineDash([8,12]);ctx.beginPath();ctx.moveTo(W/2,0);ctx.lineTo(W/2,H);ctx.stroke();ctx.setLineDash([]);
     ctx.beginPath();ctx.ellipse(W/2,H/2,Math.min(W*.15,H*.27),Math.min(W*.15,H*.27),0,0,Math.PI*2);ctx.strokeStyle='rgba(148,163,184,.16)';ctx.stroke();ctx.restore();
     var warning=state==='playing'&&effects.phase==='warning';
@@ -615,7 +690,7 @@
       drawEffectBadge('RANDOM EFFECT IN '+seconds+'s','#fbbf24');
     }else if((state==='playing'||state==='countdown')&&effects.phase==='active'){
       var names={multi:'MULTI-BALL',sticky:'STICKY PADDLES',speed:'SPEEDUP',shrink:'PADDLE SHRINK'};
-      drawEffectBadge(names[effects.type]+' · '+Math.ceil(effects.timer)+'s','#4ade80');
+      drawEffectBadge(effects.type==='multi'?'MULTI-BALL · '+(1+extraBalls.length)+' BALLS':names[effects.type]+' · '+Math.ceil(effects.timer)+'s','#4ade80');
     }
     if(state==='countdown'){
       var n=Math.max(1,countdownCount-Math.floor(clock/.72));
@@ -637,6 +712,11 @@
   // Pointer capture and per-player ownership allow two independent touches.
   function surfaceCoords(event){
     var rect=canvas.getBoundingClientRect();
+    // CSS rotates the *entire* interface by +90deg in portrait. Translate
+    // physical touch positions back into landscape game coordinates.
+    if(window.matchMedia('(orientation: portrait)').matches){
+      return {x:(event.clientY-rect.top)*W/rect.height,y:(rect.right-event.clientX)*H/rect.width};
+    }
     return {x:(event.clientX-rect.left)*W/rect.width,y:(event.clientY-rect.top)*H/rect.height};
   }
   function moveFromPointer(i,event,offset){
@@ -694,6 +774,7 @@
   bindPaddleSurface(touchZones[0],0);
   bindPaddleSurface(touchZones[1],1);
   document.addEventListener('keydown',function(e){
+    if(e.target&&['INPUT','TEXTAREA'].includes(e.target.tagName))return;
     if(e.code==='KeyF'&&!e.repeat){e.preventDefault();toggleFullscreen();return;}
     if(e.code==='Escape'||e.code==='KeyP'){
       e.preventDefault();if(e.repeat)return;
@@ -711,13 +792,24 @@
   window.addEventListener('blur',function(){keys={};if(playingSurface())openMenu();});
   document.addEventListener('visibilitychange',function(){if(document.hidden&&playingSurface())openMenu();});
   window.addEventListener('pagehide',function(){saveMatch();});
+  function requestLandscape(){
+    // Browser support is restricted to fullscreen on some platforms.
+    // The portrait CSS fallback works even when this is rejected.
+    try{
+      if(screen.orientation&&typeof screen.orientation.lock==='function'){
+        var lock=screen.orientation.lock('landscape');
+        if(lock&&lock.catch)lock.catch(function(){});
+      }
+    }catch(e){}
+  }
   function toggleFullscreen(){
     if(document.fullscreenElement||document.webkitFullscreenElement){
       var exit=document.exitFullscreen||document.webkitExitFullscreen;
       if(exit){try{var p=exit.call(document);if(p&&p.catch)p.catch(function(){});}catch(e){}}
+      try{if(screen.orientation&&screen.orientation.unlock)screen.orientation.unlock();}catch(e){}
     }else{
       var req=document.documentElement.requestFullscreen||document.documentElement.webkitRequestFullscreen;
-      if(req){try{var p=req.call(document.documentElement);if(p&&p.catch)p.catch(function(){});}catch(e){}}
+      if(req){try{var p=req.call(document.documentElement);if(p&&p.then)p.then(requestLandscape).catch(function(){});else requestLandscape();}catch(e){}}
     }
   }
   function updateFullscreenButton(){
@@ -727,6 +819,7 @@
     document.getElementById('fs-text').textContent=fs?'Windowed':'Fullscreen';
     document.getElementById('top-fullscreen').title=fs?'Exit fullscreen':'Enter fullscreen';
     document.getElementById('top-fullscreen').setAttribute('aria-label',fs?'Exit fullscreen':'Enter fullscreen');
+    if(fs)requestLandscape();
     requestAnimationFrame(fitCanvas);
   }
   document.addEventListener('fullscreenchange',updateFullscreenButton);
@@ -744,7 +837,8 @@
   document.getElementById('btn-settings').addEventListener('click',function(){refreshSettings();showPanel('settings');});
   document.getElementById('btn-how').addEventListener('click',function(){showPanel('how');});
   document.getElementById('btn-stats').addEventListener('click',function(){renderStats();showPanel('stats');});
-  ['settings','how','stats'].forEach(function(k){document.getElementById('btn-'+k+'-back').addEventListener('click',function(){refreshMain();showPanel('main');});});
+  document.getElementById('btn-scores').addEventListener('click',function(){renderHighScores();showPanel('scores');});
+  ['settings','how','stats','scores'].forEach(function(k){document.getElementById('btn-'+k+'-back').addEventListener('click',function(){refreshMain();showPanel('main');});});
   document.getElementById('btn-over-menu').addEventListener('click',function(){refreshMain();showPanel('main');});
   document.getElementById('btn-exit-back').addEventListener('click',function(){refreshMain();showPanel('main');});
   document.getElementById('btn-exit').addEventListener('click',function(){
@@ -754,7 +848,28 @@
     // Browsers permit window.close() only for windows opened by script. Otherwise give a clear exit screen.
     try{window.close();}catch(e){}
   });
-  document.getElementById('btn-clear-stats').addEventListener('click',function(){stats={wins:[0,0],longest:0};persistStats();renderStats();});
+  document.getElementById('btn-clear-stats').addEventListener('click',function(){
+    if(confirm('Reset all match statistics?')){stats={wins:[0,0],longest:0};persistStats();renderStats();}
+  });
+  document.getElementById('btn-clear-scores').addEventListener('click',function(){
+    if(confirm('Delete all saved Pong versus high scores?')){highScores=[];saveHighScores();renderHighScores();}
+  });
+  function renderHighScores(){
+    var list=document.getElementById('highscores-list');list.replaceChildren();
+    if(!highScores.length){
+      var empty=document.createElement('li');empty.className='record-empty';empty.textContent='No completed matches yet. Play a match to record a high score.';
+      list.appendChild(empty);return;
+    }
+    highScores.forEach(function(entry,i){
+      var li=document.createElement('li'),head=document.createElement('div'),label=document.createElement('span'),scoreEl=document.createElement('span'),sub=document.createElement('div');
+      head.className='record-head';scoreEl.className='record-score';sub.className='record-sub';
+      label.textContent=(i+1)+'. '+cleanName(entry.names[entry.winner],entry.winner)+' wins';
+      scoreEl.textContent=entry.score[0]+' – '+entry.score[1];
+      var date=Number.isFinite(entry.date)?new Date(entry.date).toLocaleDateString():'';
+      sub.textContent=cleanName(entry.names[0],0)+' vs '+cleanName(entry.names[1],1)+' · '+(entry.difficulty||'normal')+' · '+date;
+      head.appendChild(label);head.appendChild(scoreEl);li.appendChild(head);li.appendChild(sub);list.appendChild(li);
+    });
+  }
   function renderStats(){
     document.getElementById('stats-p1').textContent=stats.wins[0];
     document.getElementById('stats-p2').textContent=stats.wins[1];
@@ -798,6 +913,19 @@
     el.addEventListener('click',toggle);
     el.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle();}});
   })();
+  for(var n=0;n<2;n++)(function(i){
+    var input=document.getElementById('player-name-'+(i+1));
+    input.value=settings[i===0?'p1Name':'p2Name'];
+    input.addEventListener('input',function(){
+      settings[i===0?'p1Name':'p2Name']=input.value;
+      persistSettings();
+      if(!hasMatch)updateHUD();
+    });
+    input.addEventListener('blur',function(){
+      var key=i===0?'p1Name':'p2Name';settings[key]=cleanName(input.value,i);
+      input.value=settings[key];persistSettings();if(!hasMatch)updateHUD();
+    });
+  })(n);
   function refreshSettings(){
     updateSegments.forEach(function(fn){fn();});
     [0,1].forEach(function(i){
