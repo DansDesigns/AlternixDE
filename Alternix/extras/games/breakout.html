@@ -146,6 +146,22 @@
     body { padding-bottom: 70px; }
   }
 
+  .perf-meter {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    z-index: 2;
+    padding: 5px 8px;
+    background: rgba(9, 16, 29, 0.86);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 6px;
+    color: #cbd5e1;
+    font: 11px/1.5 monospace;
+    white-space: pre;
+    pointer-events: none;
+  }
+  .perf-meter.hidden { display: none; }
+
   .menu {
     position: absolute;
     inset: 0;
@@ -336,6 +352,7 @@
   <div class="canvas-wrap">
     <div class="playfield">
       <canvas id="gameCanvas" width="640" height="480"></canvas>
+      <div id="perf-meter" class="perf-meter hidden" aria-live="off"></div>
 
     <div id="menu" class="menu">
       <div class="panel" id="panel-main">
@@ -399,6 +416,19 @@
             <span>Start in fullscreen</span>
             <div class="switch"></div>
           </div>
+        </div>
+        <div class="row">
+          <div class="label">Performance</div>
+          <div class="toggle" id="toggle-reduced-effects">
+            <span>Reduced visual effects</span>
+            <div class="switch"></div>
+          </div>
+          <p class="info" style="margin: 8px 0 12px">Reduces glowing effects and moving wind streaks on slower devices.</p>
+          <div class="toggle" id="toggle-perf">
+            <span>Show FPS / performance meter</span>
+            <div class="switch"></div>
+          </div>
+          <p class="info" style="margin: 8px 0 0">Shows FPS, game logic/render time and the longest frame delay. Useful for diagnosing slowdowns.</p>
         </div>
         <button class="btn small" id="btn-clear-scores">Clear High Scores</button>
         <button class="btn" id="btn-settings-back">Back</button>
@@ -503,6 +533,8 @@
   if (settings.p1Colour === settings.p2Colour) settings.p2Colour = PALETTE[1];
   settings.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(settings.scale) || 1));
   settings.startFullscreen = !!settings.startFullscreen;
+  settings.reducedEffects = !!settings.reducedEffects;
+  settings.showPerformance = !!settings.showPerformance;
 
   var storedControls = Array.isArray(settings.controls) ? settings.controls : [];
   settings.controls = DEFAULT_CONTROLS.map(function (d, i) {
@@ -525,6 +557,10 @@
   var BUMP_SPREAD = Math.PI / 2.4, BUMP_CURVE = 0.6;
   var MAX_BOUNCE = 78 * Math.PI / 180;
   var LEVEL_CLEAR_MS = 1500, AUTOSAVE_MS = 3000;
+  // Bound worst-case work so repeated multiball or very high levels cannot
+  // grow the collision workload without limit.
+  var MAX_BALLS = 20, MAX_POWERUPS = 40, MAX_PARTICLES = 240;
+  var SIM_STEP = 1000 / 60, MAX_UPDATES_PER_FRAME = 4;
 
   var BRICK_W = 54, BRICK_H = 20, BRICK_PAD = 6;
   var COLORS = ['#f87171', '#fb923c', '#facc15', '#4ade80', '#60a5fa', '#c084fc', '#2dd4bf', '#f0abfc'];
@@ -535,6 +571,11 @@
   var canvas = document.getElementById('gameCanvas');
   var touchArea = document.getElementById('touch-area');
   var ctx = canvas.getContext('2d');
+  // The brick layer is painted only when bricks appear/disappear, not at 60 FPS.
+  var brickLayer = document.createElement('canvas');
+  var brickCtx = brickLayer.getContext('2d');
+  var brickGrid = [], brickRows = 0, bricksRemaining = 0;
+  var perfMeter = document.getElementById('perf-meter');
 
   var hudScore1 = document.getElementById('hud-score1');
   var hudScore2 = document.getElementById('hud-score2');
@@ -610,10 +651,16 @@
   var bindTarget = null;
   var bindMessage = '';
   var touchActive = false, touchPaddleOffset = 0, tapStartX = 0, tapStartT = 0;
-  var lastTime = performance.now();
+  var lastTime = performance.now(), simCarry = 0;
+  var perfElapsed = 0, perfFrames = 0, perfLogic = 0, perfRender = 0;
+  var perfWorst = 0, perfSkipped = 0, perfNeedsDraw = true;
 
   function diff() { return DIFFICULTIES[settings.difficulty]; }
-  function ballBaseSpeed() { var d = diff(); return (d.ball + (level - 1) * d.step) * scale; }
+  function ballBaseSpeed() {
+    var d = diff();
+    // Upper bound keeps collision substeps finite even at very high levels.
+    return Math.min(d.ball + (level - 1) * d.step, 14) * scale;
+  }
   function paddleBaseSpeed() { return diff().paddle * scale; }
 
   function makePlayer(i) {
@@ -739,6 +786,68 @@
         });
       }
     }
+    rebuildBrickIndex();
+  }
+
+  // Direct grid lookup avoids testing every brick for every ball substep.
+  function rebuildBrickIndex() {
+    brickGrid = [];
+    brickRows = 0;
+    bricksRemaining = 0;
+    for (var i = 0; i < bricks.length; i++) {
+      var brick = bricks[i];
+      if (!brick.alive) continue;
+      var row = Math.round((brick.y - BRICK_OFFSET_TOP) / (BRICK_H + BRICK_PAD));
+      var col = Math.round((brick.x - BRICK_OFFSET_LEFT) / (BRICK_W + BRICK_PAD));
+      brick.row = row;
+      brick.col = col;
+      if (!brickGrid[row]) brickGrid[row] = [];
+      brickGrid[row][col] = brick;
+      brickRows = Math.max(brickRows, row + 1);
+      bricksRemaining++;
+    }
+    redrawBrickLayer();
+  }
+
+  function paintBrick(c, brick) {
+    c.fillStyle = brick.color;
+    c.shadowColor = brick.color;
+    c.shadowBlur = settings.reducedEffects ? 0 : 8;
+    roundRect(c, brick.x, brick.y, brick.w, brick.h, 4);
+    c.fill();
+    c.shadowBlur = 0;
+    c.fillStyle = 'rgba(255,255,255,0.2)';
+    c.fillRect(brick.x + 2, brick.y + 2, brick.w - 4, 6);
+  }
+
+  function redrawBrickLayer() {
+    brickLayer.width = W;
+    brickLayer.height = H;
+    for (var i = 0; i < bricks.length; i++) {
+      if (bricks[i].alive) paintBrick(brickCtx, bricks[i]);
+    }
+    perfNeedsDraw = true;
+  }
+
+  function eraseBrickFromLayer(brick) {
+    // Clear the removed brick and its glow; repaint the few neighbouring
+    // bricks through a clip so their overlapping glows remain intact.
+    var pad = 16, x = brick.x - pad, y = brick.y - pad;
+    var w = brick.w + 2 * pad, h = brick.h + 2 * pad;
+    brickCtx.save();
+    brickCtx.beginPath();
+    brickCtx.rect(x, y, w, h);
+    brickCtx.clip();
+    brickCtx.clearRect(x, y, w, h);
+    for (var r = Math.max(0, brick.row - 1); r <= Math.min(brickRows - 1, brick.row + 1); r++) {
+      var row = brickGrid[r];
+      if (!row) continue;
+      for (var c = Math.max(0, brick.col - 1); c <= Math.min(BRICK_COLS - 1, brick.col + 1); c++) {
+        var near = row[c];
+        if (near && near.alive) paintBrick(brickCtx, near);
+      }
+    }
+    brickCtx.restore();
   }
 
   /* ================= balls and powerups ================================== */
@@ -782,6 +891,7 @@
   var POWERUP_WEIGHT_TOTAL = POWERUP_TABLE.reduce(function (s, p) { return s + p.weight; }, 0);
 
   function spawnPowerup(x, y) {
+    if (powerups.length >= MAX_POWERUPS) return;
     var roll = Math.random() * POWERUP_WEIGHT_TOTAL;
     var pick = POWERUP_TABLE[0];
     for (var i = 0; i < POWERUP_TABLE.length; i++) {
@@ -795,7 +905,7 @@
   }
 
   function spawnParticles(x, y, color) {
-    for (var i = 0; i < 8; i++) {
+    for (var i = 0; i < 8 && particles.length < MAX_PARTICLES; i++) {
       particles.push({
         x: x, y: y,
         dx: (Math.random() - 0.5) * 4 * objScale,
@@ -1097,32 +1207,49 @@
       }
     }
 
-    for (var k = 0; k < bricks.length; k++) {
-      var brick = bricks[k];
-      if (!brick.alive) continue;
-      if (ball.x + ball.r <= brick.x || ball.x - ball.r >= brick.x + brick.w) continue;
-      if (ball.y + ball.r <= brick.y || ball.y - ball.r >= brick.y + brick.h) continue;
-
-      brick.alive = false;
+    // At most a handful of grid cells can overlap this ball.  Do not scan
+    // the full brick array for each substep (especially costly on multiball).
+    var c0 = Math.max(0, Math.floor((ball.x - ball.r - BRICK_OFFSET_LEFT) / (BRICK_W + BRICK_PAD)));
+    var c1 = Math.min(BRICK_COLS - 1, Math.floor((ball.x + ball.r - BRICK_OFFSET_LEFT) / (BRICK_W + BRICK_PAD)));
+    var r0 = Math.max(0, Math.floor((ball.y - ball.r - BRICK_OFFSET_TOP) / (BRICK_H + BRICK_PAD)));
+    var r1 = Math.min(brickRows - 1, Math.floor((ball.y + ball.r - BRICK_OFFSET_TOP) / (BRICK_H + BRICK_PAD)));
+    var hitBrick = null;
+    for (var row = r0; row <= r1 && !hitBrick; row++) {
+      var line = brickGrid[row];
+      if (!line) continue;
+      for (var col = c0; col <= c1; col++) {
+        var brick = line[col];
+        if (!brick || !brick.alive) continue;
+        if (ball.x + ball.r <= brick.x || ball.x - ball.r >= brick.x + brick.w) continue;
+        if (ball.y + ball.r <= brick.y || ball.y - ball.r >= brick.y + brick.h) continue;
+        hitBrick = brick;
+        break;
+      }
+    }
+    if (hitBrick) {
+      hitBrick.alive = false;
+      bricksRemaining--;
       var scorer = players[ball.owner] || players[0];
-      scorer.score += brick.points;
-      updateHUD();
-      spawnParticles(brick.x + brick.w / 2, brick.y + brick.h / 2, brick.color);
+      scorer.score += hitBrick.points;
+      hudDirty = true;
+      spawnParticles(hitBrick.x + hitBrick.w / 2, hitBrick.y + hitBrick.h / 2, hitBrick.color);
+      eraseBrickFromLayer(hitBrick);
 
-      var oL = (ball.x + ball.r) - brick.x;
-      var oR = (brick.x + brick.w) - (ball.x - ball.r);
-      var oT = (ball.y + ball.r) - brick.y;
-      var oB = (brick.y + brick.h) - (ball.y - ball.r);
+      var oL = (ball.x + ball.r) - hitBrick.x;
+      var oR = (hitBrick.x + hitBrick.w) - (ball.x - ball.r);
+      var oT = (ball.y + ball.r) - hitBrick.y;
+      var oB = (hitBrick.y + hitBrick.h) - (ball.y - ball.r);
       var mn = Math.min(oL, oR, oT, oB);
       if (mn === oL || mn === oR) ball.dx = -ball.dx; else ball.dy = -ball.dy;
 
-      if (Math.random() < 0.15) spawnPowerup(brick.x + brick.w / 2, brick.y + brick.h / 2);
-      break;
+      if (Math.random() < 0.15) spawnPowerup(hitBrick.x + hitBrick.w / 2, hitBrick.y + hitBrick.h / 2);
     }
     return true;
   }
 
+  var hudDirty = false;
   function update(dt) {
+    hudDirty = false;
     if (state === 'menu' || state === 'gameover') return;
 
     updateWind(dt);
@@ -1198,9 +1325,7 @@
       return;
     }
 
-    var bricksAlive = 0;
-    for (var q = 0; q < bricks.length; q++) if (bricks[q].alive) bricksAlive++;
-    if (bricksAlive === 0) {
+    if (bricksRemaining === 0) {
       state = 'levelclear';
       levelClearTimer = LEVEL_CLEAR_MS;
       leader().score += 100 * level;
@@ -1226,11 +1351,11 @@
         if (pu.type === 'slow') applySlow();
         if (pu.type === 'life') { lives++; updateHUD(); }
         if (pu.type === 'bump' || pu.type === 'jagged' || pu.type === 'cannon') setSurface(owner, pu.type);
-        if (pu.type === 'multiball') {
+        if (pu.type === 'multiball' && balls.length < MAX_BALLS) {
           var base = null;
           for (var m = 0; m < balls.length; m++) if (balls[m].active) { base = balls[m]; break; }
           if (base) {
-            for (var nn = 0; nn < 2; nn++) {
+            for (var nn = 0; nn < 2 && balls.length < MAX_BALLS; nn++) {
               balls.push({
                 x: base.x, y: base.y, r: BALL_R,
                 dx: base.dx * (nn === 0 ? 0.9 : 1.1) + (Math.random() - 0.5),
@@ -1253,6 +1378,7 @@
       if (pt.life <= 0) particles.splice(t, 1);
     }
 
+    if (hudDirty) updateHUD();
     autosaveTimer -= dt;
     if (autosaveTimer <= 0) { autosaveTimer = AUTOSAVE_MS; saveGame(); }
   }
@@ -1277,7 +1403,7 @@
     ctx.save();
     ctx.fillStyle = p.colour;
     ctx.shadowColor = p.colour;
-    ctx.shadowBlur = 12;
+    ctx.shadowBlur = settings.reducedEffects ? 0 : 12;
 
     if (p.surface === 'jagged') {
       var tw = w / JAG_TEETH;
@@ -1328,7 +1454,7 @@
       ctx.rotate(ang);
       ctx.fillStyle = p.colour;
       ctx.shadowColor = p.colour;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
       roundRect(ctx, -4 * objScale, -26 * objScale, 8 * objScale, 28 * objScale, 3);
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1353,7 +1479,7 @@
     ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 1.5;
     ctx.lineCap = 'round';
-    for (var i = 0; i < windParticles.length; i++) {
+    for (var i = 0; i < windParticles.length; i += (settings.reducedEffects ? 3 : 1)) {
       var p = windParticles[i];
       ctx.globalAlpha = p.a * mag;
       ctx.beginPath();
@@ -1431,7 +1557,7 @@
     ctx.globalAlpha = alpha;
     ctx.fillStyle = color;
     ctx.shadowColor = color;
-    ctx.shadowBlur = 30;
+    ctx.shadowBlur = settings.reducedEffects ? 0 : 30;
     ctx.font = 'bold ' + Math.round(size * objScale) + 'px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1443,18 +1569,7 @@
     ctx.clearRect(0, 0, W, H);
     drawWind();
 
-    for (var i = 0; i < bricks.length; i++) {
-      var brick = bricks[i];
-      if (!brick.alive) continue;
-      ctx.fillStyle = brick.color;
-      ctx.shadowColor = brick.color;
-      ctx.shadowBlur = 8;
-      roundRect(ctx, brick.x, brick.y, brick.w, brick.h, 4);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = 'rgba(255,255,255,0.2)';
-      ctx.fillRect(brick.x + 2, brick.y + 2, brick.w - 4, 6);
-    }
+    ctx.drawImage(brickLayer, 0, 0);
 
     for (var pi = 0; pi < players.length; pi++) drawPaddle(players[pi]);
 
@@ -1466,7 +1581,7 @@
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
       ctx.fillStyle = slowTimer > 0 ? '#c4b5fd' : col;
       ctx.shadowColor = col;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.closePath();
@@ -1482,7 +1597,7 @@
       var pu = powerups[p];
       ctx.fillStyle = pu.color;
       ctx.shadowColor = pu.color;
-      ctx.shadowBlur = 10;
+      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
       roundRect(ctx, pu.x, pu.y, pu.w, pu.h, 4);
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1536,13 +1651,60 @@
     }
   }
 
+  function updatePerformanceUI(frameMs, logicMs, renderMs, skipped) {
+    if (!settings.showPerformance) return;
+    perfElapsed += frameMs;
+    perfFrames++;
+    perfLogic += logicMs;
+    perfRender += renderMs;
+    perfWorst = Math.max(perfWorst, frameMs);
+    perfSkipped += skipped;
+    if (perfElapsed < 1000) return;
+    var fps = Math.round(perfFrames * 1000 / perfElapsed);
+    var logic = (perfLogic / perfFrames).toFixed(1);
+    var render = (perfRender / perfFrames).toFixed(1);
+    perfMeter.textContent = 'FPS ' + fps + ' | Logic ' + logic + 'ms | Draw ' + render + 'ms' +
+      '\nWorst frame ' + Math.round(perfWorst) + 'ms | Skipped ticks ' + perfSkipped +
+      ' | Balls ' + balls.length;
+    perfElapsed = 0;
+    perfFrames = 0;
+    perfLogic = 0;
+    perfRender = 0;
+    perfWorst = 0;
+    perfSkipped = 0;
+  }
+
   function loop(timestamp) {
-    var dt = Math.min(timestamp - lastTime, 50);
+    var rawDt = Math.max(0, timestamp - lastTime);
     lastTime = timestamp;
     pollPadAssign();
-    pollPads(dt);
-    update(dt);
-    draw();
+    pollPads(rawDt);
+
+    if (state === 'menu' || state === 'gameover' || document.hidden) {
+      simCarry = 0;
+      // Static menu/game-over screens do not need 60 full canvas repaints.
+      if (perfNeedsDraw) { draw(); perfNeedsDraw = false; }
+    } else {
+      var frameDt = Math.min(rawDt, 120);
+      simCarry += frameDt;
+      var startLogic = performance.now();
+      var steps = 0;
+      while (simCarry >= SIM_STEP && steps < MAX_UPDATES_PER_FRAME) {
+        update(SIM_STEP);
+        simCarry -= SIM_STEP;
+        steps++;
+      }
+      var skipped = 0;
+      if (simCarry >= SIM_STEP) {
+        skipped = Math.floor(simCarry / SIM_STEP);
+        simCarry -= skipped * SIM_STEP;
+      }
+      var endLogic = performance.now();
+      draw();
+      var endDraw = performance.now();
+      updatePerformanceUI(rawDt, endLogic - startLogic, endDraw - endLogic, skipped);
+      perfNeedsDraw = false;
+    }
     requestAnimationFrame(loop);
   }
 
@@ -1735,8 +1897,12 @@
     level = s.level;
 
     balls.length = 0;
-    for (var j = 0; j < s.balls.length; j++) {
+    for (var j = 0; j < s.balls.length && balls.length < MAX_BALLS; j++) {
       var nb = Object.assign({}, s.balls[j]);
+      var actualSpeed = Math.hypot(nb.dx || 0, nb.dy || 0);
+      var limit = 14 * scale;
+      if (actualSpeed > limit) { nb.dx *= limit / actualSpeed; nb.dy *= limit / actualSpeed; }
+      nb.speed = Math.min(nb.speed || limit, limit);
       if (nb.owner >= players.length) nb.owner = 0;
       var holderP = players[nb.holder];
       if (nb.held && (!holderP || holderP.surface !== 'cannon')) { nb.held = false; nb.active = true; }
@@ -1751,9 +1917,10 @@
       bricks.push(bk);
     }
     if (!bricks.length) buildBricks();
+    else rebuildBrickIndex();
 
     powerups.length = 0;
-    for (var m = 0; m < s.powerups.length; m++) powerups.push(Object.assign({}, s.powerups[m]));
+    for (var m = 0; m < s.powerups.length && powerups.length < MAX_POWERUPS; m++) powerups.push(Object.assign({}, s.powerups[m]));
 
     particles.length = 0;
     slowTimer = s.slowTimer || 0;
@@ -1836,6 +2003,7 @@
     }
     refreshMain();
     showPanel('main');
+    perfNeedsDraw = true;
   }
 
   function closeMenu() { menuEl.classList.add('hidden'); }
@@ -1894,6 +2062,8 @@
     resetGame(playerCount);
     closeMenu();
     autosaveTimer = AUTOSAVE_MS;
+    simCarry = 0;
+    lastTime = performance.now();
     startCountdown();
   }
 
@@ -1903,6 +2073,8 @@
     goFullscreenIfWanted();
     closeMenu();
     autosaveTimer = AUTOSAVE_MS;
+    simCarry = 0;
+    lastTime = performance.now();
     startCountdown();
   }
 
@@ -2086,6 +2258,9 @@
       ? 'Still air. The ball travels in straight lines.'
       : 'Gusts bend the ball and drag falling powerups sideways. Speed is never changed, only heading.';
     document.getElementById('toggle-fullscreen').classList.toggle('on', settings.startFullscreen);
+    document.getElementById('toggle-reduced-effects').classList.toggle('on', settings.reducedEffects);
+    document.getElementById('toggle-perf').classList.toggle('on', settings.showPerformance);
+    perfMeter.classList.toggle('hidden', !settings.showPerformance);
     refreshControlUI();
   }
 
@@ -2117,7 +2292,25 @@
     saveJSON(KEY_SETTINGS, settings);
     refreshSettingsUI();
   });
-  document.getElementById('scale-slider').addEventListener('input', function (e) {
+  document.getElementById('toggle-reduced-effects').addEventListener('click', function () {
+    settings.reducedEffects = !settings.reducedEffects;
+    saveJSON(KEY_SETTINGS, settings);
+    redrawBrickLayer();
+    refreshSettingsUI();
+  });
+  document.getElementById('toggle-perf').addEventListener('click', function () {
+    settings.showPerformance = !settings.showPerformance;
+    saveJSON(KEY_SETTINGS, settings);
+    perfElapsed = 0;
+    perfFrames = 0;
+    perfLogic = 0;
+    perfRender = 0;
+    perfWorst = 0;
+    perfSkipped = 0;
+    perfMeter.textContent = 'Measuring performance...';
+    refreshSettingsUI();
+  });
+  document.getElementById('scale-slider').addEventListener('input' , function (e) {
     settings.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(e.target.value) || 1));
     saveJSON(KEY_SETTINGS, settings);
     document.getElementById('scale-value').textContent = settings.scale.toFixed(1) + 'x';
@@ -2163,7 +2356,10 @@
     delete keysDown[e.code];
   });
 
-  window.addEventListener('blur', function () { keysDown = {}; });
+  window.addEventListener('blur', function () {
+    keysDown = {};
+    simCarry = 0;
+  });
 
   // Both the game canvas and the separate touch area map to the same
   // horizontal playfield coordinate, independent of their displayed sizes.
@@ -2241,6 +2437,8 @@
   });
 
   document.addEventListener('visibilitychange', function () {
+    lastTime = performance.now();
+    simCarry = 0;
     if (document.hidden) {
       if (state === 'playing' || state === 'countdown' || state === 'levelclear') openMenu();
       else saveGame();
