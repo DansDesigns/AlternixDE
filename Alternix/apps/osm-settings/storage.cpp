@@ -1,6 +1,7 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QBoxLayout>
 #include <QGridLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -674,17 +675,30 @@ private:
         info->setWordWrap(true);
         lay->addWidget(info);
 
-        QHBoxLayout *btnRow = new QHBoxLayout();
+        // Partition cards are only 200-240px wide. Three 110px-minimum
+        // buttons cannot fit in one row, so removable storage uses a
+        // vertical button stack instead. Keep the original side-by-side
+        // layout for internal partitions.
+        QBoxLayout *btnRow = new QBoxLayout(
+            internal ? QBoxLayout::LeftToRight : QBoxLayout::TopToBottom);
+        btnRow->setContentsMargins(0, 0, 0, 0);
         btnRow->setSpacing(6);
 
         pc->btnMount = makeBtn("Mount");
         pc->btnOpen  = makeBtn("Open");
 
+        if (!internal) {
+            // Fill the card's usable width, with a separate touch target
+            // for each action and no clipping of button text.
+            pc->btnMount->setMaximumWidth(240);
+            pc->btnOpen->setMaximumWidth(240);
+        }
         btnRow->addWidget(pc->btnMount);
         btnRow->addWidget(pc->btnOpen);
 
         if (!internal) {
             pc->btnEject = makeBtn("Eject", "#CC6666");
+            pc->btnEject->setMaximumWidth(240);
             btnRow->addWidget(pc->btnEject);
         }
 
