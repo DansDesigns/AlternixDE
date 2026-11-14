@@ -38,6 +38,8 @@
 #include <QParallelAnimationGroup>
 #include <QEasingCurve>
 #include <QSettings>
+#include <QStandardPaths>
+#include <time.h>
 #include <QPixmapCache>
 #include <QBuffer>
 #include <QKeyEvent>
@@ -414,6 +416,367 @@ static QFrame* createCard(QWidget *parent,
 
 // Forward declaration
 class NotificationOverlay;
+// ──────────────────────────────  Brightness controller
+// Keep hardware brightness separate from XRandR's software gamma adjustment.
+// The resident osm-notify process must survive display rotation, suspend and
+// GPU/output re-enumeration without keeping a stale output name.
+class AlternixBrightnessController : public QObject {
+public:
+    AlternixBrightnessController(QSlider *slider, QLabel *caption, QObject *parent)
+        : QObject(parent), slider_(slider), caption_(caption),
+          target_(qBound(20, slider->value(), 100)) {
+        applyTimer_.setSingleShot(true);
+        saveTimer_.setSingleShot(true);
+        commandDeadline_.setSingleShot(true);
+        healthTimer_.setInterval(2500);
+        brightnessctl_ = QStandardPaths::findExecutable("brightnessctl");
+        sleepOffsetMs_ = bootMinusMonotonicMs();
+
+        connect(&applyTimer_, &QTimer::timeout, this, [this]() { applyBrightness(); });
+        connect(&saveTimer_, &QTimer::timeout, this, [this]() {
+            QSettings settings("Alternix", "osm-notify");
+            settings.setValue("brightness", target_);
+            settings.sync();
+            if (settings.status() != QSettings::NoError)
+                qWarning() << "osm-notify: unable to save brightness preference";
+        });
+        connect(slider_, &QSlider::valueChanged, this, [this](int value) {
+            target_ = qBound(20, value, 100);
+            // Coalesce changes to roughly 20 writes/sec, but keep applying
+            // during a long drag rather than waiting for the drag to stop.
+            if (!applyTimer_.isActive()) applyTimer_.start(50);
+            saveTimer_.start(350);
+        });
+        connect(&command_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this](int rc, QProcess::ExitStatus status) {
+            finishCommand(rc == 0 && status == QProcess::NormalExit,
+                          QString::fromUtf8(command_.readAll()).trimmed());
+        });
+        connect(&command_, &QProcess::errorOccurred, this,
+                [this](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart)
+                QTimer::singleShot(0, this, [this]() {
+                    if (operation_ != Operation::None &&
+                        command_.state() == QProcess::NotRunning)
+                        finishCommand(false, command_.errorString());
+                });
+        });
+        connect(&commandDeadline_, &QTimer::timeout, this, [this]() {
+            timedOut_ = true;
+            if (command_.state() != QProcess::NotRunning) command_.kill();
+        });
+        connect(&healthTimer_, &QTimer::timeout, this, [this]() { checkHealth(); });
+        healthTimer_.start();
+
+        // Apply the saved preference after startup and again after delayed
+        // device enumeration, without blocking the launcher/overlay animation.
+        applyTimer_.start(200);
+        QTimer::singleShot(1800, this, [this]() { scheduleRestore(); });
+        QTimer::singleShot(5000, this, [this]() { scheduleRestore(); });
+    }
+
+    void panelOpened() {
+        // Device hotplug or XRandR recovery may have happened while hidden.
+        checkHealth();
+        if (device_.isEmpty() || softwareOnly_) {
+            // Re-query when opened: output names can change without a geometry change.
+            output_.clear();
+            scheduleRestore();
+        } else if (target_ < 97 && backlightPercent(device_) >= 97) {
+            scheduleRestore();
+        }
+    }
+
+    void displayChanged() {
+        // A changed XRandR geometry can also mean a changed connector name.
+        output_.clear();
+        if (device_.isEmpty() || softwareOnly_) scheduleRestore();
+    }
+
+private:
+    enum class Operation { None, HardwareWrite, QueryOutputs, SoftwareWrite };
+    QPointer<QSlider> slider_;
+    QPointer<QLabel> caption_;
+    QTimer applyTimer_;
+    QTimer saveTimer_;
+    QTimer commandDeadline_;
+    QTimer healthTimer_;
+    QProcess command_;
+    Operation operation_ = Operation::None;
+    int target_ = 80;
+    int commandTarget_ = 80;
+    int lastSamplePercent_ = -1;
+    qint64 sleepOffsetMs_ = -1;
+    qint64 lastResetRecoveryMs_ = 0;
+    QString device_;
+    QString output_;
+    QString brightnessctl_;
+    QString hardwareError_;
+    bool softwareOnly_ = false;
+    bool pendingApply_ = false;
+    bool timedOut_ = false;
+
+    static qint64 clockMs(clockid_t id) {
+        timespec ts{};
+        if (::clock_gettime(id, &ts) != 0) return -1;
+        return qint64(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+    }
+
+    static qint64 bootMinusMonotonicMs() {
+        // BOOTTIME includes time spent suspended; MONOTONIC does not.
+        // Their offset therefore jumps after suspend without requiring QtDBus.
+        const qint64 boot = clockMs(CLOCK_BOOTTIME);
+        const qint64 mono = clockMs(CLOCK_MONOTONIC);
+        return (boot < 0 || mono < 0) ? -1 : boot - mono;
+    }
+
+    static int backlightMaximum(const QString &name) {
+        bool ok = false;
+        const int maximum = readFile("/sys/class/backlight/" + name +
+                                     "/max_brightness").toInt(&ok);
+        return ok && maximum > 0 ? maximum : -1;
+    }
+
+    static int backlightPercent(const QString &name) {
+        const int maximum = backlightMaximum(name);
+        if (maximum < 1) return -1;
+        const QString root = "/sys/class/backlight/" + name + "/";
+        QString actual = readFile(root + "actual_brightness");
+        if (actual.isEmpty()) actual = readFile(root + "brightness");
+        bool ok = false;
+        const int value = actual.toInt(&ok);
+        return ok && value >= 0 ? qBound(0, qRound(100.0 * value / maximum), 100) : -1;
+    }
+
+    static QString preferredBacklight() {
+        QDir directory("/sys/class/backlight");
+        QString preferred;
+        int bestScore = -100000;
+        // sysfs backlight entries are symlinks to real devices.
+        for (const QString &name : directory.entryList(QDir::AllEntries |
+                        QDir::NoDotAndDotDot, QDir::Name)) {
+            if (backlightMaximum(name) < 1) continue;
+            const QString type = readFile("/sys/class/backlight/" + name + "/type");
+            int score = (type == "raw") ? 300 :
+                        (type == "platform") ? 200 : 100;
+            if (name.startsWith("intel_backlight") || name.startsWith("amdgpu_bl") ||
+                name.startsWith("radeon_bl") || name.startsWith("nvidia") ||
+                name.startsWith("apple_backlight") || name.contains("pwm"))
+                score += 35;
+            if (name.startsWith("acpi_video")) score -= 100;
+            if (score > bestScore) {
+                bestScore = score;
+                preferred = name;
+            }
+        }
+        return preferred;
+    }
+
+    bool writeDirectly(const QString &name, int percent) {
+        const int maximum = backlightMaximum(name);
+        if (maximum < 1) return false;
+        const int value = qBound(1, qRound(maximum * (percent / 100.0)), maximum);
+        QFile f("/sys/class/backlight/" + name + "/brightness");
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+        const QByteArray bytes = QByteArray::number(value) + '\n';
+        const bool success = f.write(bytes) == bytes.size() && f.flush();
+        f.close();
+        return success;
+    }
+
+    void updateBackendLabel(bool native, const QString &error = QString()) {
+        if (!caption_) return;
+        caption_->setText(native ? "Brightness" :
+                          (!error.isEmpty() ? "Brightness (unavailable)" :
+                           "Brightness (software)"));
+        const QString description = native
+            ? "Physical backlight: " + device_
+            : "Software (XRandR) dimming; does not reduce the LCD backlight power";
+        const QString reason = error.isEmpty() ? hardwareError_ : error;
+        caption_->setToolTip(reason.isEmpty() ? description :
+                             description + "\nError: " + reason);
+        if (slider_) slider_->setToolTip(caption_->toolTip());
+    }
+
+    void scheduleRestore() {
+        applyTimer_.start(100);
+    }
+
+    void resumeDetected() {
+        // Drop stale device/output and retry after GPU/backlight reinitialisation.
+        device_.clear();
+        output_.clear();
+        softwareOnly_ = false;
+        hardwareError_.clear();
+        lastSamplePercent_ = -1;
+        scheduleRestore();
+        QTimer::singleShot(900, this, [this]() { scheduleRestore(); });
+        QTimer::singleShot(2500, this, [this]() { scheduleRestore(); });
+        QTimer::singleShot(6500, this, [this]() { scheduleRestore(); });
+    }
+
+    void checkHealth() {
+        const qint64 offset = bootMinusMonotonicMs();
+        if (offset >= 0) {
+            if (sleepOffsetMs_ >= 0 && offset - sleepOffsetMs_ > 1200) {
+                sleepOffsetMs_ = offset;
+                resumeDetected();
+                return;
+            }
+            sleepOffsetMs_ = offset;
+        }
+
+        const QString available = preferredBacklight();
+        if (available != device_) {
+            device_ = available;
+            output_.clear();
+            softwareOnly_ = false;
+            hardwareError_.clear();
+            lastSamplePercent_ = -1;
+            scheduleRestore();
+            return;
+        }
+        if (device_.isEmpty() || softwareOnly_) return;
+        const int actual = backlightPercent(device_);
+        if (actual < 0) return;
+        // Firmware frequently restores the hardware backlight to 100% during
+        // GPU reset, even without an observable suspend event.
+        const qint64 now = clockMs(CLOCK_BOOTTIME);
+        if (target_ <= 94 && actual >= 97 && lastSamplePercent_ >= 0 &&
+            lastSamplePercent_ < 95 &&
+            (lastResetRecoveryMs_ == 0 || now - lastResetRecoveryMs_ > 12000)) {
+            lastResetRecoveryMs_ = now;
+            scheduleRestore();
+        }
+        lastSamplePercent_ = actual;
+    }
+
+    void beginCommand(const QString &program, const QStringList &args,
+                      Operation operation) {
+        if (command_.state() != QProcess::NotRunning) {
+            pendingApply_ = true;
+            return;
+        }
+        operation_ = operation;
+        commandTarget_ = target_;
+        timedOut_ = false;
+        command_.setProcessChannelMode(QProcess::MergedChannels);
+        command_.start(program, args);
+        commandDeadline_.start(3000);
+    }
+
+    void applyBrightness() {
+        if (operation_ != Operation::None ||
+            command_.state() != QProcess::NotRunning) {
+            pendingApply_ = true;
+            return;
+        }
+        const QString available = preferredBacklight();
+        if (available != device_) {
+            device_ = available;
+            output_.clear();
+            softwareOnly_ = false;
+            hardwareError_.clear();
+            lastSamplePercent_ = -1;
+        }
+        if (!device_.isEmpty() && !softwareOnly_) {
+            if (writeDirectly(device_, target_)) {
+                lastSamplePercent_ = backlightPercent(device_);
+                hardwareError_.clear();
+                updateBackendLabel(true);
+                return;
+            }
+            if (!brightnessctl_.isEmpty()) {
+                beginCommand(brightnessctl_, {"--class=backlight",
+                             "--device=" + device_, "set",
+                             QString::number(target_) + "%"}, Operation::HardwareWrite);
+                return;
+            }
+            qWarning() << "osm-notify: no permission to write hardware backlight"
+                       << device_ << "and brightnessctl is not installed";
+            softwareOnly_ = true;
+            hardwareError_ = "Hardware backlight is not writable and brightnessctl is absent";
+            updateBackendLabel(false);
+        }
+        if (output_.isEmpty()) {
+            beginCommand("xrandr", {"--query"}, Operation::QueryOutputs);
+            return;
+        }
+        beginCommand("xrandr", {"--output", output_, "--brightness",
+                     QString::number(target_ / 100.0, 'f', 2)},
+                     Operation::SoftwareWrite);
+    }
+
+    static QString chooseConnectedOutput(const QString &query) {
+        QString primary;
+        QString internal;
+        QString first;
+        const QRegularExpression connected("^([^\\s]+)\\s+connected(?:\\s|$)");
+        for (const QString &line : query.split('\n')) {
+            const QRegularExpressionMatch match = connected.match(line);
+            if (!match.hasMatch()) continue;
+            const QString name = match.captured(1);
+            if (first.isEmpty()) first = name;
+            if (line.contains(QRegularExpression("\\sprimary(?:\\s|$)"))) primary = name;
+            if (internal.isEmpty() &&
+                (name.startsWith("eDP", Qt::CaseInsensitive) ||
+                 name.startsWith("DSI", Qt::CaseInsensitive) ||
+                 name.startsWith("LVDS", Qt::CaseInsensitive))) internal = name;
+        }
+        return !primary.isEmpty() ? primary : (!internal.isEmpty() ? internal : first);
+    }
+
+    void finishCommand(bool success, QString details) {
+        if (operation_ == Operation::None) return;
+        commandDeadline_.stop();
+        if (timedOut_) {
+            success = false;
+            details = "command timed out";
+        }
+        const Operation completed = operation_;
+        operation_ = Operation::None;
+        bool next = pendingApply_ || (target_ != commandTarget_);
+        pendingApply_ = false;
+
+        if (completed == Operation::HardwareWrite) {
+            if (success) {
+                lastSamplePercent_ = backlightPercent(device_);
+                hardwareError_.clear();
+                updateBackendLabel(true);
+            } else {
+                qWarning() << "osm-notify: hardware brightness failed for"
+                           << device_ << ":" << details;
+                // Never invoke osm-sudo for each slider movement. If the
+                // hardware device cannot be controlled as the session user,
+                // use software dimming and expose the failure in the tooltip.
+                softwareOnly_ = true;
+                hardwareError_ = details;
+                output_.clear();
+                updateBackendLabel(false);
+                next = true;
+            }
+        } else if (completed == Operation::QueryOutputs) {
+            if (success) output_ = chooseConnectedOutput(details);
+            if (output_.isEmpty()) {
+                qWarning() << "osm-notify: no connected XRandR output:" << details;
+                updateBackendLabel(false, "No connected XRandR display found");
+            } else {
+                next = true;
+            }
+        } else if (completed == Operation::SoftwareWrite) {
+            if (!success) {
+                qWarning() << "osm-notify: XRandR brightness failed on" << output_
+                           << ":" << details;
+                output_.clear(); // Force fresh output detection on next attempt.
+                updateBackendLabel(false, details);
+            } else {
+                updateBackendLabel(false);
+            }
+        }
+        if (next) QTimer::singleShot(0, this, [this]() { scheduleRestore(); });
+    }
+};
+
 // ──────────────────────────────  Main overlay widget
 class NotificationOverlay : public QWidget {
 public:
@@ -422,6 +785,7 @@ public:
     QWidget *topCardWidget;
     QWidget *sysRowWidget;
     QWidget *brightnessCardWidget;
+    AlternixBrightnessController *brightnessController = nullptr;
     QWidget *batteryCardWidget;
 
     QLabel *batteryInfoLabel;
@@ -691,7 +1055,7 @@ public:
             updateBatteryIconColor();
         }
 
-        // ───────── Brightness Card  (XRANDR VERSION)
+        // ───────── Brightness Card (native backlight, XRandR fallback)
         {
             QVBoxLayout *bInner = new QVBoxLayout();
             bInner->setAlignment(Qt::AlignCenter);
@@ -700,30 +1064,9 @@ public:
             bLabel->setStyleSheet("color:white; font-size:18pt; font-weight:bold;");
             bLabel->setAlignment(Qt::AlignCenter);
 
-            auto detectPrimaryOutput = []() -> QString {
-                QProcess p;
-                p.start("bash", {"-c",
-                    "xrandr | awk '/ primary/{print $1; exit}'"});
-                p.waitForFinished(100);
-                QString out = QString::fromUtf8(p.readAll()).trimmed();
-                if (out.isEmpty()) {
-                    p.start("bash", {"-c",
-                        "xrandr | awk '/ connected/{print $1; exit}'"});
-                    p.waitForFinished(100);
-                    out = QString::fromUtf8(p.readAll()).trimmed();
-                }
-                return out;
-            };
-
-            QString output = detectPrimaryOutput();
-            if (output.isEmpty()) output = "HDMI-1";
-
-            int savedBrightness = 80;
-            {
-                QSettings s("Alternix", "osm-notify");
-                savedBrightness = s.value("brightness", 80).toInt();
-            }
-
+            QSettings brightnessSettings("Alternix", "osm-notify");
+            const int savedBrightness = qBound(20,
+                brightnessSettings.value("brightness", 80).toInt(), 100);
             QSlider *slider = new QSlider(Qt::Horizontal, this);
             slider->setRange(20, 100);
             slider->setValue(savedBrightness);
@@ -737,26 +1080,9 @@ public:
                 " outline:none; border:0px solid transparent; }"
             );
 
-            {
-                double factor = savedBrightness / 100.0;
-                QString cmd = QString("xrandr --output %1 --brightness %2")
-                                .arg(output)
-                                .arg(QString::number(factor, 'f', 2));
-                QProcess::startDetached("bash", {"-c", cmd});
-            }
-
-            QObject::connect(slider, &QSlider::valueChanged, this,
-                             [output](int v) {
-                double factor = v / 100.0;
-                QString cmd = QString("xrandr --output %1 --brightness %2")
-                                .arg(output)
-                                .arg(QString::number(factor, 'f', 2));
-                QProcess::startDetached("bash", {"-c", cmd});
-
-                QSettings s("Alternix", "osm-notify");
-                s.setValue("brightness", v);
-            });
-
+            // A single long-lived controller owns command serialization,
+            // rescanning and resume recovery even when the panel is hidden.
+            brightnessController = new AlternixBrightnessController(slider, bLabel, this);
             bInner->addWidget(bLabel);
             bInner->addWidget(slider);
 
@@ -1217,6 +1543,7 @@ public:
         if (!g.isValid() || g.isEmpty()) return;
         if (lastScreenGeo == g && geometry() == g) return;
         lastScreenGeo = g;
+        if (brightnessController) brightnessController->displayChanged();
         if (geometry() != g) setGeometry(g);
         if (!systemGrid) return;
         // A portrait display needs a different card layout from landscape.
@@ -1230,6 +1557,7 @@ public:
 
     void openPanel() {
         syncScreenGeometry(alternixActiveScreenGeometry());
+        if (brightnessController) brightnessController->panelOpened();
         if (closing) return;
 
         if (refreshTimer) {
