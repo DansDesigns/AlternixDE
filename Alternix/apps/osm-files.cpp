@@ -623,6 +623,8 @@ public:
           listLayout(nullptr),
           refreshBtn(nullptr),
           backBtn(nullptr),
+          forwardBtn(nullptr),
+          upBtn(nullptr),
           homeBtn(nullptr),
           networkBtn(nullptr),
           usbBtn(nullptr),
@@ -737,19 +739,40 @@ public:
         root->setContentsMargins(20,20,20,20);
         root->setSpacing(10);
 
-        // ========== FIRST ROW (Back, Refresh, Home, Path, View Toggle, Shortcuts) ==========
+        // ========== FIRST ROW (History Back, Forward, Up, Refresh, Home, Path...) ==========
         QHBoxLayout *pathRow = new QHBoxLayout;
         pathRow->setSpacing(10);
 
-        // Back button
-        backBtn = new QPushButton("⇑");
+        // Back and Forward move through the folders actually visited. They are
+        // separate from Up, which always navigates to the parent directory.
+        const QString navigationStyle = themed(
+            "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:22px; font-weight:bold; }"
+            "QPushButton:hover:enabled { background:#666; }"
+            "QPushButton:pressed:enabled { background:#444; }"
+            "QPushButton:disabled { background:#222; color:#888; }"
+        );
+        backBtn = new QPushButton("←");
         backBtn->setFixedSize(50, 50);
-        backBtn->setStyleSheet(themed(
+        backBtn->setStyleSheet(navigationStyle);
+        backBtn->setEnabled(false);
+        pathRow->addWidget(backBtn, 0);
+
+        forwardBtn = new QPushButton("→");
+        forwardBtn->setFixedSize(50, 50);
+        forwardBtn->setStyleSheet(navigationStyle);
+        forwardBtn->setEnabled(false);
+        pathRow->addWidget(forwardBtn, 0);
+
+        // Up folder button: retain its existing behaviour, including closing
+        // osm-files when Up is pressed at the filesystem root.
+        upBtn = new QPushButton("⇑");
+        upBtn->setFixedSize(50, 50);
+        upBtn->setStyleSheet(themed(
             "QPushButton { background:#555; color:white; border:none; border-radius:10px; font-size:18px; font-weight:bold; }"
             "QPushButton:hover { background:#666; }"
             "QPushButton:pressed { background:#444; }"
         ));
-        pathRow->addWidget(backBtn, 0);
+        pathRow->addWidget(upBtn, 0);
 
         // Refresh button
         refreshBtn = new QPushButton("⟳");
@@ -1062,6 +1085,14 @@ public:
         });
 
         connect(backBtn, &QPushButton::clicked, this, [this]() {
+            navigateHistory(-1);
+        });
+
+        connect(forwardBtn, &QPushButton::clicked, this, [this]() {
+            navigateHistory(1);
+        });
+
+        connect(upBtn, &QPushButton::clicked, this, [this]() {
             QDir dir(currentPath);
             QString parent = dir.absolutePath();
             if (parent == "/" || parent == dir.rootPath()) {
@@ -1225,12 +1256,16 @@ protected:
 
 private:
     QString currentPath;
+    QStringList folderHistory;
+    int historyIndex = -1;
     QScrollArea *scroll;
     QWidget *listContainer;
     QVBoxLayout *listLayout;
 
     QPushButton *refreshBtn;
     QPushButton *backBtn;
+    QPushButton *forwardBtn;
+    QPushButton *upBtn;
     QPushButton *homeBtn;
     QPushButton *networkBtn;
     QPushButton *usbBtn;
@@ -1883,11 +1918,48 @@ private:
         }
     }
 
-    void listDirectory(const QString &path) {
+    bool canNavigateHistory(int direction) const {
+        for (int i = historyIndex + direction;
+             i >= 0 && i < folderHistory.size(); i += direction) {
+            if (QDir(folderHistory.at(i)).exists()) return true;
+        }
+        return false;
+    }
+
+    void updateHistoryButtons() {
+        backBtn->setEnabled(canNavigateHistory(-1));
+        forwardBtn->setEnabled(canNavigateHistory(1));
+    }
+
+    void navigateHistory(int direction) {
+        // A previously visited folder may have been removed or unmounted.
+        // Skip missing entries rather than navigating to a stale path.
+        for (int i = historyIndex + direction;
+             i >= 0 && i < folderHistory.size(); i += direction) {
+            if (!QDir(folderHistory.at(i)).exists()) continue;
+            historyIndex = i;
+            listDirectory(folderHistory.at(i), false);
+            return;
+        }
+        updateHistoryButtons();
+    }
+
+    void listDirectory(const QString &path, bool recordHistory = true) {
         QDir dir(path);
         if (!dir.exists()) return;
 
-        currentPath = dir.absolutePath();
+        const QString nextPath = dir.absolutePath();
+        // Record actual location changes only. Refreshes, view toggles and
+        // updates to the current folder must not pollute navigation history.
+        if (recordHistory && (historyIndex < 0 ||
+                              folderHistory.at(historyIndex) != nextPath)) {
+            while (folderHistory.size() > historyIndex + 1)
+                folderHistory.removeLast();
+            folderHistory.append(nextPath);
+            historyIndex = folderHistory.size() - 1;
+        }
+        currentPath = nextPath;
+        updateHistoryButtons();
         if (!activeTransfer && !extractionProcess) pathBtn->setText(currentPath);
         rebuildPathMenu();
 
