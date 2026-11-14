@@ -146,19 +146,19 @@
     body { padding-bottom: 70px; }
   }
 
+  /* Independent status strip, outside the canvas and the menu overlay. */
   .perf-meter {
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
-    z-index: 2;
-    padding: 5px 8px;
+    max-width: calc(100vw - 20px);
+    padding: 5px 9px;
     background: rgba(9, 16, 29, 0.86);
     border: 1px solid rgba(148, 163, 184, 0.35);
     border-radius: 6px;
     color: #cbd5e1;
-    font: 11px/1.5 monospace;
-    white-space: pre;
+    font: 11px/1.45 monospace;
+    white-space: normal;
+    overflow-wrap: anywhere;
     pointer-events: none;
+    text-align: center;
   }
   .perf-meter.hidden { display: none; }
 
@@ -348,11 +348,11 @@
     </div>
     <button type="button" class="game-action" id="btn-game-fullscreen" title="Enter fullscreen" aria-label="Enter fullscreen"><span class="action-icon" id="fullscreen-action-icon" aria-hidden="true">&#x26F6;</span><span class="action-text" id="fullscreen-action-label">Fullscreen</span></button>
   </div>
+  <div id="perf-meter" class="perf-meter hidden" aria-live="off"></div>
 
   <div class="canvas-wrap">
     <div class="playfield">
       <canvas id="gameCanvas" width="640" height="480"></canvas>
-      <div id="perf-meter" class="perf-meter hidden" aria-live="off"></div>
 
     <div id="menu" class="menu">
       <div class="panel" id="panel-main">
@@ -428,7 +428,7 @@
             <span>Show FPS / performance meter</span>
             <div class="switch"></div>
           </div>
-          <p class="info" style="margin: 8px 0 0">Shows FPS, game logic/render time and the longest frame delay. Useful for diagnosing slowdowns.</p>
+          <p class="info" style="margin: 8px 0 0">FPS diagnostics appear above the playfield, never over the game. Graphics quality automatically adapts to sustained drops.</p>
         </div>
         <button class="btn small" id="btn-clear-scores">Clear High Scores</button>
         <button class="btn" id="btn-settings-back">Back</button>
@@ -560,7 +560,7 @@
   // Bound worst-case work so repeated multiball or very high levels cannot
   // grow the collision workload without limit.
   var MAX_BALLS = 20, MAX_POWERUPS = 40, MAX_PARTICLES = 240;
-  var SIM_STEP = 1000 / 60, MAX_UPDATES_PER_FRAME = 4;
+  var SIM_STEP = 1000 / 60, MAX_UPDATES_PER_FRAME = 5;
 
   var BRICK_W = 54, BRICK_H = 20, BRICK_PAD = 6;
   var COLORS = ['#f87171', '#fb923c', '#facc15', '#4ade80', '#60a5fa', '#c084fc', '#2dd4bf', '#f0abfc'];
@@ -606,10 +606,8 @@
   function applyScale(s) {
     scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, s));
     objScale = Math.sqrt(scale);
-    canvas.width = Math.round(640 * scale);
-    canvas.height = Math.round(480 * scale);
-    W = canvas.width;
-    H = canvas.height;
+    W = Math.round(640 * scale);
+    H = Math.round(480 * scale);
     BRICK_COLS = Math.round(10 * scale);
     BRICK_OFFSET_LEFT = Math.round((W - (BRICK_COLS * (BRICK_W + BRICK_PAD) - BRICK_PAD)) / 2);
     BRICK_OFFSET_TOP = Math.round(58 * objScale);
@@ -620,6 +618,7 @@
     BALL_R = Math.round(6 * objScale);
     PU_SIZE = Math.round(20 * objScale);
     initWindParticles();
+    resizeRenderSurfaces(false); // buildBricks/restoreSave rebuild the layer.
   }
 
   function layoutPreview(s) {
@@ -654,6 +653,43 @@
   var lastTime = performance.now(), simCarry = 0;
   var perfElapsed = 0, perfFrames = 0, perfLogic = 0, perfRender = 0;
   var perfWorst = 0, perfSkipped = 0, perfNeedsDraw = true;
+  // The playfield's logical coordinates are independent of the raster size.
+  // The raster follows its *displayed* dimensions rather than the potentially
+  // huge 2.5x world coordinates (1600x1200 even on a small tablet).
+  var renderQuality = 1, autoReducedEffects = false;
+  var lowFpsSeconds = 0, recoverySeconds = 0;
+  function reducedEffects() { return settings.reducedEffects || autoReducedEffects; }
+
+  function resizeRenderSurfaces(repaintBricks) {
+    var fullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    var vh = window.innerHeight || 768, vw = window.innerWidth || 1024;
+    // Match the pre-existing CSS height constraints, but keep the aspect ratio.
+    // Reserve vertical room for the separate FPS strip and touch controls.
+    var reservedHeight = 230 + (settings.showPerformance ? 30 : 0);
+    var maxHeight = Math.max(110, Math.min(vh * (fullscreen ? 0.82 : 0.70), vh - reservedHeight));
+    var cssWidth = Math.max(100, Math.min(W, vw * 0.96, maxHeight * W / H));
+    var cssHeight = cssWidth * H / W;
+    canvas.style.width = cssWidth.toFixed(2) + 'px';
+    canvas.style.height = cssHeight.toFixed(2) + 'px';
+
+    var ratio = Math.min(window.devicePixelRatio || 1, reducedEffects() ? 1 : 1.4);
+    var maxPixels = reducedEffects() ? 460000 : 800000;
+    var pixels = cssWidth * cssHeight * ratio * ratio;
+    ratio *= Math.min(1, Math.sqrt(maxPixels / Math.max(1, pixels)));
+    ratio *= renderQuality;
+    var width = Math.max(1, Math.round(cssWidth * ratio));
+    var height = Math.max(1, Math.round(cssHeight * ratio));
+    if (canvas.width === width && canvas.height === height) return;
+
+    canvas.width = width;
+    canvas.height = height;
+    ctx.setTransform(width / W, 0, 0, height / H, 0, 0);
+    brickLayer.width = width;
+    brickLayer.height = height;
+    brickCtx.setTransform(width / W, 0, 0, height / H, 0, 0);
+    if (repaintBricks) redrawBrickLayer();
+    perfNeedsDraw = true;
+  }
 
   function diff() { return DIFFICULTIES[settings.difficulty]; }
   function ballBaseSpeed() {
@@ -812,7 +848,7 @@
   function paintBrick(c, brick) {
     c.fillStyle = brick.color;
     c.shadowColor = brick.color;
-    c.shadowBlur = settings.reducedEffects ? 0 : 8;
+    c.shadowBlur = reducedEffects() ? 0 : 8;
     roundRect(c, brick.x, brick.y, brick.w, brick.h, 4);
     c.fill();
     c.shadowBlur = 0;
@@ -821,8 +857,8 @@
   }
 
   function redrawBrickLayer() {
-    brickLayer.width = W;
-    brickLayer.height = H;
+    // Preserve the small backing raster and virtual-coordinate transform.
+    brickCtx.clearRect(0, 0, W, H);
     for (var i = 0; i < bricks.length; i++) {
       if (bricks[i].alive) paintBrick(brickCtx, bricks[i]);
     }
@@ -1403,7 +1439,7 @@
     ctx.save();
     ctx.fillStyle = p.colour;
     ctx.shadowColor = p.colour;
-    ctx.shadowBlur = settings.reducedEffects ? 0 : 12;
+    ctx.shadowBlur = reducedEffects() ? 0 : 12;
 
     if (p.surface === 'jagged') {
       var tw = w / JAG_TEETH;
@@ -1454,7 +1490,7 @@
       ctx.rotate(ang);
       ctx.fillStyle = p.colour;
       ctx.shadowColor = p.colour;
-      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
+      ctx.shadowBlur = reducedEffects() ? 0 : 10;
       roundRect(ctx, -4 * objScale, -26 * objScale, 8 * objScale, 28 * objScale, 3);
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1479,7 +1515,7 @@
     ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 1.5;
     ctx.lineCap = 'round';
-    for (var i = 0; i < windParticles.length; i += (settings.reducedEffects ? 3 : 1)) {
+    for (var i = 0; i < windParticles.length; i += (reducedEffects() ? 3 : 1)) {
       var p = windParticles[i];
       ctx.globalAlpha = p.a * mag;
       ctx.beginPath();
@@ -1557,7 +1593,7 @@
     ctx.globalAlpha = alpha;
     ctx.fillStyle = color;
     ctx.shadowColor = color;
-    ctx.shadowBlur = settings.reducedEffects ? 0 : 30;
+    ctx.shadowBlur = reducedEffects() ? 0 : 30;
     ctx.font = 'bold ' + Math.round(size * objScale) + 'px "Segoe UI", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1569,7 +1605,7 @@
     ctx.clearRect(0, 0, W, H);
     drawWind();
 
-    ctx.drawImage(brickLayer, 0, 0);
+    ctx.drawImage(brickLayer, 0, 0, W, H);
 
     for (var pi = 0; pi < players.length; pi++) drawPaddle(players[pi]);
 
@@ -1581,7 +1617,7 @@
       ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
       ctx.fillStyle = slowTimer > 0 ? '#c4b5fd' : col;
       ctx.shadowColor = col;
-      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
+      ctx.shadowBlur = reducedEffects() ? 0 : 10;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.closePath();
@@ -1597,7 +1633,7 @@
       var pu = powerups[p];
       ctx.fillStyle = pu.color;
       ctx.shadowColor = pu.color;
-      ctx.shadowBlur = settings.reducedEffects ? 0 : 10;
+      ctx.shadowBlur = reducedEffects() ? 0 : 10;
       roundRect(ctx, pu.x, pu.y, pu.w, pu.h, 4);
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -1652,7 +1688,7 @@
   }
 
   function updatePerformanceUI(frameMs, logicMs, renderMs, skipped) {
-    if (!settings.showPerformance) return;
+    // Always measure the running game for auto-quality, even with the FPS UI off.
     perfElapsed += frameMs;
     perfFrames++;
     perfLogic += logicMs;
@@ -1663,9 +1699,46 @@
     var fps = Math.round(perfFrames * 1000 / perfElapsed);
     var logic = (perfLogic / perfFrames).toFixed(1);
     var render = (perfRender / perfFrames).toFixed(1);
-    perfMeter.textContent = 'FPS ' + fps + ' | Logic ' + logic + 'ms | Draw ' + render + 'ms' +
-      '\nWorst frame ' + Math.round(perfWorst) + 'ms | Skipped ticks ' + perfSkipped +
-      ' | Balls ' + balls.length;
+    if (settings.showPerformance) {
+      perfMeter.textContent = 'FPS ' + fps + ' | Logic ' + logic + 'ms | Draw ' + render + 'ms' +
+        ' | Worst ' + Math.round(perfWorst) + 'ms | Skipped ' + perfSkipped +
+        ' | Balls ' + balls.length + ' | Graphics ' +
+        (renderQuality < 1 || autoReducedEffects ? 'adaptive' : 'normal');
+    }
+    // Only trim display quality, never the speed of the balls or physics.
+    // A sustained drop first removes expensive glow, then reduces pixel work.
+    if (fps < 45 && !document.hidden) {
+      lowFpsSeconds++;
+      recoverySeconds = 0;
+      if (lowFpsSeconds >= 2) {
+        lowFpsSeconds = 0;
+        if (!autoReducedEffects) {
+          autoReducedEffects = true;
+          resizeRenderSurfaces(true);
+          redrawBrickLayer();
+        } else if (renderQuality > 0.66) {
+          renderQuality = Math.max(0.65, renderQuality - 0.15);
+          resizeRenderSurfaces(true);
+        }
+      }
+    } else if (fps >= 57) {
+      lowFpsSeconds = 0;
+      recoverySeconds++;
+      if (recoverySeconds >= 8) {
+        recoverySeconds = 0;
+        if (renderQuality < 1) {
+          renderQuality = Math.min(1, renderQuality + 0.15);
+          resizeRenderSurfaces(true);
+        } else if (autoReducedEffects) {
+          autoReducedEffects = false;
+          resizeRenderSurfaces(true);
+          redrawBrickLayer();
+        }
+      }
+    } else {
+      lowFpsSeconds = 0;
+      recoverySeconds = 0;
+    }
     perfElapsed = 0;
     perfFrames = 0;
     perfLogic = 0;
@@ -1685,7 +1758,8 @@
       // Static menu/game-over screens do not need 60 full canvas repaints.
       if (perfNeedsDraw) { draw(); perfNeedsDraw = false; }
     } else {
-      var frameDt = Math.min(rawDt, 120);
+      // Bound catch-up work to avoid a spiral of death during a long stall.
+      var frameDt = Math.min(rawDt, 150);
       simCarry += frameDt;
       var startLogic = performance.now();
       var steps = 0;
@@ -2268,8 +2342,10 @@
   document.getElementById('btn-game-menu').addEventListener('click', openMenu);
   document.getElementById('btn-game-fullscreen').addEventListener('click', toggleFullscreen);
   document.getElementById('btn-exit').addEventListener('click', exitGame);
-  document.addEventListener('fullscreenchange', updateFullscreenControls);
-  document.addEventListener('webkitfullscreenchange', updateFullscreenControls);
+  function onFullscreenChange() { updateFullscreenControls(); resizeRenderSurfaces(true); }
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+  window.addEventListener('resize', function () { resizeRenderSurfaces(true); });
   document.getElementById('btn-resume').addEventListener('click', doResume);
   document.getElementById('btn-new').addEventListener('click', function () { showPanel('mode'); });
   document.getElementById('btn-mode-1').addEventListener('click', function () { startNewGame(1); });
@@ -2295,6 +2371,7 @@
   document.getElementById('toggle-reduced-effects').addEventListener('click', function () {
     settings.reducedEffects = !settings.reducedEffects;
     saveJSON(KEY_SETTINGS, settings);
+    resizeRenderSurfaces(true);
     redrawBrickLayer();
     refreshSettingsUI();
   });
@@ -2309,6 +2386,7 @@
     perfSkipped = 0;
     perfMeter.textContent = 'Measuring performance...';
     refreshSettingsUI();
+    resizeRenderSurfaces(true);
   });
   document.getElementById('scale-slider').addEventListener('input' , function (e) {
     settings.scale = Math.min(SCALE_MAX, Math.max(SCALE_MIN, Number(e.target.value) || 1));
@@ -2365,7 +2443,7 @@
   // horizontal playfield coordinate, independent of their displayed sizes.
   function surfaceX(clientX, surface) {
     var rect = surface.getBoundingClientRect();
-    return (clientX - rect.left) * (canvas.width / rect.width);
+    return (clientX - rect.left) * (W / rect.width);
   }
 
   function bindPointerSurface(surface) {
