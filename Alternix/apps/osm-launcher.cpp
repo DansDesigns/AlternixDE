@@ -20,6 +20,9 @@
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QScreen>
+#include <QWindow>
+#include <QResizeEvent>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QLinearGradient>
 #include <QVector>
@@ -285,6 +288,7 @@ class LauncherWindow : public QWidget {
     // in .desktop alphabetical order (which used to go top to bottom).
     std::function<void(int)> requestRowIcons;
     std::function<void()> onHidden;
+    std::function<void(int)> onResized;
     // Retain the live layout targets so every close action, including a
     // pull-down gesture, can reverse the currently visible opening cascade.
     QPointer<QScrollArea> animationScroll;
@@ -311,6 +315,9 @@ public:
     bool isTransitioning() const { return opening || dismissing; }
     void setHiddenCallback(std::function<void()> callback) {
         onHidden = std::move(callback);
+    }
+    void setResizeCallback(std::function<void(int)> callback) {
+        onResized = std::move(callback);
     }
     bool editingDrag = false;
     void replaceViewTiles(const QVector<QWidget*> &tiles, int columns) {
@@ -716,6 +723,11 @@ public:
     }
 
 protected:
+    void resizeEvent(QResizeEvent *event) override {
+        QWidget::resizeEvent(event);
+        if (onResized) onResized(event->size().width());
+    }
+
     void paintEvent(QPaintEvent *) override {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
@@ -1336,6 +1348,7 @@ class AppTile : public QFrame {
     LauncherItem data;
     QLabel *iconLabel = nullptr;
     QLabel *nameLabel = nullptr;
+    QFont originalNameFont;
     QWidget *hoverBox = nullptr;
     bool iconReady = false;
     bool moved = false;
@@ -1357,11 +1370,14 @@ public:
         hoverBox = new QWidget(this);
         hoverBox->setObjectName("hoverBox");
         hoverBox->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        hoverBox->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setDropHighlighted(false);
         QVBoxLayout *v = new QVBoxLayout(hoverBox);
         v->setContentsMargins(16, 16, 16, 16);
         v->setSpacing(8);
-        v->setAlignment(Qt::AlignCenter);
+        // Stretch around the content rather than centering the whole layout:
+        // AlignCenter shrank the name label to its sizeHint, clipping text.
+        v->addStretch(1);
 
         const int iconSize = 48;
         iconLabel = new QLabel(hoverBox);
@@ -1369,42 +1385,99 @@ public:
         QPixmap placeholder(iconSize, iconSize);
         placeholder.fill(Qt::transparent);
         iconLabel->setPixmap(placeholder);
-        v->addWidget(iconLabel);
+        v->addWidget(iconLabel, 0, Qt::AlignHCenter);
 
         nameLabel = new QLabel(data.title, hoverBox);
         nameLabel->setStyleSheet(QString("color:%1; background:transparent;").arg(g_labelColor));
         nameLabel->setWordWrap(true);
-        // Long names must wrap inside the card instead of setting a minimum
-        // width that silently forces the complete grid beyond the viewport.
-        nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        nameLabel->setMinimumWidth(0);
-        nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-        nameLabel->setMinimumHeight(60);
-        nameLabel->setMaximumHeight(200);
+        // The name must occupy the FULL usable card width, not the narrow
+        // sizeHint returned by QLabel when its size policy is Ignored.
+        nameLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
+        originalNameFont = nameLabel->font();
         v->addWidget(nameLabel);
+        v->addStretch(1);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
         outer->setContentsMargins(0, 0, 0, 0);
         outer->addWidget(hoverBox);
     }
 
-    // Called whenever the screen rotates or the current folder is rebuilt.
-    // The grid always has four columns; only each cell's width changes.
+    // The grid remains four columns at every width. The name occupies the
+    // complete inner cell width and the card GROWS vertically as needed.
     void setResponsiveWidth(int cellWidth) {
         cellWidth = qMax(1, cellWidth);
-        setFixedWidth(cellWidth);
-        // Keep icons and labels within narrow portrait cards.  Full-size
-        // icons and padding are preserved on landscape/large screens.
         const int padding = cellWidth >= 110 ? 16 : (cellWidth >= 80 ? 8 : 2);
-        if (auto *v = qobject_cast<QVBoxLayout*>(hoverBox->layout())) {
-            v->setContentsMargins(padding, 12, padding, 12);
-            v->setSpacing(cellWidth < 100 ? 4 : 8);
-        }
-        const int preferredIcon = data.kind == LauncherItem::Folder ? 64 : 48;
-        const int iconWidth = qMin(preferredIcon, qMax(1, cellWidth - 2 * padding));
+        const int spacing = cellWidth < 100 ? 4 : 8;
+        auto *v = static_cast<QVBoxLayout*>(hoverBox->layout());
+        v->setContentsMargins(padding, 12, padding, 12);
+        v->setSpacing(spacing);
+
+        const int contentWidth = qMax(1, cellWidth - 2 * padding);
+        const int iconWidth = qMin(48, contentWidth);
         iconLabel->setFixedSize(iconWidth, iconWidth);
-        iconLabel->setScaledContents(true); // folder collages also scale down
-        if (nameLabel) nameLabel->updateGeometry();
+        iconLabel->setScaledContents(true);
+
+        // Scale the NAME font only when a single word cannot fit even on its
+        // own line. Retain the user's configured font size on normal screens.
+        QFont labelFont(originalNameFont);
+        const qreal basePt = labelFont.pointSizeF() > 0 ? labelFont.pointSizeF() : 14.0;
+        for (qreal pt = basePt; pt >= 8.0; pt -= 0.5) {
+            labelFont.setPointSizeF(pt);
+            const QFontMetrics fm(labelFont);
+            int longest = 0;
+            QString word;
+            for (const QChar c : data.title) {
+                if (c.isSpace()) {
+                    longest = qMax(longest, fm.horizontalAdvance(word));
+                    word.clear();
+                } else word += c;
+            }
+            longest = qMax(longest, fm.horizontalAdvance(word));
+            if (longest <= contentWidth || pt <= 8.0) break;
+        }
+        nameLabel->setFont(labelFont);
+
+        // Qt QLabel word wrapping otherwise clips very long unbroken words.
+        // Insert invisible break opportunities ONLY if a word is still wider
+        // than the available space at the minimum readable font size.
+        const QFontMetrics fm(labelFont);
+        QString displayTitle;
+        QString word;
+        auto appendWord = [&]() {
+            if (fm.horizontalAdvance(word) <= contentWidth) {
+                displayTitle += word;
+            } else {
+                QString segment;
+                for (const QChar c : word) {
+                    if (!segment.isEmpty() &&
+                        fm.horizontalAdvance(segment + c) > contentWidth) {
+                        displayTitle += segment + QChar(0x200B);
+                        segment.clear();
+                    }
+                    segment += c;
+                }
+                displayTitle += segment;
+            }
+            word.clear();
+        };
+        for (const QChar c : data.title) {
+            if (c.isSpace()) {
+                appendWord();
+                displayTitle += c;
+            } else word += c;
+        }
+        appendWord();
+        nameLabel->setText(displayTitle);
+
+        // An explicitly sized QLabel cannot collapse into a narrow centred
+        // strip; heightForWidth gives enough rows for wrapped names/folders.
+        nameLabel->setFixedWidth(contentWidth);
+        const int textHeight = qMax(60, nameLabel->heightForWidth(contentWidth) + 8);
+        nameLabel->setFixedHeight(textHeight);
+        setFixedWidth(cellWidth);
+        // Three layout gaps surround the top/bottom spacers and content.
+        setMinimumHeight(qMax(168, 24 + iconWidth + 3 * spacing + textHeight + 4));
         updateGeometry();
     }
 
@@ -1739,8 +1812,8 @@ public:
         const int width = qMax(1, viewportWidth);
         if (width == lastFittedWidth) return;
         lastFittedWidth = width;
-        // Recalculate height as well: the previous orientation or folder may
-        // have left a much taller minimum on the reusable scroll widget.
+        // Remove old height limits before measuring a reflowed grid. Qt's
+        // sizeHint may otherwise retain the previous screen orientation.
         container->setMinimumHeight(0);
         const QMargins m = grid->contentsMargins();
         const int spacing = qMax(0, grid->horizontalSpacing());
@@ -1750,10 +1823,12 @@ public:
             if (tile) tile->setResponsiveWidth(cellWidth);
         container->setFixedWidth(width);
         grid->invalidate();
-        grid->activate();
-        const int contentHeight = qMax(1, container->sizeHint().height() + 200);
+        const int gridHeight = grid->hasHeightForWidth()
+            ? grid->heightForWidth(width) : grid->sizeHint().height();
+        const int contentHeight = qMax(1, gridHeight + 200);
         container->setMinimumHeight(contentHeight);
         container->resize(width, contentHeight);
+        grid->activate();
     }
 
     void setLive(std::function<void()> viewChanged) {
@@ -2315,6 +2390,7 @@ int main(int argc, char **argv) {
     else
         contentWidth = static_cast<int>(screenWidth * 0.9);
 
+    contentWidth = qMax(1, qMin(contentWidth, screenWidth - 40));
     scroll->setFixedWidth(contentWidth);
     container->setFixedWidth(contentWidth);
     container->setMinimumHeight(container->sizeHint().height() + 200);
@@ -2521,38 +2597,82 @@ int main(int argc, char **argv) {
     });
     refreshTimer.start();
 
+    // In a resident process, the screen can rotate without reopening the
+    // launcher. Both the scroll width AND THE TOP-LEVEL WINDOW must follow it.
+    auto fitGridToScreenWidth = [&](int screenWidth) {
+        const int usable = qMax(1, screenWidth - 40); // main's 20px side margins
+        const int contentWidth = screenWidth <= 800
+            ? usable : qMin(usable, int(screenWidth * 0.9));
+        if (scroll->width() != contentWidth) scroll->setFixedWidth(contentWidth);
+        controller.fitToWidth(contentWidth);
+    };
+    window.setResizeCallback([&](int width) {
+        fitGridToScreenWidth(width);
+    });
+
+    auto currentScreen = [&]() -> QScreen* {
+        if (window.windowHandle() && window.windowHandle()->screen())
+            return window.windowHandle()->screen();
+        return QApplication::primaryScreen();
+    };
+    auto syncScreenGeometry = [&]() {
+        QScreen *screen = currentScreen();
+        if (!screen) return;
+        const QRect target = screen->geometry();
+        if (!target.isValid()) return;
+        // Release the old landscape fixed-width constraint BEFORE resizing
+        // the fullscreen window, or the main layout can reject portrait size.
+        fitGridToScreenWidth(target.width());
+        if (window.isVisible() && window.geometry() != target)
+            window.setGeometry(target);
+    };
+
     auto showLauncher = [&]() {
         if (window.isTransitioning()) return;
         if (window.isVisible()) { window.raise(); window.activateWindow(); return; }
-        // Qtile may have rotated the display or changed its resolution since
-        // daemon startup. Recompute geometry before fullscreen placement.
-        const int screenWidth = QApplication::primaryScreen()->size().width();
-        const int contentWidth = screenWidth <= 800
-            ? screenWidth - 40 : int(screenWidth * 0.9);
-        scroll->setFixedWidth(contentWidth);
-        controller.fitToWidth(contentWidth);
+        QScreen *screen = currentScreen();
+        if (screen) fitGridToScreenWidth(screen->geometry().width());
         for (AppTile *tile : tiles) if (tile) tile->loadIcon(false);
 
-        // No new grid or desktop-entry scan is performed here.
         window.setUpdatesEnabled(false);
         window.showFullScreen();
+        syncScreenGeometry();
         QVector<QWidget*> tileWidgets;
         tileWidgets.reserve(tiles.size());
         for (AppTile *tile : tiles) tileWidgets.append(tile);
         window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
         window.setUpdatesEnabled(true);
+        // A fullscreen request may complete in Qtile on the next X11 event.
+        QTimer::singleShot(0, &window, syncScreenGeometry);
     };
 
-    // A resident launcher can remain open while xrandr changes orientation.
-    // Qtile updates the fullscreen window itself; resize the existing cards
-    // without rebuilding the grid or disturbing app/group membership.
+    // Qtile does not always resize an already fullscreen utility window when
+    // xrandr rotates the output. Apply screen geometry after the X11 events
+    // settle, with a final fullscreen reassertion if the WM ignored resizing.
     QObject::connect(QApplication::primaryScreen(), &QScreen::geometryChanged,
                      &window, [&](const QRect &geometry) {
-        const int screenWidth = geometry.width();
-        const int contentWidth = screenWidth <= 800
-            ? screenWidth - 40 : int(screenWidth * 0.9);
-        scroll->setFixedWidth(contentWidth);
-        controller.fitToWidth(contentWidth);
+        fitGridToScreenWidth(geometry.width());
+        if (!window.isVisible()) return;
+        window.setGeometry(geometry);
+        QTimer::singleShot(0, &window, syncScreenGeometry);
+        QTimer::singleShot(80, &window, syncScreenGeometry);
+        QTimer::singleShot(350, &window, [&]() {
+            if (!window.isVisible()) return;
+            QScreen *screen = currentScreen();
+            if (!screen) return;
+            const QRect target = screen->geometry();
+            if (window.geometry() == target) return;
+            // This fallback only runs when Qtile still holds the OLD
+            // fullscreen bounds; no app grid rebuild or animation replay.
+            if (window.isTransitioning()) {
+                syncScreenGeometry();
+                return;
+            }
+            window.setWindowState(window.windowState() & ~Qt::WindowFullScreen);
+            window.setGeometry(target);
+            window.showFullScreen();
+            syncScreenGeometry();
+        });
     });
 
     auto hideLauncher = [&]() {
