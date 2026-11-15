@@ -51,6 +51,17 @@ static bool overlayMarkerActive(const QString &name) {
     return probe.error() == QLockFile::LockFailedError;
 }
 
+// The lockscreen owns pointer input while locked. Request that the resident
+// osm-status process show its read-only notification tray; do not start a
+// second process or grant a notification permission to unlock the device.
+static void requestLockedStatusTray() {
+    QFile f(overlayMarkerPath("osm-status-request"));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write("show\n");
+        f.close();
+    }
+}
+
 // Utility
 static QString readFirstLine(const QString &path) {
     QFile f(path);
@@ -188,6 +199,25 @@ public:
                 [this]() { enforceLock(); });
         enforcementTimer->start();
 
+        // The fullscreen lock owns the pointer grab, so a separate status
+        // badge cannot reliably receive a click. Draw the small notification
+        // indicator directly on the lockscreen and check only its file count.
+        notificationPollTimer = new QTimer(this);
+        notificationPollTimer->setInterval(700);
+        connect(notificationPollTimer, &QTimer::timeout, this, [this]() {
+            const int count = QDir(QDir::homePath() + "/.osm-notify")
+                .entryList(QStringList() << "*.txt",
+                           QDir::Files | QDir::Readable).size();
+            if (count != lockedNotificationCount) {
+                lockedNotificationCount = count;
+                update();
+            }
+        });
+        notificationPollTimer->start();
+        lockedNotificationCount = QDir(QDir::homePath() + "/.osm-notify")
+            .entryList(QStringList() << "*.txt",
+                       QDir::Files | QDir::Readable).size();
+
         adjustScaling();
     }
 
@@ -228,6 +258,26 @@ protected:
 
         // Dark overlay for readability
         p.fillRect(rect(), QColor(0,0,0,80));
+
+        // Match osm-status's small right-edge unread-count badge. This is
+        // visual-only; pointer/touch events are still handled by the lock.
+        if (lockedNotificationCount > 0) {
+            p.setRenderHint(QPainter::Antialiasing, true);
+            const int x = width() - 28;
+            const int y = int(height() * 0.15) + 24;
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(112, 128, 153, 128));
+            p.drawRoundedRect(QRectF(x, y, 24, 54), 6, 6);
+            p.setBrush(QColor(0, 160, 220));
+            p.drawEllipse(QPointF(x + 14, y), 14, 14);
+            QFont countFont = font();
+            countFont.setBold(true);
+            countFont.setPointSize(16);
+            p.setFont(countFont);
+            p.setPen(Qt::white);
+            p.drawText(QRectF(x, y - 14, 28, 28), Qt::AlignCenter,
+                       QString::number(lockedNotificationCount));
+        }
 
         // Draw slider (PNG or "^")
         if (slideTextLabel) {
@@ -271,6 +321,12 @@ protected:
     // A press anywhere on the lockscreen can start the swipe; only a
     // sufficiently long UPWARD drag can open the existing PIN/pattern dialog.
     void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton && e->pos().x() >= width() - 32) {
+            statusEdgeGesture = true;
+            statusEdgeStart = e->pos();
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton) {
             beginSlide(e->pos().y());
             e->accept();
@@ -280,12 +336,30 @@ protected:
     }
 
     void mouseMoveEvent(QMouseEvent *e) override {
+        if (statusEdgeGesture) {
+            if ((e->buttons() & Qt::LeftButton) &&
+                statusEdgeStart.x() - e->pos().x() > 12) {
+                requestLockedStatusTray();
+                statusEdgeGesture = false;
+            }
+            e->accept();
+            return;
+        }
         if (sliding && activeTouchId == -1 && (e->buttons() & Qt::LeftButton))
             moveSlide(e->pos().y());
         e->accept();
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        if (statusEdgeGesture) {
+            if (e->button() == Qt::LeftButton && lockedNotificationCount > 0 &&
+                e->pos().y() >= int(height() * 0.15) &&
+                e->pos().y() <= int(height() * 0.15) + 110)
+                requestLockedStatusTray();
+            statusEdgeGesture = false;
+            e->accept();
+            return;
+        }
         if (e->button() == Qt::LeftButton && sliding && activeTouchId == -1) {
             moveSlide(e->pos().y());
             finishSlide();
@@ -301,6 +375,13 @@ protected:
             auto *touch = static_cast<QTouchEvent *>(e);
             if (activeTouchId == -1 && !touch->touchPoints().isEmpty()) {
                 const auto &point = touch->touchPoints().first();
+                if (point.pos().x() >= width() - 32) {
+                    statusEdgeGesture = true;
+                    statusEdgeStart = point.pos().toPoint();
+                    statusEdgeTouchId = point.id();
+                    e->accept();
+                    return true;
+                }
                 activeTouchId = point.id();
                 beginSlide(point.pos().y());
             }
@@ -310,6 +391,28 @@ protected:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd: {
             auto *touch = static_cast<QTouchEvent *>(e);
+            if (statusEdgeTouchId >= 0) {
+                const bool ended = e->type() == QEvent::TouchEnd;
+                for (const auto &point : touch->touchPoints()) {
+                    if (point.id() != statusEdgeTouchId) continue;
+                    if (statusEdgeStart.x() - point.pos().x() > 12) {
+                        requestLockedStatusTray();
+                        statusEdgeGesture = false;
+                        statusEdgeTouchId = -1;
+                    } else if (ended || (point.state() & Qt::TouchPointReleased)) {
+                        if (lockedNotificationCount > 0 &&
+                            point.pos().y() >= int(height() * 0.15) &&
+                            point.pos().y() <= int(height() * 0.15) + 110)
+                            requestLockedStatusTray();
+                        statusEdgeGesture = false;
+                        statusEdgeTouchId = -1;
+                    }
+                    break;
+                }
+                if (ended) { statusEdgeGesture = false; statusEdgeTouchId = -1; }
+                e->accept();
+                return true;
+            }
             bool released = (e->type() == QEvent::TouchEnd);
             for (const auto &point : touch->touchPoints()) {
                 if (point.id() != activeTouchId)
@@ -327,6 +430,8 @@ protected:
             return true;
         }
         case QEvent::TouchCancel:
+            statusEdgeGesture = false;
+            statusEdgeTouchId = -1;
             activeTouchId = -1;
             if (sliding) {
                 sliding = false;
@@ -375,6 +480,11 @@ private:
     bool haveKeyboardGrab = false;
     bool haveMouseGrab = false;
     unsigned int enforcementCount = 0;
+    QTimer *notificationPollTimer = nullptr;
+    int lockedNotificationCount = 0;
+    bool statusEdgeGesture = false;
+    int statusEdgeTouchId = -1;
+    QPoint statusEdgeStart;
 
     // The Qt native grabs are released only for osm-power and osm-lock auth.
     void releaseInputGrabs() {
@@ -402,6 +512,19 @@ private:
             powerMenuActive = false;
             haveKeyboardGrab = false;
             haveMouseGrab = false;
+        }
+
+        // Only a live osm-status popout may temporarily receive pointer input
+        // over the lock. Its V7 read-only window must keep a fullscreen input
+        // shield above other applications. The lock retains keyboard control.
+        // Power takes precedence above this branch as before.
+        if (overlayMarkerActive("osm-status")) {
+            if (haveMouseGrab && windowHandle())
+                windowHandle()->setMouseGrabEnabled(false);
+            haveMouseGrab = false;
+            if (windowHandle() && !haveKeyboardGrab)
+                haveKeyboardGrab = windowHandle()->setKeyboardGrabEnabled(true);
+            return;
         }
 
         // Override-redirect windows are outside Qtile's regular 'above'
