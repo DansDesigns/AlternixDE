@@ -1361,9 +1361,8 @@ public:
         : QFrame(parent), data(item) {
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAutoFillBackground(false);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        // Do not enforce a 150 px minimum: four cards must fit portrait screens.
-        setMinimumHeight(160);
+        // Four columns are sized explicitly by LauncherGridController.
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         setStyleSheet("QFrame { background: #00000099; border: none; }");
         setContextMenuPolicy(Qt::DefaultContextMenu);
 
@@ -1375,9 +1374,9 @@ public:
         QVBoxLayout *v = new QVBoxLayout(hoverBox);
         v->setContentsMargins(16, 16, 16, 16);
         v->setSpacing(8);
-        // Stretch around the content rather than centering the whole layout:
-        // AlignCenter shrank the name label to its sizeHint, clipping text.
-        v->addStretch(1);
+        // Keep the icon and its label together in a compact centred block.
+        // Each label is explicitly given the FULL usable card width below.
+        v->setAlignment(Qt::AlignCenter);
 
         const int iconSize = 48;
         iconLabel = new QLabel(hoverBox);
@@ -1396,7 +1395,6 @@ public:
         nameLabel->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
         originalNameFont = nameLabel->font();
         v->addWidget(nameLabel);
-        v->addStretch(1);
 
         QVBoxLayout *outer = new QVBoxLayout(this);
         outer->setContentsMargins(0, 0, 0, 0);
@@ -1407,10 +1405,12 @@ public:
     // complete inner cell width and the card GROWS vertically as needed.
     void setResponsiveWidth(int cellWidth) {
         cellWidth = qMax(1, cellWidth);
-        const int padding = cellWidth >= 110 ? 16 : (cellWidth >= 80 ? 8 : 2);
-        const int spacing = cellWidth < 100 ? 4 : 8;
+        // Width and internal gutters both contract on narrow portrait displays.
+        const int padding = qBound(2, cellWidth / 18, 14);
+        const int verticalPadding = cellWidth < 90 ? 5 : 9;
+        const int spacing = cellWidth < 100 ? 4 : 7;
         auto *v = static_cast<QVBoxLayout*>(hoverBox->layout());
-        v->setContentsMargins(padding, 12, padding, 12);
+        v->setContentsMargins(padding, verticalPadding, padding, verticalPadding);
         v->setSpacing(spacing);
 
         const int contentWidth = qMax(1, cellWidth - 2 * padding);
@@ -1473,11 +1473,16 @@ public:
         // An explicitly sized QLabel cannot collapse into a narrow centred
         // strip; heightForWidth gives enough rows for wrapped names/folders.
         nameLabel->setFixedWidth(contentWidth);
-        const int textHeight = qMax(60, nameLabel->heightForWidth(contentWidth) + 8);
+        const int textHeight = qMax(fm.height() + 2,
+                                    nameLabel->heightForWidth(contentWidth) + 2);
         nameLabel->setFixedHeight(textHeight);
-        setFixedWidth(cellWidth);
-        // Three layout gaps surround the top/bottom spacers and content.
-        setMinimumHeight(qMax(168, 24 + iconWidth + 3 * spacing + textHeight + 4));
+        // Match the original compact tiles (~142px) rather than letting the
+        // landscape grid stretch every row to 250px. Only unusually long
+        // wrapped labels are allowed to increase a card's height.
+        const int baseHeight = cellWidth < 90 ? 118 : 142;
+        const int cellHeight = qMax(baseHeight, iconWidth + spacing + textHeight
+                                                + 2 * verticalPadding);
+        setFixedSize(cellWidth, cellHeight);
         updateGeometry();
     }
 
@@ -1812,22 +1817,32 @@ public:
         const int width = qMax(1, viewportWidth);
         if (width == lastFittedWidth) return;
         lastFittedWidth = width;
-        // Remove old height limits before measuring a reflowed grid. Qt's
-        // sizeHint may otherwise retain the previous screen orientation.
-        container->setMinimumHeight(0);
         const QMargins m = grid->contentsMargins();
         const int spacing = qMax(0, grid->horizontalSpacing());
+        const int rowSpacing = qMax(0, grid->verticalSpacing());
         const int cellWidth = qMax(1, (width - m.left() - m.right()
                                      - (columns - 1) * spacing) / columns);
-        for (AppTile *tile : tiles)
-            if (tile) tile->setResponsiveWidth(cellWidth);
-        container->setFixedWidth(width);
+        // Refit all four columns before changing the content widget width.
+        // A previously fixed landscape size must not become a new minimum.
+        QVector<int> rowHeights((tiles.size() + columns - 1) / columns, 0);
+        for (int i = 0; i < tiles.size(); ++i) {
+            if (!tiles.at(i)) continue;
+            tiles.at(i)->setResponsiveWidth(cellWidth);
+            rowHeights[i / columns] = qMax(rowHeights.at(i / columns),
+                                           tiles.at(i)->height());
+        }
+        // QGridLayout::heightForWidth() may retain the old screen's size hints
+        // across an xrandr rotation. The rows have explicit sizes, so measure
+        // them directly and do NOT add a 200px spacer that stretches the cards.
+        int contentHeight = m.top() + m.bottom();
+        for (int height : rowHeights) contentHeight += height;
+        if (rowHeights.size() > 1)
+            contentHeight += (rowHeights.size() - 1) * rowSpacing;
+        contentHeight = qMax(1, contentHeight);
+        // The grid is the only content of this widget. Reset both dimensions
+        // together, so there is no transient old-landscape minimum constraint.
+        container->setFixedSize(width, contentHeight);
         grid->invalidate();
-        const int gridHeight = grid->hasHeightForWidth()
-            ? grid->heightForWidth(width) : grid->sizeHint().height();
-        const int contentHeight = qMax(1, gridHeight + 200);
-        container->setMinimumHeight(contentHeight);
-        container->resize(width, contentHeight);
         grid->activate();
     }
 
@@ -2393,7 +2408,8 @@ int main(int argc, char **argv) {
     contentWidth = qMax(1, qMin(contentWidth, screenWidth - 40));
     scroll->setFixedWidth(contentWidth);
     container->setFixedWidth(contentWidth);
-    container->setMinimumHeight(container->sizeHint().height() + 200);
+    // The controller sets exact grid height after cards are created.
+    container->setMinimumHeight(0);
 
     scroll->setWidget(container);
 
@@ -2597,41 +2613,87 @@ int main(int argc, char **argv) {
     });
     refreshTimer.start();
 
-    // In a resident process, the screen can rotate without reopening the
-    // launcher. Both the scroll width AND THE TOP-LEVEL WINDOW must follow it.
-    auto fitGridToScreenWidth = [&](int screenWidth) {
+    // A resident Qtile/X11 session can rotate between calls to osm-launcher,
+    // and on some versions Qtile does not resize a fullscreen *utility* window
+    // in response to xrandr. Refit the four-column grid independently of the
+    // window manager's fullscreen geometry, then reassert fullscreen only if
+    // the window still has the old dimensions after several checks.
+    auto contentWidthFor = [](int screenWidth) -> int {
         const int usable = qMax(1, screenWidth - 40); // main's 20px side margins
-        const int contentWidth = screenWidth <= 800
-            ? usable : qMin(usable, int(screenWidth * 0.9));
-        if (scroll->width() != contentWidth) scroll->setFixedWidth(contentWidth);
+        return screenWidth <= 800 ? usable
+                                  : qMax(1, qMin(usable, int(screenWidth * 0.9)));
+    };
+    auto fitGridToScreenWidth = [&](int screenWidth) {
+        const int contentWidth = contentWidthFor(screenWidth);
+        if (scroll->width() != contentWidth)
+            scroll->setFixedWidth(contentWidth);
         controller.fitToWidth(contentWidth);
     };
-    window.setResizeCallback([&](int width) {
-        fitGridToScreenWidth(width);
-    });
-
     auto currentScreen = [&]() -> QScreen* {
         if (window.windowHandle() && window.windowHandle()->screen())
             return window.windowHandle()->screen();
         return QApplication::primaryScreen();
     };
+    window.setResizeCallback([&](int width) {
+        // During rotation Qtile may resize the old window before QScreen has
+        // signalled the new bounds. Prefer the actual screen to its old width.
+        QScreen *screen = currentScreen();
+        fitGridToScreenWidth(screen && screen->geometry().width() > 0
+                                 ? screen->geometry().width() : width);
+    });
+    QRect lastScreenGeometry;
+    int resizeAttempts = 0;
+    bool reassertedFullscreen = false;
     auto syncScreenGeometry = [&]() {
         QScreen *screen = currentScreen();
         if (!screen) return;
         const QRect target = screen->geometry();
         if (!target.isValid()) return;
-        // Release the old landscape fixed-width constraint BEFORE resizing
-        // the fullscreen window, or the main layout can reject portrait size.
+        const bool screenChanged = target != lastScreenGeometry;
+        if (screenChanged) {
+            lastScreenGeometry = target;
+            resizeAttempts = 0;
+            reassertedFullscreen = false;
+        }
+        // Always fit from the SCREEN, not the current window size: Qtile may
+        // still have the landscape geometry while the display is portrait.
         fitGridToScreenWidth(target.width());
-        if (window.isVisible() && window.geometry() != target)
+        if (!window.isVisible()) return;
+        if (window.geometry() == target) {
+            resizeAttempts = 0;
+            return;
+        }
+        if (resizeAttempts < 3 || window.isTransitioning() ||
+            reassertedFullscreen) {
+            // First attempt preserves the existing window/cascade without a
+            // hide/show or app index rebuild.
             window.setGeometry(target);
+            if (window.windowHandle())
+                window.windowHandle()->setGeometry(target);
+            ++resizeAttempts;
+            return;
+        }
+        // Last resort: Qtile ignored geometry changes because the old
+        // _NET_WM_STATE_FULLSCREEN size was retained through the rotation.
+        // Briefly leave fullscreen and re-enter against the NEW screen bounds.
+        // Never replay the card animations or reload app entries.
+        reassertedFullscreen = true; // never flicker/retry every 200ms
+        window.showNormal();
+        window.setGeometry(target);
+        window.showFullScreen();
+        fitGridToScreenWidth(target.width());
+        resizeAttempts = 0;
     };
 
     auto showLauncher = [&]() {
         if (window.isTransitioning()) return;
-        if (window.isVisible()) { window.raise(); window.activateWindow(); return; }
-        QScreen *screen = currentScreen();
-        if (screen) fitGridToScreenWidth(screen->geometry().width());
+        if (window.isVisible()) {
+            syncScreenGeometry();
+            window.raise();
+            window.activateWindow();
+            return;
+        }
+        syncScreenGeometry();
         for (AppTile *tile : tiles) if (tile) tile->loadIcon(false);
 
         window.setUpdatesEnabled(false);
@@ -2642,38 +2704,23 @@ int main(int argc, char **argv) {
         for (AppTile *tile : tiles) tileWidgets.append(tile);
         window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
         window.setUpdatesEnabled(true);
-        // A fullscreen request may complete in Qtile on the next X11 event.
         QTimer::singleShot(0, &window, syncScreenGeometry);
+        QTimer::singleShot(100, &window, syncScreenGeometry);
     };
 
-    // Qtile does not always resize an already fullscreen utility window when
-    // xrandr rotates the output. Apply screen geometry after the X11 events
-    // settle, with a final fullscreen reassertion if the WM ignored resizing.
-    QObject::connect(QApplication::primaryScreen(), &QScreen::geometryChanged,
-                     &window, [&](const QRect &geometry) {
-        fitGridToScreenWidth(geometry.width());
-        if (!window.isVisible()) return;
-        window.setGeometry(geometry);
-        QTimer::singleShot(0, &window, syncScreenGeometry);
-        QTimer::singleShot(80, &window, syncScreenGeometry);
-        QTimer::singleShot(350, &window, [&]() {
-            if (!window.isVisible()) return;
-            QScreen *screen = currentScreen();
-            if (!screen) return;
-            const QRect target = screen->geometry();
-            if (window.geometry() == target) return;
-            // This fallback only runs when Qtile still holds the OLD
-            // fullscreen bounds; no app grid rebuild or animation replay.
-            if (window.isTransitioning()) {
-                syncScreenGeometry();
-                return;
-            }
-            window.setWindowState(window.windowState() & ~Qt::WindowFullScreen);
-            window.setGeometry(target);
-            window.showFullScreen();
-            syncScreenGeometry();
-        });
+    // Signals provide an immediate response when Qt/X11 sends them. The cheap
+    // 200ms geometry check also handles devices where changing orientation
+    // does not deliver a primary-screen geometry signal to the resident app.
+    for (QScreen *screen : QApplication::screens()) {
+        QObject::connect(screen, &QScreen::geometryChanged, &window,
+                         [&](const QRect &) { syncScreenGeometry(); });
+    }
+    QTimer orientationTimer(&a);
+    orientationTimer.setInterval(200);
+    QObject::connect(&orientationTimer, &QTimer::timeout, &a, [&]() {
+        if (window.isVisible()) syncScreenGeometry();
     });
+    orientationTimer.start();
 
     auto hideLauncher = [&]() {
         if (window.isVisible() && !window.isTransitioning())
