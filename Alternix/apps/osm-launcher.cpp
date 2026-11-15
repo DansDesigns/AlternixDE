@@ -373,9 +373,25 @@ public:
         RowReveal &state = rowReveals[row];
         if (state.started) return;
         state.started = true;
-        // Called bottom-to-top by the same loops that schedule the card fades.
-        // Icons are decoded by the lazy timer while the row's card/background
-        // stages are animating, so the icon/label stage has actual pixmaps.
+        // Allocate paint effects for just this visible row, never the entire
+        // offscreen grid. Install at progress=0 BEFORE showing each card.
+        const int begin = row * animationColumns;
+        const int end = qMin(begin + animationColumns, animationTiles.size());
+        for (int index = begin; index < end; ++index) {
+            QWidget *tile = animationTiles.at(index);
+            if (!tile) continue;
+            auto *cardEffect = new LauncherRevealEffect(0.30, tile);
+            tile->setGraphicsEffect(cardEffect);
+            state.cards.append(cardEffect);
+            for (QLabel *label : tile->findChildren<QLabel*>()) {
+                auto *contentEffect = new LauncherRevealEffect(0.85, label);
+                label->setGraphicsEffect(contentEffect);
+                state.contents.append(contentEffect);
+            }
+            tile->show();
+        }
+        // The existing icon queue still loads bottom row first, using only
+        // cached pixmaps during the very short animation.
         if (requestRowIcons) requestRowIcons(row);
         for (const auto &effect : state.cards)
             if (effect) steps.append(LauncherRevealStep(effect, startMs, cardMs));
@@ -465,23 +481,20 @@ public:
         animationTiles.reserve(tiles.size());
         for (QWidget *tile : tiles) animationTiles.append(tile);
 
-        // Install hidden-scale effects on EVERY row before the window can paint.
-        // This includes rows that will only become visible after scrolling.
+        // Keep offscreen rows in the layout without creating effects or backing
+        // pixmaps for them. They stay hidden until their row enters the viewport;
+        // retainSizeWhenHidden ensures that their grid positions never move.
+        // Effects for onscreen rows are installed in queueRowReveal() before
+        // revealing them, so fast scrolling does not flash unanimated cards.
         rowReveals.clear();
         rowReveals.resize((animationTiles.size() + animationColumns - 1) /
                           animationColumns);
-        for (int index = 0; index < animationTiles.size(); ++index) {
-            QWidget *tile = animationTiles.at(index);
+        for (const auto &tile : animationTiles) {
             if (!tile) continue;
-            RowReveal &row = rowReveals[index / animationColumns];
-            auto *cardEffect = new LauncherRevealEffect(0.30, tile);
-            tile->setGraphicsEffect(cardEffect);
-            row.cards.append(cardEffect);
-            for (QLabel *label : tile->findChildren<QLabel*>()) {
-                auto *contentEffect = new LauncherRevealEffect(0.85, label);
-                label->setGraphicsEffect(contentEffect);
-                row.contents.append(contentEffect);
-            }
+            tile->setGraphicsEffect(nullptr);
+            for (QLabel *label : tile->findChildren<QLabel*>())
+                label->setGraphicsEffect(nullptr);
+            tile->hide();
         }
 
         // The close button is always last, after the whole visible cascade.
@@ -584,9 +597,14 @@ public:
                 v = qBound(qreal(0), v, qreal(1));
                 return 1.0 - (1.0 - v) * (1.0 - v) * (1.0 - v);
             };
-            gradientOpacity = easeOutCubic(elapsed / gradientMs);
-            backdropOpacity = easeOutCubic((elapsed - gradientMs) / backdropMs);
-            update();
+            const qreal nextGradient = easeOutCubic(elapsed / gradientMs);
+            const qreal nextBackdrop = easeOutCubic((elapsed - gradientMs) / backdropMs);
+            if (qAbs(nextGradient - gradientOpacity) > 0.0001 ||
+                qAbs(nextBackdrop - backdropOpacity) > 0.0001) {
+                gradientOpacity = nextGradient;
+                backdropOpacity = nextBackdrop;
+                update(); // Do not repaint all of fullscreen for tile-only frames.
+            }
             for (const LauncherRevealStep &step : steps) {
                 if (step.effect)
                     step.effect->setProgress(easeOutCubic(
@@ -655,6 +673,7 @@ public:
             ++animatedRowCount;
 
             for (QWidget *tile : rows.at(row)) {
+                if (!tile->isVisible()) continue;
                 for (QLabel *label : tile->findChildren<QLabel*>()) {
                     auto *effect = new LauncherRevealEffect(0.85, label);
                     effect->setProgress(1.0);
@@ -697,9 +716,14 @@ public:
                     step.effect->setProgress(1.0 - easeInCubic(
                         (elapsed - step.startMs) / step.durationMs));
             }
-            backdropOpacity = 1.0 - easeInCubic((elapsed - backdropStart) / backdropMs);
-            gradientOpacity = 1.0 - easeInCubic((elapsed - gradientStart) / gradientMs);
-            update();
+            const qreal nextBackdrop = 1.0 - easeInCubic((elapsed - backdropStart) / backdropMs);
+            const qreal nextGradient = 1.0 - easeInCubic((elapsed - gradientStart) / gradientMs);
+            if (qAbs(nextBackdrop - backdropOpacity) > 0.0001 ||
+                qAbs(nextGradient - gradientOpacity) > 0.0001) {
+                backdropOpacity = nextBackdrop;
+                gradientOpacity = nextGradient;
+                update(); // Tile cascade does not need a full-screen repaint.
+            }
         });
         connect(animation, &QVariantAnimation::finished, this, [this]() {
             // Unlike the old one-shot launcher, keep the entire UI in memory.
@@ -710,6 +734,9 @@ public:
                 for (QLabel *label : tile->findChildren<QLabel*>())
                     label->setGraphicsEffect(nullptr);
                 tile->setGraphicsEffect(nullptr);
+                // Restore the ordinary grid while the parent window is hidden.
+                // Next opening will hide the offscreen rows before its first frame.
+                tile->show();
             }
             if (animationCloseButton)
                 animationCloseButton->setGraphicsEffect(nullptr);
@@ -1362,7 +1389,9 @@ public:
         setAttribute(Qt::WA_TranslucentBackground, true);
         setAutoFillBackground(false);
         // Four columns are sized explicitly by LauncherGridController.
-        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        QSizePolicy tilePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        tilePolicy.setRetainSizeWhenHidden(true);
+        setSizePolicy(tilePolicy);
         setStyleSheet("QFrame { background: #00000099; border: none; }");
         setContextMenuPolicy(Qt::DefaultContextMenu);
 
@@ -1500,10 +1529,21 @@ public:
             : "#hoverBox { background: #80708099; border-radius: 20px; }"
               "#hoverBox:hover { background-color: #282828; border: 1px solid white; }");
     }
+    bool hasLoadedIcon() const { return iconReady; }
     bool loadIcon(bool decodeMissing = true) {
         if (iconReady) return true;
         if (!iconLabel) return false;
         if (data.kind == LauncherItem::Folder) {
+            // At most one uncached thumbnail is resolved per warm-up tick.
+            if (decodeMissing) {
+                for (int i = 0; i < data.preview.size() && i < 4; ++i) {
+                    const QString &field = data.preview.at(i).icon;
+                    if (!LauncherIconCache::isReady(field)) {
+                        LauncherIconCache::get(field, true);
+                        return false;
+                    }
+                }
+            }
             // Wait until all four thumbnails are in memory; never trigger
             // filesystem/icon-theme lookups from an animation frame.
             if (!decodeMissing) {
@@ -2565,29 +2605,33 @@ int main(int argc, char **argv) {
         if (controller.insideGroup()) controller.openGroup(QString());
     });
 
-    // Prepare icons gradually while hidden and keep decoded pixmaps in RAM.
-    // On a cold first run, missing icons remain placeholders during the short
-    // animation, and become visible after it rather than freezing its frames.
+    // Icon disk lookups can dominate the opening CPU spike. During a cascade
+    // NEVER resolve icons from disk. Warm caches slowly in the hidden resident
+    // process; on a cold visible launch, decode at most one visible icon each
+    // tick, leaving offscreen apps until after closing.
     int nextWarmIcon = 0;
     QTimer warmTimer(&a);
-    warmTimer.setInterval(12);
+    warmTimer.setInterval(50);
     QObject::connect(&warmTimer, &QTimer::timeout, &a, [&]() {
         if (window.isTransitioning()) return;
-        if (nextWarmIcon < apps.size()) {
-            // The slow icon-theme search happens only outside animations.
-            LauncherIconCache::get(apps.at(nextWarmIcon++).icon, true);
-        }
-        // Tiles that are already drawn retain their pixmaps. Fill new/uncached
-        // tiles without forcing invisible rows to repaint during scrolling.
-        QWidget *viewport = scroll->viewport();
-        for (AppTile *tile : tiles) {
-            if (!tile) continue;
-            if (window.isVisible()) {
-                const QRect visible(tile->mapTo(viewport, QPoint(0, 0)), tile->size());
-                if (!visible.intersects(viewport->rect())) continue;
+        if (window.isVisible()) {
+            QWidget *viewport = scroll->viewport();
+            for (AppTile *tile : tiles) {
+                if (!tile || tile->hasLoadedIcon()) continue;
+                const QRect inViewport(tile->mapTo(viewport, QPoint(0, 0)), tile->size());
+                if (!inViewport.intersects(viewport->rect())) continue;
+                if (warmTimer.interval() != 50) warmTimer.setInterval(50);
+                tile->loadIcon(true); // one visible tile (or folder thumbnail) per tick
+                return;
             }
-            tile->loadIcon(false);
+            // All on-screen icons are ready; avoid repeatedly walking the
+            // grid 20 times a second while the user leaves the launcher open.
+            if (warmTimer.interval() != 250) warmTimer.setInterval(250);
+            return;
         }
+        if (warmTimer.interval() != 50) warmTimer.setInterval(50);
+        if (nextWarmIcon < apps.size())
+            LauncherIconCache::get(apps.at(nextWarmIcon++).icon, true);
         if (nextWarmIcon >= apps.size()) warmTimer.stop();
     });
     warmTimer.start();
@@ -2663,10 +2707,11 @@ int main(int argc, char **argv) {
             resizeAttempts = 0;
             return;
         }
-        if (resizeAttempts < 3 || window.isTransitioning() ||
-            reassertedFullscreen) {
-            // First attempt preserves the existing window/cascade without a
-            // hide/show or app index rebuild.
+        if (reassertedFullscreen) return; // Never force a full-screen repaint every 200ms.
+        // Do not repeatedly resize during a cascade; a screen-change signal
+        // may do one immediate correction, but other checks wait for idle.
+        if (window.isTransitioning() && !screenChanged) return;
+        if (resizeAttempts < 3) {
             window.setGeometry(target);
             if (window.windowHandle())
                 window.windowHandle()->setGeometry(target);
@@ -2694,8 +2739,8 @@ int main(int argc, char **argv) {
             return;
         }
         syncScreenGeometry();
-        for (AppTile *tile : tiles) if (tile) tile->loadIcon(false);
-
+        // The opening row queue requests just the visible tiles' cached icons;
+        // walking every offscreen QLabel here caused a startup paint burst.
         window.setUpdatesEnabled(false);
         window.showFullScreen();
         syncScreenGeometry();
