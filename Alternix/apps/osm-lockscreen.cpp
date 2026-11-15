@@ -20,6 +20,9 @@
 #include <QGraphicsOpacityEffect>
 #include <QFontMetrics>
 #include <QCloseEvent>
+#include <QShowEvent>
+#include <QResizeEvent>
+#include <QPointer>
 #include <QtMath>
 #include <QWindow>
 #include <QLockFile>
@@ -108,14 +111,15 @@ public:
         loadIcons();
 
         // Root container for layout
-        QWidget *root = new QWidget(this);
-        root->setGeometry(rect());
+        layoutRoot = new QWidget(this);
+        layoutRoot->setGeometry(rect());
         // The wallpaper, clock and status labels are visual-only.  Let all
         // mouse presses/drags pass through them to this full-screen widget,
         // so a swipe can begin ANYWHERE rather than only on the padlock.
-        root->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        layoutRoot->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 
-        QVBoxLayout *mainLayout = new QVBoxLayout(root);
+        rootLayout = new QVBoxLayout(layoutRoot);
+        QVBoxLayout *mainLayout = rootLayout;
         mainLayout->setContentsMargins(40,40,40,40);
         mainLayout->setSpacing(15);
 
@@ -219,6 +223,17 @@ public:
                        QDir::Files | QDir::Readable).size();
 
         adjustScaling();
+
+        // Qtile does not reliably notify override-redirect fullscreen windows
+        // when xrandr changes orientation. Track the live QScreen geometry as
+        // osm-launcher does, with a cheap fallback poll on affected devices.
+        connect(qApp, &QGuiApplication::primaryScreenChanged, this,
+                [this](QScreen *) { syncScreenGeometry(); });
+        orientationTimer = new QTimer(this);
+        orientationTimer->setInterval(200);
+        connect(orientationTimer, &QTimer::timeout, this,
+                [this]() { syncScreenGeometry(); });
+        orientationTimer->start();
     }
 
 protected:
@@ -249,11 +264,14 @@ protected:
 
         p.fillRect(rect(), Qt::black);
 
-        // Draw wallpaper
-        if (!wallpaper.isNull()) {
-            QPixmap scaled = wallpaper.scaled(size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-            QPoint c = rect().center() - QPoint(scaled.width()/2, scaled.height()/2);
-            p.drawPixmap(c, scaled);
+        // Draw the already-resized wallpaper. A rotation rebuilds this once;
+        // ordinary repaint/slide frames never rescale the full-screen image.
+        if (!wallpaperCover.isNull()) {
+            const qreal dpr = wallpaperCover.devicePixelRatioF();
+            const qreal coverW = wallpaperCover.width() / dpr;
+            const qreal coverH = wallpaperCover.height() / dpr;
+            p.drawPixmap(QPointF((width() - coverW) * 0.5,
+                                 (height() - coverH) * 0.5), wallpaperCover);
         }
 
         // Dark overlay for readability
@@ -282,29 +300,17 @@ protected:
         // Draw slider (PNG or "^")
         if (slideTextLabel) {
             QRect tg = slideTextLabel->geometry();
-            int baseY = tg.top() - (30 * scaleFactor);
-            int arrowY = baseY + sliderOffset;
-            int cx = width()/2;
+            const int baseY = tg.top() - qMax(22, qMin(width(), height()) / 25);
+            const int arrowY = baseY + sliderOffset;
+            const int cx = width()/2;
 
-            // ────────────────────────────────────────────────
-            // ONLY CHANGE MADE HERE — proper aspect-ratio icon
-            // ────────────────────────────────────────────────
-            if (sliderIconAvailable && !sliderIcon.isNull()) {
-                int desiredHeight = int((height() / 10.0) * scaleFactor);
-
-                QPixmap sliderScaled = sliderIcon.scaledToHeight(
-                    desiredHeight,
-                    Qt::SmoothTransformation
-                );
-
-                int x = cx - sliderScaled.width() / 2;
-                int y = arrowY - sliderScaled.height() / 2;
-
-                p.drawPixmap(x, y, sliderScaled);
-
+            if (sliderIconAvailable && !sliderIconScaled.isNull()) {
+                const int x = cx - sliderIconScaled.width() / 2;
+                const int y = arrowY - sliderIconScaled.height() / 2;
+                p.drawPixmap(x, y, sliderIconScaled);
             } else {
                 QFont f = font();
-                f.setPointSize(int(36 * scaleFactor));
+                f.setPixelSize(qBound(30, height() / 16, 90));
                 p.setFont(f);
                 p.setPen(Qt::white);
                 QRect r(cx-40, arrowY-30, 80, 60);
@@ -313,7 +319,28 @@ protected:
         }
     }
 
-    void resizeEvent(QResizeEvent *) override {
+    void showEvent(QShowEvent *ev) override {
+        QWidget::showEvent(ev);
+        // The native QWindow may not exist until the first show(). Rebind if
+        // the window moves to a different screen, then sync after fullscreen
+        // geometry has had a chance to settle in Qt/X11.
+        if (!windowScreenSignalConnected && windowHandle()) {
+            windowScreenSignalConnected = true;
+            connect(windowHandle(), &QWindow::screenChanged, this,
+                    [this](QScreen *) { syncScreenGeometry(); });
+        }
+        QTimer::singleShot(0, this, [this]() { syncScreenGeometry(); });
+    }
+
+    void resizeEvent(QResizeEvent *ev) override {
+        QWidget::resizeEvent(ev);
+        if (ev->oldSize() != ev->size())
+            cancelGestureForScreenChange();
+        // This child is a manual, full-window layout host. The old code only
+        // resized the outer lockscreen: the layout stayed landscape-sized and
+        // clipped labels when rotating to portrait (or the reverse).
+        if (layoutRoot)
+            layoutRoot->setGeometry(rect());
         adjustScaling();
     }
 
@@ -455,11 +482,25 @@ private:
     QGraphicsOpacityEffect *wifiEffect;
     QGraphicsOpacityEffect *btEffect;
 
+    QWidget *layoutRoot = nullptr;
+    QVBoxLayout *rootLayout = nullptr;
     QPixmap wallpaper;
+    QPixmap wallpaperCover;
+    QSize wallpaperCoverSize;
+    qreal wallpaperCoverDpr = 0.0;
     QPixmap wifiIcon;
     QPixmap btIcon;
     QPixmap sliderIcon;
+    QPixmap sliderIconScaled;
     bool sliderIconAvailable = false;
+
+    QTimer *orientationTimer = nullptr;
+    QPointer<QScreen> observedScreen;
+    QMetaObject::Connection screenGeometryConnection;
+    QRect lastScreenGeometry;
+    int geometryRepairAttempts = 0;
+    unsigned int geometryPollCount = 0;
+    bool windowScreenSignalConnected = false;
 
     bool wifiActive;
     bool btActive;
@@ -542,7 +583,84 @@ private:
         }
     }
 
-    qreal scaleFactor = 1.0; // devicePixelRatio()
+    void cancelGestureForScreenChange() {
+        // Coordinates measured in the previous orientation are invalid after
+        // rotating. Never accidentally complete a stale swipe into auth.
+        if (!sliding && !slidingBack && sliderOffset == 0 &&
+            activeTouchId == -1 && !statusEdgeGesture && statusEdgeTouchId == -1)
+            return;
+        slideBackTimer->stop();
+        sliding = false;
+        slidingBack = false;
+        sliderOffset = 0;
+        activeTouchId = -1;
+        statusEdgeGesture = false;
+        statusEdgeTouchId = -1;
+        swipeStartY = 0;
+        swipeStartOffset = 0;
+        update();
+    }
+
+    void syncScreenGeometry() {
+        QScreen *screen = windowHandle() && windowHandle()->screen()
+                          ? windowHandle()->screen()
+                          : QGuiApplication::primaryScreen();
+        if (!screen) return;
+
+        const bool screenObjectChanged = screen != observedScreen;
+        if (screenObjectChanged) {
+            QObject::disconnect(screenGeometryConnection);
+            observedScreen = screen;
+            screenGeometryConnection = connect(screen, &QScreen::geometryChanged,
+                this, [this](const QRect &) { syncScreenGeometry(); });
+        }
+
+        const QRect target = screen->geometry();
+        if (!target.isValid()) return;
+        const bool screenChanged = target != lastScreenGeometry;
+        if (screenChanged) {
+            lastScreenGeometry = target;
+            geometryRepairAttempts = 0;
+            geometryPollCount = 0;
+            cancelGestureForScreenChange();
+        }
+
+        // Use the actual SCREEN bounds, not the previous window width/height.
+        // With Qt::BypassWindowManagerHint, some Qtile/xrandr combinations leave
+        // fullscreen at its old dimensions. Adjust the QWidget AND QWindow,
+        // without showNormal()/hiding the lock or releasing either input grab.
+        if (isVisible() && geometry() != target) {
+            if (geometryRepairAttempts < 5 || (geometryPollCount % 10) == 0) {
+                ++geometryRepairAttempts;
+                setGeometry(target);
+                if (windowHandle()) windowHandle()->setGeometry(target);
+            }
+        } else if (screenChanged || screenObjectChanged ||
+                   qAbs(wallpaperCoverDpr - devicePixelRatioF()) > 0.001) {
+            // Qt may have updated the window before signalling us. A move to
+            // a different-DPI screen also needs a fresh cached wallpaper.
+            if (layoutRoot) layoutRoot->setGeometry(rect());
+            adjustScaling();
+        }
+        ++geometryPollCount;
+    }
+
+    void rebuildWallpaperCover() {
+        const QSize viewport = size();
+        const qreal dpr = devicePixelRatioF();
+        if (viewport == wallpaperCoverSize && qAbs(dpr - wallpaperCoverDpr) < 0.001)
+            return;
+        wallpaperCoverSize = viewport;
+        wallpaperCoverDpr = dpr;
+        wallpaperCover = QPixmap();
+        if (!wallpaper.isNull() && viewport.isValid()) {
+            const QSize pixels(qMax(1, qRound(viewport.width() * dpr)),
+                               qMax(1, qRound(viewport.height() * dpr)));
+            wallpaperCover = wallpaper.scaled(pixels, Qt::KeepAspectRatioByExpanding,
+                                             Qt::SmoothTransformation);
+            wallpaperCover.setDevicePixelRatio(dpr);
+        }
+    }
 
     void beginSlide(qreal y) {
         sliding = true;
@@ -614,38 +732,55 @@ private:
 
     // ──────────────────────────────────────
     void adjustScaling() {
-        scaleFactor = this->devicePixelRatio();
+        const int W = qMax(1, width());
+        const int H = qMax(1, height());
+        if (!layoutRoot || !rootLayout || !timeLabel) return;
 
-        int H = height();
-        if (H <= 0) H = 800;
+        layoutRoot->setGeometry(rect());
+        // Work in Qt logical pixels: devicePixelRatio is applied by the paint
+        // system already. Multiplying font point sizes by DPR clipped portrait
+        // layouts on HiDPI tablets.
+        const int margin = qBound(12, qMin(W, H) / 20, 40);
+        rootLayout->setContentsMargins(margin, margin, margin, margin);
+        rootLayout->setSpacing(qBound(6, qMin(W, H) / 50, 15));
 
-        // Clock font
-        QFont f = timeLabel->font();
-        f.setPointSize(int((H/12) * scaleFactor));
-        timeLabel->setFont(f);
+        QFont clockFont = timeLabel->font();
+        clockFont.setPixelSize(qBound(28, qMin(H / 9, W / 4), 140));
+        timeLabel->setFont(clockFont);
 
-        // Battery + top row font
-        QFont f2 = batteryLabel->font();
-        f2.setPointSize(int((H/60) * scaleFactor));
-        batteryLabel->setFont(f2);
-
-        int iconH = QFontMetrics(f2).height();
+        QFont statusFont = batteryLabel->font();
+        statusFont.setPixelSize(qBound(12, qMin(H / 44, W / 30), 30));
+        batteryLabel->setFont(statusFont);
+        wifiLabel->setFont(statusFont);
+        btLabel->setFont(statusFont);
+        const int iconH = qMax(12, QFontMetrics(statusFont).height());
 
         if (!wifiIcon.isNull())
             wifiLabel->setPixmap(wifiIcon.scaledToHeight(iconH, Qt::SmoothTransformation));
         else
             wifiLabel->setText("WiFi");
-
         if (!btIcon.isNull())
             btLabel->setPixmap(btIcon.scaledToHeight(iconH, Qt::SmoothTransformation));
         else
             btLabel->setText("BT");
 
-        // Slide up to unlock text
-        QFont f3 = slideTextLabel->font();
-        f3.setPointSize(int((H/70) * scaleFactor));
-        slideTextLabel->setFont(f3);
+        QFont swipeFont = slideTextLabel->font();
+        swipeFont.setPixelSize(qBound(13, qMin(H / 52, W / 23), 26));
+        slideTextLabel->setFont(swipeFont);
+        slideTextLabel->setContentsMargins(0, qBound(8, H / 40, 20), 0, 0);
 
+        if (sliderIconAvailable && !sliderIcon.isNull()) {
+            const int desiredHeight = qBound(24, qMin(H / 10, W / 3), 150);
+            if (sliderIconScaled.height() != desiredHeight)
+                sliderIconScaled = sliderIcon.scaledToHeight(desiredHeight,
+                                                             Qt::SmoothTransformation);
+        } else {
+            sliderIconScaled = QPixmap();
+        }
+
+        rebuildWallpaperCover();
+        rootLayout->invalidate();
+        rootLayout->activate();
         update();
     }
 
@@ -759,7 +894,7 @@ private:
             slideBackTimer->stop();
             return;
         }
-        sliderOffset += int(12 * scaleFactor);
+        sliderOffset += qMax(8, height() / 65);
         if (sliderOffset >= 0) {
             sliderOffset = 0;
             slidingBack = false;
