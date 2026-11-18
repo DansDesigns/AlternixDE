@@ -3636,6 +3636,21 @@ except Exception as exc:
 
         populateAppList(list, defaultExecFor(ext), !isAppImageFile(filePath));
 
+        // Debian packages get a dedicated native install action. apt (rather
+        // than dpkg) installs the local .deb and resolves/downloads dependencies.
+        const bool debPackage = ext.compare("deb", Qt::CaseInsensitive) == 0;
+        if (debPackage) {
+            auto *installItem = new QListWidgetItem(
+                QIcon::fromTheme("system-software-install"),
+                "Install Debian package");
+            installItem->setData(Qt::UserRole, QStringLiteral("__osm_install_deb__"));
+            installItem->setData(Qt::UserRole + 1, true);
+            installItem->setToolTip(
+                "Install this .deb with apt, including any required dependencies");
+            list->insertItem(0, installItem);
+            list->setCurrentItem(installItem);
+        }
+
         QLineEdit *cmdEdit = new QLineEdit;
         cmdEdit->setPlaceholderText("Custom command (e.g. gimp %f)");
         cmdEdit->setMinimumHeight(56);
@@ -3646,7 +3661,7 @@ except Exception as exc:
 
         QCheckBox *termChk = new QCheckBox("Run in terminal");
         termChk->setStyleSheet(themed(checkBoxStyle()));
-        termChk->setChecked(defaultTerminalFor(ext));
+        termChk->setChecked(debPackage || defaultTerminalFor(ext));
         layout->addWidget(termChk);
 
         QCheckBox *always = new QCheckBox(
@@ -3665,7 +3680,14 @@ except Exception as exc:
 
         QPushButton *manageBtn = bigDialogButton("Defaults");
         QPushButton *cancelBtn = bigDialogButton("Cancel");
-        QPushButton *openBtn   = bigDialogButton("Open", true);
+        QPushButton *openBtn   = bigDialogButton(debPackage ? "Install" : "Open", true);
+
+        connect(list, &QListWidget::currentItemChanged, &dlg,
+                [openBtn](QListWidgetItem *cur, QListWidgetItem *) {
+                    openBtn->setText(cur &&
+                        cur->data(Qt::UserRole).toString() == "__osm_install_deb__"
+                        ? "Install" : "Open");
+                });
 
         QHBoxLayout *btnRow = new QHBoxLayout;
         btnRow->setSpacing(12);
@@ -3702,7 +3724,20 @@ except Exception as exc:
             return;
         }
 
+        const bool installDeb = chosenTemplate == "__osm_install_deb__";
         const bool inTerminal = termChk->isChecked();
+
+        if (installDeb) {
+            // apt's local-file form resolves dependencies and downloads them
+            // before installing. Quote the path as a single shell argument;
+            // sudo prompts for authentication in the visible terminal.
+            const QString command =
+                "sudo apt install -- " + shellSingleQuote(QFileInfo(filePath).absoluteFilePath());
+            launchCommand(command, inTerminal);
+            clearSelection(true);
+            updateActionButtons();
+            return;
+        }
 
         // "Run the file itself" needs the execute bit, or sh as a stand-in
         QString runTemplate = chosenTemplate;
