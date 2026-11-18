@@ -989,6 +989,10 @@ public:
     MainWindow() {
         setWindowTitle("🌅Draw");
 
+        // Keep osm-draw above desktop overlays such as osm-notify's toggle handles.
+        // This applies to both the normal window and fullscreen canvas mode.
+        setWindowFlag(Qt::WindowStaysOnTopHint, true);
+
         // Enable pinch gesture for this window
         grabGesture(Qt::PinchGesture);
 
@@ -1729,6 +1733,7 @@ private:
                                         enable ? 0 : 32, enable ? 0 : 16);
         if (enable) {
             showFullScreen();
+            raise();
             floatingToolbar->show();
             floatingToolbar->adjustSize();
             floatingToolbar->move(12, 12);
@@ -1736,6 +1741,7 @@ private:
         } else {
             floatingToolbar->hide();
             showNormal();
+            raise();
         }
         QTimer::singleShot(0, this, [this]() { keepFloatingMenuVisible(); });
     }
