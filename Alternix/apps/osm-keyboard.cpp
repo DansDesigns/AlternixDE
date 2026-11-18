@@ -32,6 +32,7 @@
 #include <QWindow>
 #include <QDebug>
 #include <QRegularExpression>
+#include <QSettings>
 
 #include <X11/Xlib.h>
 #include <X11/XKBlib.h>
@@ -201,6 +202,8 @@ public:
         : QWidget(nullptr, Qt::Tool | Qt::FramelessWindowHint |
                             Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus),
           sender_(sender), prefs_(OsmKeyboardSettings::load()) {
+        compactInPortrait_ = QSettings().value(
+            QStringLiteral("Keyboard/compactInPortrait"), false).toBool();
         setObjectName(QStringLiteral("osmKeyboardWindow"));
         setWindowTitle(QStringLiteral("osm-keyboard"));
         setFocusPolicy(Qt::NoFocus);
@@ -241,7 +244,8 @@ public:
         displayTimer->setInterval(1000);
         connect(displayTimer, &QTimer::timeout, this, [this] {
             if (isVisible() && !remapping_ && targetScreen_ &&
-                targetScreen_->geometry() != lastScreenGeometry_) {
+                (targetScreen_->geometry() != lastScreenGeometry_ ||
+                 targetScreen_->orientation() != lastScreenOrientation_)) {
                 remapForGeometryChange();
             }
         });
@@ -467,6 +471,10 @@ public:
         reserve->setEnabled(editing->docked);
         connect(dock, &QCheckBox::toggled, reserve, &QWidget::setEnabled);
         form2->addRow(reserve);
+        auto *portraitCompact = new QCheckBox(
+            QStringLiteral("Use compact keyboard in portrait mode"), behaviour);
+        portraitCompact->setChecked(compactInPortrait_);
+        form2->addRow(portraitCompact);
         auto *tip = new QLabel(QStringLiteral("Use osm-keyboard --toggle from the taskbar "
             "to show or hide the keyboard. Auto-detection depends on "
             "applications exposing accessibility information."), behaviour);
@@ -481,7 +489,7 @@ public:
         connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         connect(dialog, &QDialog::finished, this,
                 [this, editing, theme, regional, mode, size, font, opacity, pop,
-                 popDelay, autoShow, dock, reserve](int result) {
+                 popDelay, autoShow, dock, reserve, portraitCompact](int result) {
             if (result == QDialog::Accepted) {
                 editing->theme = theme->currentText();
                 editing->layout = regional->currentData().toString();
@@ -494,16 +502,22 @@ public:
                 editing->autoShow = autoShow->isChecked();
                 editing->docked = dock->isChecked();
                 editing->reserveSpace = reserve->isChecked();
+                const bool portraitCompactChanged =
+                    compactInPortrait_ != portraitCompact->isChecked();
                 // Colour, font, layout and popup changes should NOT remap
                 // the Qtile dock or change its strut. Only these three
                 // geometry/reservation settings need an unmap/remap cycle.
                 const bool needRemap = prefs_.keyHeight != editing->keyHeight ||
                                        prefs_.mode != editing->mode ||
                                        prefs_.docked != editing->docked ||
-                                       prefs_.reserveSpace != editing->reserveSpace;
+                                       prefs_.reserveSpace != editing->reserveSpace ||
+                                       portraitCompactChanged;
                 const bool reopen = needRemap && isVisible();
                 if (reopen) hideWindow(false);
                 prefs_ = *editing;
+                compactInPortrait_ = portraitCompact->isChecked();
+                QSettings().setValue(QStringLiteral("Keyboard/compactInPortrait"),
+                                     compactInPortrait_);
                 prefs_.save();
                 rebuilding_ = true;
                 keyboard_->setSettings(prefs_);
@@ -533,9 +547,14 @@ private:
         const QRect rect = screen->geometry();
         // 12 regular keys across, each >=60px, plus layout gutters.
         const int fullMinWidth = 12 * 60 + 11 * 4 + 12;
+        const bool portrait = rect.height() > rect.width();
+        // Portrait defaults to the full keyboard. Compact portrait is an
+        // explicit opt-in; landscape retains the existing Auto behaviour.
         const bool compact = prefs_.mode == QLatin1String("compact") ||
-              (prefs_.mode == QLatin1String("auto") &&
-               (rect.width() < fullMinWidth || rect.height() < 560));
+              (portrait
+                   ? compactInPortrait_
+                   : (prefs_.mode == QLatin1String("auto") &&
+                      (rect.width() < fullMinWidth || rect.height() < 560)));
         const int available = rect.width() - 12;
         const int columns = qBound(4, (available + 4) / 64, 10);
         keyboard_->setCompactLayout(compact, columns);
@@ -547,6 +566,7 @@ private:
         if (!screen) return;
         const QRect rect = screen->geometry();
         lastScreenGeometry_ = rect;
+        lastScreenOrientation_ = screen->orientation();
         const int margin = 4;
         const int rowCount = keyboard_->rowCount();
         const int preferredHeight = rowCount * prefs_.keyHeight +
@@ -642,8 +662,10 @@ private:
     QPointer<QDialog> settingsDialog_;
     bool rebuilding_ = false;
     bool remapping_ = false;
+    bool compactInPortrait_ = false;
     int focusSerial_ = 0;
     QRect lastScreenGeometry_;
+    Qt::ScreenOrientation lastScreenOrientation_ = Qt::PrimaryOrientation;
     QPointer<QScreen> targetScreen_;
 };
 
