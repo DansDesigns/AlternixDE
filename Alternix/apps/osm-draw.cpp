@@ -1647,7 +1647,7 @@ private:
         penPreview->setPenColor(c);
         strokeColorBtn->setIcon(colorSwatchIcon(c));
         if (floatingStroke)
-            floatingStroke->setIcon(colorSwatchIcon(c, 26));
+            floatingStroke->setIcon(colorSwatchIcon(c, 34));
         if (floatingSizePreview)
             floatingSizePreview->setPenColor(c);
     }
@@ -1657,7 +1657,7 @@ private:
         canvas->setFillColor(c);
         fillColorBtn->setIcon(colorSwatchIcon(c));
         if (floatingFill)
-            floatingFill->setIcon(colorSwatchIcon(c, 26));
+            floatingFill->setIcon(colorSwatchIcon(c, 34));
     }
 
     void keepFloatingMenuVisible() {
@@ -1671,15 +1671,15 @@ private:
         const int available = qMax(1, canvasContainer->width() - 18);
         const int buttonCount = floatingToolButtons.size();
         if (buttonCount > 0) {
-            const int fullWidth = 14 + 22 + buttonCount * 3
-                                + buttonCount * 34 + 42;
+            const int fullWidth = 14 + 30 + buttonCount * 3
+                                + buttonCount * 48 + 52;
             const bool compact = available < fullWidth;
             const int margin = !compact ? 7 : (available < 460 ? 3 : 5);
             const int gap = !compact ? 3 : (available < 560 ? 1 : 2);
-            const int dragWidth = !compact ? 22 : (available < 460 ? 14 : 18);
-            const int sizeExtra = !compact ? 42 : (available < 560 ? 15 : 30);
+            const int dragWidth = !compact ? 30 : (available < 460 ? 18 : 24);
+            const int sizeExtra = !compact ? 52 : (available < 560 ? 18 : 36);
             // The brush-size control is wider than an ordinary tool button.
-            const int each = qMin(34, qMax(8, (available - 2 * margin - dragWidth
+            const int each = qMin(48, qMax(8, (available - 2 * margin - dragWidth
                                                - buttonCount * gap - sizeExtra)
                                               / buttonCount));
             floatingToolLayout->setContentsMargins(margin, 5, margin, 5);
@@ -1688,15 +1688,15 @@ private:
                 floatingDragHandle->setFixedWidth(dragWidth);
             for (QPushButton *button : floatingToolButtons) {
                 const int buttonWidth = each + (button == floatingSizeButton ? sizeExtra : 0);
-                button->setFixedSize(buttonWidth, 38);
+                button->setFixedSize(buttonWidth, 50);
                 QFont font = button->font();
-                font.setPixelSize(qBound(10, buttonWidth - 7, button == floatingSizeButton ? 15 : 19));
+                font.setPixelSize(qBound(10, buttonWidth - 7, button == floatingSizeButton ? 18 : 26));
                 button->setFont(font);
             }
             if (floatingStroke)
-                floatingStroke->setIconSize(QSize(qBound(10, each - 6, 26), qBound(10, each - 6, 26)));
+                floatingStroke->setIconSize(QSize(qBound(10, each - 6, 34), qBound(10, each - 6, 34)));
             if (floatingFill)
-                floatingFill->setIconSize(QSize(qBound(10, each - 6, 26), qBound(10, each - 6, 26)));
+                floatingFill->setIconSize(QSize(qBound(10, each - 6, 34), qBound(10, each - 6, 34)));
             // Even the compact size control continues to show the current size.
             if (floatingSizeButton)
                 floatingSizeButton->setText(buttonWidthForSizeText() >= 50
@@ -1753,7 +1753,7 @@ private:
         floatingToolLayout->setSpacing(3);
 
         floatingDragHandle = new QLabel("⠿", floatingToolbar);
-        floatingDragHandle->setFixedSize(22, 38);
+        floatingDragHandle->setFixedSize(30, 50);
         floatingDragHandle->setToolTip("Drag to reposition tools");
         floatingDragHandle->setAlignment(Qt::AlignCenter);
         floatingToolbar->setDragHandle(floatingDragHandle);
@@ -1762,15 +1762,15 @@ private:
         // Keep every tool directly in the frame's one-row layout; there is no
         // scrollable viewport to obscure the tools at either end.
         auto makeButton = [this](const QString &symbol, const QString &tip,
-                                 int width = 34) {
+                                 int width = 48) {
             auto *button = new QPushButton(symbol, floatingToolbar);
-            button->setFixedSize(width, 38);
+            button->setFixedSize(width, 50);
             button->setToolTip(tip);
             button->setAccessibleName(tip);
             floatingToolLayout->addWidget(button);
             floatingToolButtons.append(button);
             QFont font = button->font();
-            font.setPixelSize(19);
+            font.setPixelSize(26);
             button->setFont(font);
             return button;
         };
@@ -1796,7 +1796,7 @@ private:
 
         // A compact single-row button opens a large, touch-friendly slider
         // with a live 1:1 preview. It shares the normal size slider's value.
-        floatingSizeButton = makeButton("5px ▾", "Brush size", 76);
+        floatingSizeButton = makeButton("5px ▾", "Brush size", 100);
         floatingSizeButton->setStyleSheet(
             "QPushButton {background:#363b42;color:#ffffff;border:1px solid #68717b;"
             "border-radius:5px;}"
@@ -1866,12 +1866,12 @@ private:
             floatingSizePopup->raise();
         });
 
-        floatingStroke = makeButton("", "Stroke colour / opacity", 34);
-        floatingStroke->setIconSize(QSize(26, 26));
-        floatingStroke->setIcon(colorSwatchIcon(strokeColor, 26));
-        floatingFill = makeButton("", "Fill colour / opacity", 34);
-        floatingFill->setIconSize(QSize(26, 26));
-        floatingFill->setIcon(colorSwatchIcon(fillColor, 26));
+        floatingStroke = makeButton("", "Stroke colour / opacity", 48);
+        floatingStroke->setIconSize(QSize(34, 34));
+        floatingStroke->setIcon(colorSwatchIcon(strokeColor, 34));
+        floatingFill = makeButton("", "Fill colour / opacity", 48);
+        floatingFill->setIconSize(QSize(34, 34));
+        floatingFill->setIcon(colorSwatchIcon(fillColor, 34));
         connect(floatingStroke, &QPushButton::clicked, strokeColorBtn, &QPushButton::click);
         connect(floatingFill, &QPushButton::clicked, fillColorBtn, &QPushButton::click);
 
