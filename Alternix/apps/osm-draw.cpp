@@ -40,8 +40,8 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QSizePolicy>
-#include <QScrollArea>
-#include <QScrollBar>
+#include <QList>
+#include <QFont>
 #include <functional>
 #include <cmath>
 
@@ -254,9 +254,10 @@ public:
         setStyleSheet(
             "QDialog { background-color:#222428; color:#f6f6f6; }"
             "QLabel { color:#efefef; font-size:14px; }"
-            "QSlider::groove:horizontal { height:8px; background:#50545c; border-radius:4px; }"
-            "QSlider::handle:horizontal { background:#ffffff; width:20px; height:20px;"
-            " margin:-6px 0; border-radius:10px; }"
+            "QSlider::groove:horizontal { height:10px; background:#50545c; border-radius:5px; }"
+            "QSlider::handle:horizontal { background:#ffffff; width:38px; height:38px;"
+            " margin:-14px 0; border:2px solid #879eaf; border-radius:19px; }"
+            "QSlider::handle:horizontal:pressed { background:#c8e5fc; }"
             "QPushButton { background:#353a41; border:1px solid #626971;"
             " color:white; border-radius:6px; padding:8px 15px; }"
             "QPushButton:hover { background:#485260; }"
@@ -278,6 +279,7 @@ public:
             slider = new QSlider(Qt::Horizontal, this);
             slider->setRange(0, 100);
             slider->setValue(value);
+            slider->setFixedHeight(48);  // Room for a touch-friendly 38px handle.
             line->addWidget(slider, 1);
             valueLabel = new QLabel(QString::number(value) + "%", this);
             valueLabel->setMinimumWidth(48);
@@ -369,7 +371,7 @@ public:
         setStyleSheet("QFrame#floatingToolbar { background:rgba(25,27,32,239);"
                       " border:1px solid #717985; border-radius:11px; }"
                       "QPushButton {background:#363b42; color:#ffffff; border:1px solid #525963;"
-                      " border-radius:5px; font-size:19px; padding:0px;}"
+                      " border-radius:5px; padding:0px;}"
                       "QPushButton:hover {background:#505c68;}"
                       "QPushButton:checked {background:#305c80; border:2px solid #91d0fa;}"
                       "QLabel { color:#d6dce5; font-size:16px; }");
@@ -1039,14 +1041,6 @@ public:
         QHBoxLayout *leftGroup = new QHBoxLayout();
         leftGroup->setSpacing(6);
 
-        // Keep the fullscreen control at the start of the top toolbar so it
-        // remains visible even when a small display clips the far-right tools.
-        btnFullscreen = new QPushButton("⛶\nFull", this);
-        styleIconButton(btnFullscreen, "Enter fullscreen canvas (F11)");
-        btnFullscreen->setFixedSize(58, 46);
-        btnFullscreen->setStyleSheet(btnStyle + "QPushButton { font-size:14px; }");
-        leftGroup->addWidget(btnFullscreen);
-
         btnPen = new QPushButton("✒", this);
         styleIconButton(btnPen, "Pen");
         leftGroup->addWidget(btnPen);
@@ -1106,6 +1100,13 @@ public:
         btnSave = new QPushButton("💾", this);
         styleIconButton(btnSave, "Save PNG");
         rightGroup->addWidget(btnSave);
+
+        // Fullscreen is the far-right button of the normal toolbar.
+        btnFullscreen = new QPushButton("⛶\nFull", this);
+        styleIconButton(btnFullscreen, "Enter fullscreen canvas (F11)");
+        btnFullscreen->setFixedSize(58, 46);
+        btnFullscreen->setStyleSheet(btnStyle + "QPushButton { font-size:14px; }");
+        rightGroup->addWidget(btnFullscreen);
 
         topBar->addLayout(leftGroup);
         topBar->addStretch(1);
@@ -1580,7 +1581,9 @@ private:
     QFrame *floatingSizePopup = nullptr;
     QSlider *floatingSizePopupSlider = nullptr;
     PenSizePreview *floatingSizePreview = nullptr;
-    QScrollArea *floatingToolScroller = nullptr;
+    QHBoxLayout *floatingToolLayout = nullptr;
+    QLabel *floatingDragHandle = nullptr;
+    QList<QPushButton *> floatingToolButtons;
     QCheckBox *transparentCheck = nullptr;
     QColor strokeColor = Qt::black;
     QColor fillColor = Qt::red;
@@ -1654,13 +1657,53 @@ private:
     }
 
     void keepFloatingMenuVisible() {
-        if (!floatingToolbar || !canvasContainer)
+        if (!floatingToolbar || !canvasContainer || !floatingToolLayout)
             return;
-        // Preserve one row on smaller screens by allowing horizontal scrolling
-        // inside the toolbar instead of wrapping or placing buttons offscreen.
-        const int maxWidth = qMax(180, canvasContainer->width() - 16);
-        floatingToolbar->setMaximumWidth(maxWidth);
-        floatingToolbar->adjustSize();
+
+        // All buttons share a single row, with no QScrollArea. Use their normal
+        // widths on large screens, and compact the actual controls as needed
+        // after a window resize or a landscape/portrait rotation.
+        // Leave 8px outside each edge and room for the frame border.
+        const int available = qMax(1, canvasContainer->width() - 18);
+        const int buttonCount = floatingToolButtons.size();
+        if (buttonCount > 0) {
+            const int fullWidth = 14 + 22 + buttonCount * 3
+                                + buttonCount * 34 + 42;
+            const bool compact = available < fullWidth;
+            const int margin = !compact ? 7 : (available < 460 ? 3 : 5);
+            const int gap = !compact ? 3 : (available < 560 ? 1 : 2);
+            const int dragWidth = !compact ? 22 : (available < 460 ? 14 : 18);
+            const int sizeExtra = !compact ? 42 : (available < 560 ? 15 : 30);
+            // The brush-size control is wider than an ordinary tool button.
+            const int each = qMin(34, qMax(8, (available - 2 * margin - dragWidth
+                                               - buttonCount * gap - sizeExtra)
+                                              / buttonCount));
+            floatingToolLayout->setContentsMargins(margin, 5, margin, 5);
+            floatingToolLayout->setSpacing(gap);
+            if (floatingDragHandle)
+                floatingDragHandle->setFixedWidth(dragWidth);
+            for (QPushButton *button : floatingToolButtons) {
+                const int buttonWidth = each + (button == floatingSizeButton ? sizeExtra : 0);
+                button->setFixedSize(buttonWidth, 38);
+                QFont font = button->font();
+                font.setPixelSize(qBound(10, buttonWidth - 7, button == floatingSizeButton ? 15 : 19));
+                button->setFont(font);
+            }
+            if (floatingStroke)
+                floatingStroke->setIconSize(QSize(qBound(10, each - 6, 26), qBound(10, each - 6, 26)));
+            if (floatingFill)
+                floatingFill->setIconSize(QSize(qBound(10, each - 6, 26), qBound(10, each - 6, 26)));
+            // Even the compact size control continues to show the current size.
+            if (floatingSizeButton)
+                floatingSizeButton->setText(buttonWidthForSizeText() >= 50
+                    ? QString("%1px ▾").arg(sizeSlider->value())
+                    : QString::number(sizeSlider->value()));
+        }
+
+        // Allow the frame to grow to the combined button widths, rather than
+        // clipping its last actions behind a viewport or a scrollbar.
+        floatingToolLayout->activate();
+        floatingToolbar->setFixedSize(floatingToolLayout->sizeHint() + QSize(2, 2));
         QPoint current = floatingToolbar->pos();
         current.setX(qBound(0, current.x(),
                             qMax(0, canvasContainer->width() - floatingToolbar->width())));
@@ -1668,6 +1711,10 @@ private:
                             qMax(0, canvasContainer->height() - floatingToolbar->height())));
         floatingToolbar->move(current);
         floatingToolbar->raise();
+    }
+
+    int buttonWidthForSizeText() const {
+        return floatingSizeButton ? floatingSizeButton->width() : 0;
     }
 
     void toggleCanvasFullscreen() {
@@ -1695,42 +1742,30 @@ private:
 
     void createFloatingToolbar() {
         floatingToolbar = new FloatingToolbar(canvasContainer);
-        auto *layout = new QHBoxLayout(floatingToolbar);
-        layout->setContentsMargins(7, 5, 7, 5);
-        layout->setSpacing(3);
+        floatingToolLayout = new QHBoxLayout(floatingToolbar);
+        floatingToolLayout->setContentsMargins(7, 5, 7, 5);
+        floatingToolLayout->setSpacing(3);
 
-        auto *handle = new QLabel("⠿", floatingToolbar);
-        handle->setFixedSize(22, 38);
-        handle->setToolTip("Drag to reposition tools");
-        handle->setAlignment(Qt::AlignCenter);
-        floatingToolbar->setDragHandle(handle);
-        layout->addWidget(handle);
+        floatingDragHandle = new QLabel("⠿", floatingToolbar);
+        floatingDragHandle->setFixedSize(22, 38);
+        floatingDragHandle->setToolTip("Drag to reposition tools");
+        floatingDragHandle->setAlignment(Qt::AlignCenter);
+        floatingToolbar->setDragHandle(floatingDragHandle);
+        floatingToolLayout->addWidget(floatingDragHandle);
 
-        // The toolbar is ONE horizontal row. On narrow displays the contents
-        // can scroll sideways rather than wrapping into a second line.
-        floatingToolScroller = new QScrollArea(floatingToolbar);
-        floatingToolScroller->setFrameShape(QFrame::NoFrame);
-        floatingToolScroller->setWidgetResizable(false);
-        floatingToolScroller->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        floatingToolScroller->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        floatingToolScroller->setStyleSheet(
-            "QScrollArea { background:transparent; border:0px; }"
-            "QScrollBar:horizontal { height:8px; background:#282c32; }"
-            "QScrollBar::handle:horizontal { background:#667789; border-radius:4px; min-width:28px; }"
-            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal { width:0px; }");
-        auto *contents = new QWidget(floatingToolScroller);
-        contents->setObjectName("floatingToolContents");
-        contents->setStyleSheet("QWidget#floatingToolContents { background:transparent; }");
-        auto *row = new QHBoxLayout(contents);
-        row->setContentsMargins(0, 0, 0, 0);
-        row->setSpacing(3);
-        auto makeButton = [contents](const QString &symbol, const QString &tip,
-                                     QHBoxLayout *target, int width = 34) {
-            auto *button = new QPushButton(symbol, contents);
+        // Keep every tool directly in the frame's one-row layout; there is no
+        // scrollable viewport to obscure the tools at either end.
+        auto makeButton = [this](const QString &symbol, const QString &tip,
+                                 int width = 34) {
+            auto *button = new QPushButton(symbol, floatingToolbar);
             button->setFixedSize(width, 38);
             button->setToolTip(tip);
             button->setAccessibleName(tip);
-            target->addWidget(button);
+            floatingToolLayout->addWidget(button);
+            floatingToolButtons.append(button);
+            QFont font = button->font();
+            font.setPixelSize(19);
+            button->setFont(font);
             return button;
         };
 
@@ -1740,7 +1775,7 @@ private:
             btnPen, btnEraser, btnLine, btnRect, btnEllipse, btnFill, btnGrab
         };
         for (QPushButton *original : originals) {
-            QPushButton *button = makeButton(original->text(), original->toolTip(), row);
+            QPushButton *button = makeButton(original->text(), original->toolTip());
             button->setCheckable(true);
             tools->addButton(button);
             connect(button, &QPushButton::clicked, original, &QPushButton::click);
@@ -1748,21 +1783,23 @@ private:
             button->setChecked(original->isChecked());
         }
 
-        auto *undo = makeButton("↩", "Undo", row);
-        auto *redo = makeButton("↪", "Redo", row);
+        auto *undo = makeButton("↩", "Undo");
+        auto *redo = makeButton("↪", "Redo");
         connect(undo, &QPushButton::clicked, btnUndo, &QPushButton::click);
         connect(redo, &QPushButton::clicked, btnRedo, &QPushButton::click);
 
         // A compact single-row button opens a large, touch-friendly slider
         // with a live 1:1 preview. It shares the normal size slider's value.
-        floatingSizeButton = makeButton("5px ▾", "Brush size", row, 76);
+        floatingSizeButton = makeButton("5px ▾", "Brush size", 76);
         floatingSizeButton->setStyleSheet(
             "QPushButton {background:#363b42;color:#ffffff;border:1px solid #68717b;"
-            "border-radius:5px;font-size:15px;}"
+            "border-radius:5px;}"
             "QPushButton:hover {background:#505c68;}");
         connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) {
             if (floatingSizeButton)
-                floatingSizeButton->setText(QString("%1px ▾").arg(value));
+                floatingSizeButton->setText(buttonWidthForSizeText() >= 50
+                    ? QString("%1px ▾").arg(value)
+                    : QString::number(value));
             if (floatingSizePopupSlider)
                 floatingSizePopupSlider->setValue(value);
             if (floatingSizePreview)
@@ -1823,46 +1860,39 @@ private:
             floatingSizePopup->raise();
         });
 
-        floatingStroke = makeButton("", "Stroke colour / opacity", row, 34);
+        floatingStroke = makeButton("", "Stroke colour / opacity", 34);
         floatingStroke->setIconSize(QSize(26, 26));
         floatingStroke->setIcon(colorSwatchIcon(strokeColor, 26));
-        floatingFill = makeButton("", "Fill colour / opacity", row, 34);
+        floatingFill = makeButton("", "Fill colour / opacity", 34);
         floatingFill->setIconSize(QSize(26, 26));
         floatingFill->setIcon(colorSwatchIcon(fillColor, 26));
         connect(floatingStroke, &QPushButton::clicked, strokeColorBtn, &QPushButton::click);
         connect(floatingFill, &QPushButton::clicked, fillColorBtn, &QPushButton::click);
 
-        floatingTransparency = makeButton("◩", "Transparent background / PNG alpha", row);
+        floatingTransparency = makeButton("◩", "Transparent background / PNG alpha");
         floatingTransparency->setCheckable(true);
         connect(floatingTransparency, &QPushButton::toggled,
                 transparentCheck, &QCheckBox::setChecked);
-        floatingDarkBackground = makeButton("☾", "Dark canvas background / dark PNG export", row);
+        floatingDarkBackground = makeButton("☾", "Dark canvas background / dark PNG export");
         floatingDarkBackground->setCheckable(true);
         connect(floatingDarkBackground, &QPushButton::toggled,
                 btnDarkBackground, &QPushButton::setChecked);
         connect(btnDarkBackground, &QPushButton::toggled,
                 floatingDarkBackground, &QPushButton::setChecked);
 
-        auto *clear = makeButton("🗑", "Clear", row);
-        auto *open = makeButton("📂", "Open image", row);
-        auto *save = makeButton("💾", "Save PNG", row);
-        auto *fit = makeButton("⤢", "Fit to screen", row);
-        auto *exit = makeButton("⛶", "Exit fullscreen (F11 / Esc)", row);
+        auto *clear = makeButton("🗑", "Clear");
+        auto *open = makeButton("📂", "Open image");
+        auto *save = makeButton("💾", "Save PNG");
+        auto *fit = makeButton("⤢", "Fit to screen");
+        auto *exit = makeButton("⛶", "Exit fullscreen (F11 / Esc)");
         connect(clear, &QPushButton::clicked, btnClear, &QPushButton::click);
         connect(open, &QPushButton::clicked, btnOpen, &QPushButton::click);
         connect(save, &QPushButton::clicked, btnSave, &QPushButton::click);
         connect(fit, &QPushButton::clicked, btnFit, &QPushButton::click);
         connect(exit, &QPushButton::clicked, this, [this]() { toggleCanvasFullscreen(); });
 
-        // Keep item placement completely horizontal. The scroller becomes
-        // narrower when the screen cannot fit the full row.
-        contents->adjustSize();
-        floatingToolScroller->setWidget(contents);
-        floatingToolScroller->setFixedHeight(56);
-        floatingToolScroller->setMinimumWidth(150);
-        floatingToolScroller->setMaximumWidth(contents->sizeHint().width() + 3);
-        layout->addWidget(floatingToolScroller);
-        floatingToolbar->adjustSize();
+        // Fit the complete row to the available screen width, with no scrollbar.
+        keepFloatingMenuVisible();
         floatingToolbar->hide();
     }
 };
