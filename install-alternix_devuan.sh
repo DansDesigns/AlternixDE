@@ -1825,6 +1825,11 @@ echo "• Building osm-rocker..."
 g++ -fPIC apps/osm-rocker.cpp -o osm-rocker $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-rocker /usr/local/bin/
 
+echo "• Building Circle2..."
+g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 circle2 /usr/local/bin/
+
+
 echo "• Installing osm-sudo..."
 sudo install -m 755 apps/osm-sudo /usr/local/bin/
 
