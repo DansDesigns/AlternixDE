@@ -1387,6 +1387,20 @@ echo "• Updating Circle2..."
 g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 circle2 /usr/local/bin/
 
+cat <<EOF > "$TARGET_HOME/.local/share/applications/circle2.desktop"
+[Desktop Entry]
+Type=Application
+Name=Circle2
+Comment=Circle to Search, Copy, Screenshot and Share for Alternix / OSM-Phone
+Exec=/usr/local/bin/circle2 %U
+Icon=circle2
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/circle2.desktop"
+
+
 echo "• Updating osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
