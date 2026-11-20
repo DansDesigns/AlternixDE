@@ -1842,6 +1842,10 @@ StartupNotify=false
 EOF
 chmod +x "$TARGET_HOME/.local/share/applications/circle2.desktop"
 
+if [ -f "icons/circle2.png" ]; then
+    sudo cp icons/circle2.png /usr/share/icons/hicolor/64x64/apps/circle2.png
+fi
+
 echo "• Installing osm-sudo..."
 sudo install -m 755 apps/osm-sudo /usr/local/bin/
 
