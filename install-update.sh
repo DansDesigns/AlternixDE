@@ -33,7 +33,7 @@ echo "[Config] Updating Grub Entry.."
 #   libmbim-utils libqmi-utils modemmanager mobile-broadband-provider-info x11-apps tlp fake-hwclock /
 #   iio-sensor-proxy libxext-dev wine32 win64 -y
 
-sudo apt install -y libxi-dev libx11-dev libxext-dev
+sudo apt install -y libxi-dev libx11-dev libxext-dev tesseract-ocr
 
 # Check both independent Settings modules before making any system changes.
 # The clock/PAM implementation now belongs to date-time.cpp, NOT location.cpp.
