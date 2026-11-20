@@ -1383,6 +1383,10 @@ echo "• Updating osm-notify (rotation-aware top swipe)..."
 g++ -fPIC apps/osm-notify.cpp -o osm-notify $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core Qt5DBus) -lX11 -lXtst || exit 1
 sudo install -m 755 osm-notify /usr/local/bin/ || exit 1
 
+echo "• Updating Circle2..."
+g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
+sudo install -m 755 circle2 /usr/local/bin/
+
 echo "• Updating osm-clock..."
 g++ apps/osm-clock.cpp -o osm-clock -fPIC -ldl $(pkg-config --cflags --libs Qt5Widgets) -lX11
 chmod +x osm-clock && sudo mv osm-clock /usr/local/bin/
