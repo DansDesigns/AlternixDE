@@ -1829,6 +1829,18 @@ echo "• Building Circle2..."
 g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 circle2 /usr/local/bin/
 
+cat <<EOF > "$TARGET_HOME/.local/share/applications/circle2.desktop"
+[Desktop Entry]
+Type=Application
+Name=Circle2
+Comment=Circle to Search, Copy, Screenshot and Share for Alternix / OSM-Phone
+Exec=/usr/local/bin/circle2 %U
+Icon=circle2
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+EOF
+chmod +x "$TARGET_HOME/.local/share/applications/circle2.desktop"
 
 echo "• Installing osm-sudo..."
 sudo install -m 755 apps/osm-sudo /usr/local/bin/
