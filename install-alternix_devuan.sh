@@ -382,7 +382,7 @@ sudo apt install -y \
     python3-yaml python3-dateutil python3-pyqt5 python3-packaging python3-requests bluez \
     podman podman-compose gvfs gvfs-backends gvfs-fuse gvfs-daemons fuse3 dbus-x11 libxi-dev \
     sysvinit-utils pm-utils ntfs-3g exfatprogs exfat-fuse udisks2 pmount libxext-dev timeshift \
-    libatspi2.0-dev at-spi2-core
+    libatspi2.0-dev at-spi2-core tesseract-ocr
 
 
 
