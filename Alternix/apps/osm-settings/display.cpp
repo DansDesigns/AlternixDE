@@ -1,6 +1,8 @@
 #include <QWidget>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QBoxLayout>
+#include <QResizeEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QComboBox>
@@ -461,6 +463,22 @@ static QMap<QString, QString> runRotateScan(bool elevated,
     return result;
 }
 
+// Compact control cards stack their label and control when the available
+// width is below the same 440px breakpoint used by System info tiles.
+class DisplayAdaptiveCard : public QFrame {
+public:
+    explicit DisplayAdaptiveCard(QWidget *parent = nullptr) : QFrame(parent) {}
+protected:
+    void resizeEvent(QResizeEvent *event) override {
+        if (auto *box = qobject_cast<QBoxLayout*>(layout())) {
+            const auto wanted = event->size().width() < 440
+                ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight;
+            if (box->direction() != wanted) box->setDirection(wanted);
+        }
+        QFrame::resizeEvent(event);
+    }
+};
+
 // -----------------------------------------------------
 // DisplayPage
 // -----------------------------------------------------
@@ -475,7 +493,7 @@ public:
         cfg = loadCfg();
 
         QVBoxLayout *root = new QVBoxLayout(this);
-        root->setContentsMargins(40, 40, 40, 40);
+        root->setContentsMargins(12, 12, 12, 12);
         root->setSpacing(10);
 
         QLabel *title = new QLabel("Display");
@@ -501,7 +519,7 @@ public:
         QFrame *outer = new QFrame(wrap);
         outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:40px; }");
         QVBoxLayout *outerLay = new QVBoxLayout(outer);
-        outerLay->setContentsMargins(50, 30, 50, 30);
+        outerLay->setContentsMargins(16, 18, 16, 18);
         outerLay->setSpacing(30);
 
         // Nightlight (BoolPill)
@@ -595,11 +613,11 @@ private:
     // ------------- rows -------------------------------
     QWidget *makeNightlightRow()
     {
-        QFrame *card = new QFrame;
+        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
+        lay->setContentsMargins(14, 14, 14, 14);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Nightlight");
@@ -624,11 +642,11 @@ private:
 
     QWidget *makeSleepTimeoutRow()
     {
-        QFrame *card = new QFrame;
+        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
+        lay->setContentsMargins(14, 14, 14, 14);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Sleep Timeout");
@@ -657,11 +675,11 @@ private:
 
     QWidget *makeAdaptiveRow()
     {
-        QFrame *card = new QFrame;
+        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
+        lay->setContentsMargins(14, 14, 14, 14);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Adaptive Brightness");
@@ -686,11 +704,11 @@ private:
 
     QWidget *makeBootRow()
     {
-        QFrame *card = new QFrame;
+        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
+        lay->setContentsMargins(14, 14, 14, 14);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Boot animation toggle");
@@ -725,11 +743,11 @@ private:
 
     QWidget *makeAutoRotateRow()
     {
-        QFrame *card = new QFrame;
+        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QHBoxLayout *lay = new QHBoxLayout(card);
-        lay->setContentsMargins(30, 20, 30, 20);
+        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
+        lay->setContentsMargins(14, 14, 14, 14);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Auto-Rotate");
@@ -805,7 +823,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 20, 30, 20);
+        v->setContentsMargins(14, 14, 14, 14);
         v->setSpacing(10);
 
         QHBoxLayout *hdrRow = new QHBoxLayout();
@@ -815,10 +833,12 @@ private:
         hdrRow->addStretch();
 
         m_scanBtn = makeBtn("Scan", "white");
-        m_scanBtn->setMinimumSize(160, 54);
+        m_scanBtn->setMinimumSize(0, 54);
+        m_scanBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         hdrRow->addWidget(m_scanBtn);
         m_adminSetupBtn = makeBtn("Admin Setup", "white");
-        m_adminSetupBtn->setMinimumSize(210, 54);
+        m_adminSetupBtn->setMinimumSize(0, 54);
+        m_adminSetupBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         hdrRow->addWidget(m_adminSetupBtn);
         v->addLayout(hdrRow);
 
@@ -917,7 +937,7 @@ private:
     {
         QComboBox *combo = new QComboBox(parent);
         combo->setMinimumHeight(54);
-        combo->setMinimumWidth(220);
+        combo->setMinimumWidth(0);
         combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         combo->setStyleSheet(
             "QComboBox { background:#555555; color:white; border:1px solid #777777; "
@@ -933,7 +953,7 @@ private:
         QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 24, 30, 24);
+        v->setContentsMargins(14, 16, 14, 16);
         v->setSpacing(14);
 
         QHBoxLayout *header = new QHBoxLayout();
@@ -942,7 +962,7 @@ private:
         header->addWidget(title);
         header->addStretch();
         m_penScanBtn = makeBtn("Detect", "white");
-        m_penScanBtn->setMinimumWidth(175);
+        m_penScanBtn->setMinimumWidth(0);
         header->addWidget(m_penScanBtn);
         v->addLayout(header);
 
@@ -967,7 +987,8 @@ private:
             QHBoxLayout *h = new QHBoxLayout(row);
             h->setContentsMargins(0, 6, 0, 6);
             QLabel *label = new QLabel(caption, row);
-            label->setMinimumWidth(215);
+            label->setMinimumWidth(0);
+            label->setWordWrap(true);
             label->setStyleSheet("font-size:21px;");
             h->addWidget(label);
             combo = makePenCombo(row);
@@ -1142,7 +1163,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 20, 30, 20);
+        v->setContentsMargins(14, 14, 14, 14);
         v->setSpacing(10);
 
         QLabel *header = new QLabel("Screen Info");
