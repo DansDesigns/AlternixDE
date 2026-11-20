@@ -14,6 +14,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QGridLayout>
+#include <QBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -30,6 +31,7 @@
 #include <QTimer>
 #include <QMouseEvent>
 #include <QList>
+#include <QResizeEvent>
 
 // -----------------------------------------------------
 // Global list of inner scroll areas (for hit testing)
@@ -248,7 +250,7 @@ static QFrame* makeListCard(const QString &title,
     card->setStyleSheet("QFrame#kernelListCard { background:#444444; border:none; border-radius:30px; }");
 
     QVBoxLayout *v = new QVBoxLayout(card);
-    v->setContentsMargins(30, 30, 30, 30);
+    v->setContentsMargins(16, 18, 16, 18);
     v->setSpacing(16);
 
     QHBoxLayout *hdr = new QHBoxLayout();
@@ -318,6 +320,29 @@ static void fillList(QVBoxLayout *list, QLabel *count,
     count->setText(QString::number(entries.size()));
 }
 
+// Stack the kernel summary tiles when the available page width is narrow,
+// matching the responsive row behaviour used by the System page.
+class KernelAdaptiveRow : public QWidget {
+public:
+    explicit KernelAdaptiveRow(int threshold, QWidget *parent = nullptr)
+        : QWidget(parent), m_threshold(threshold) {
+        m_layout = new QBoxLayout(QBoxLayout::LeftToRight, this);
+        m_layout->setContentsMargins(0, 0, 0, 0);
+        m_layout->setSpacing(12);
+    }
+    void add(QWidget *widget, int stretch = 1) { m_layout->addWidget(widget, stretch); }
+protected:
+    void resizeEvent(QResizeEvent *event) override {
+        const auto direction = event->size().width() < m_threshold
+            ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight;
+        if (m_layout->direction() != direction) m_layout->setDirection(direction);
+        QWidget::resizeEvent(event);
+    }
+private:
+    int m_threshold;
+    QBoxLayout *m_layout = nullptr;
+};
+
 // -----------------------------------------------------
 // ENTRY POINT
 // -----------------------------------------------------
@@ -332,7 +357,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     root->setStyleSheet("QWidget#alternixKernelPage { background:#282828; color:white; font-family:Sans; }");
 
     QVBoxLayout *rootLay = new QVBoxLayout(root);
-    rootLay->setContentsMargins(40, 40, 40, 40);
+    rootLay->setContentsMargins(12, 12, 12, 12);
     rootLay->setSpacing(10);
 
     QLabel *title = new QLabel("Kernel");
@@ -359,7 +384,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
     outer->setObjectName("kernelOuterPanel");
     outer->setStyleSheet("QFrame#kernelOuterPanel { background:#3a3a3a; border:none; border-radius:40px; }");
     QVBoxLayout *outerLay = new QVBoxLayout(outer);
-    outerLay->setContentsMargins(50, 30, 50, 30);
+    outerLay->setContentsMargins(16, 18, 16, 18);
     outerLay->setSpacing(30);
 
     // ── Kernel info section ─────────────────────────────
@@ -375,16 +400,14 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
 
         QWidget *gridWrap = new QWidget;
         gridWrap->setStyleSheet("background:transparent; border:none;");
-        QGridLayout *grid = new QGridLayout(gridWrap);
+        KernelAdaptiveRow *summaryRow = new KernelAdaptiveRow(440, gridWrap);
+        summaryRow->add(makeMiniCard("Version", getKernelVersion()));
+        summaryRow->add(makeMiniCard("Architecture", getKernelArch()));
+        QVBoxLayout *grid = new QVBoxLayout(gridWrap);
         grid->setContentsMargins(0, 0, 0, 0);
-        grid->setHorizontalSpacing(16);
-        grid->setVerticalSpacing(16);
-        grid->setColumnStretch(0, 1);
-        grid->setColumnStretch(1, 1);
-
-        grid->addWidget(makeMiniCard("Version",      getKernelVersion()), 0, 0);
-        grid->addWidget(makeMiniCard("Architecture", getKernelArch()),    0, 1);
-        grid->addWidget(makeMiniCard("Init system",  getInitSystem()),    1, 0, 1, 2);
+        grid->setSpacing(12);
+        grid->addWidget(summaryRow);
+        grid->addWidget(makeMiniCard("Init system", getInitSystem()));
 
         v->addWidget(gridWrap);
         outerLay->addWidget(sec);
@@ -396,7 +419,7 @@ extern "C" QWidget* make_page(QStackedWidget *stack)
         card->setObjectName("kernelBootCard");
         card->setStyleSheet("QFrame#kernelBootCard { background:#444444; border:none; border-radius:30px; }");
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(30, 24, 30, 24);
+        v->setContentsMargins(16, 18, 16, 18);
         v->setSpacing(10);
 
         v->addWidget(makeInfoLabel("Boot parameters", 26, true));
