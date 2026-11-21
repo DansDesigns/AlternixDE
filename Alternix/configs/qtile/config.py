@@ -235,10 +235,9 @@ def autostart():
 @hook.subscribe.startup_complete
 def _scrollbar():
     scrollerbar.install(qtile, height=16)
-
-@hook.subscribe.startup_once
 def start_alternix_display_power():
     subprocess.Popen(["/usr/local/bin/osm-display-power"])
+
 
     # Function to update the time
     def update_time():
