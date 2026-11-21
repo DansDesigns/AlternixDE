@@ -1033,42 +1033,6 @@ public:
             addToggle("gps", "gps.png", "GPS chip");
             addToggle("rotation", "rotate.png", "Auto-Rotate");
 
-            // Circle2 application launch card
-            {
-                QVBoxLayout *inner = new QVBoxLayout();
-                inner->setAlignment(Qt::AlignCenter);
-                QLabel *icon = new QLabel(this);
-                icon->setAlignment(Qt::AlignCenter);
-                const QList<AlternixDesktopApp> installedForCircle = alternixInstalledApps();
-                AlternixDesktopApp circleApp;
-                for (const auto &candidate : installedForCircle) {
-                    if (candidate.name.compare("Circle2", Qt::CaseInsensitive) == 0 ||
-                        candidate.id.contains("circle2", Qt::CaseInsensitive)) {
-                        circleApp = candidate;
-                        break;
-                    }
-                }
-                QIcon circleIcon = circleApp.icon.isEmpty() ? QIcon() : QIcon::fromTheme(circleApp.icon);
-                if (circleIcon.isNull() && QFileInfo(circleApp.icon).exists()) circleIcon = QIcon(circleApp.icon);
-                if (circleIcon.isNull()) circleIcon = QIcon::fromTheme("circle2");
-                if (!circleIcon.isNull()) icon->setPixmap(circleIcon.pixmap(42, 42));
-                else icon->setText(QString::fromUtf8("◉"));
-                QLabel *label = new QLabel("Circle2", this);
-                label->setStyleSheet("color:white; font-size:18pt;");
-                label->setAlignment(Qt::AlignCenter);
-                inner->addWidget(icon);
-                inner->addWidget(label);
-                QFrame *card = createCard(this, inner, true, [circleApp]() {
-                    if (!circleApp.id.isEmpty()) alternixLaunchDesktopApp(circleApp);
-                    else QProcess::startDetached("circle2", QStringList());
-                });
-                systemCards.append(card);
-                const int r = toggleIndex / sysCols;
-                const int c = toggleIndex % sysCols;
-                grid->addWidget(card, r, c);
-                ++toggleIndex;
-            }
-
             // ───────── Battery (icon based on status + saver)
             {
                 QVBoxLayout *inner = new QVBoxLayout();
@@ -1144,6 +1108,45 @@ public:
             main->addWidget(row);
 
             updateBatteryIconColor();
+
+            // Circle2 application launch card
+            {
+                QVBoxLayout *inner = new QVBoxLayout();
+                inner->setAlignment(Qt::AlignCenter);
+                QLabel *icon = new QLabel(this);
+                icon->setAlignment(Qt::AlignCenter);
+                const QList<AlternixDesktopApp> installedForCircle = alternixInstalledApps();
+                AlternixDesktopApp circleApp;
+                for (const auto &candidate : installedForCircle) {
+                    if (candidate.name.compare("Circle2", Qt::CaseInsensitive) == 0 ||
+                        candidate.id.contains("circle2", Qt::CaseInsensitive)) {
+                        circleApp = candidate;
+                        break;
+                    }
+                }
+                QIcon circleIcon = circleApp.icon.isEmpty() ? QIcon() : QIcon::fromTheme(circleApp.icon);
+                if (circleIcon.isNull() && QFileInfo(circleApp.icon).exists()) circleIcon = QIcon(circleApp.icon);
+                if (circleIcon.isNull()) circleIcon = QIcon::fromTheme("circle2");
+                if (!circleIcon.isNull()) icon->setPixmap(circleIcon.pixmap(42, 42));
+                else icon->setText(QString::fromUtf8("◉"));
+                QLabel *label = new QLabel("Circle2", this);
+                label->setStyleSheet("color:white; font-size:18pt;");
+                label->setAlignment(Qt::AlignCenter);
+                inner->addWidget(icon);
+                inner->addWidget(label);
+                QFrame *card = createCard(this, inner, true, [this, circleApp]() {
+                    animatedClose();
+                    if (!circleApp.id.isEmpty()) alternixLaunchDesktopApp(circleApp);
+                    else QProcess::startDetached("circle2", QStringList());
+                });
+                systemCards.append(card);
+                const int r = toggleIndex / sysCols;
+                const int c = toggleIndex % sysCols;
+                grid->addWidget(card, r, c);
+                ++toggleIndex;
+            }
+
+
         }
 
         // ───────── Brightness Card (native backlight, XRandR fallback)
@@ -1236,7 +1239,8 @@ public:
             plusInner->addWidget(plusIcon);
             plusInner->addWidget(plusLabel);
             auto shortcutSlot = std::make_shared<int>(slot);
-            QFrame *plusCard = createCard(this, plusInner, true, [this, installed, shortcutsGrid, shortcutSlot]() mutable {
+            auto plusCardHolder = std::make_shared<QFrame *>(nullptr);
+            QFrame *plusCard = createCard(this, plusInner, true, [this, installed, shortcutsGrid, shortcutSlot, plusCardHolder]() mutable {
                 QStringList choices;
                 for (const auto &app : installed) choices << app.name;
                 bool ok = false;
@@ -1271,11 +1275,13 @@ public:
                     appCard->setMinimumWidth(1);
                     appCard->setMinimumHeight(72);
                     shortcutsGrid->addWidget(appCard, 0, index);
+                    if (*plusCardHolder) shortcutsGrid->addWidget(*plusCardHolder, 0, *shortcutSlot);
                     return;
                 }
             });
             plusCard->setMinimumWidth(1);
             plusCard->setMinimumHeight(72);
+            *plusCardHolder = plusCard;
             shortcutsGrid->addWidget(plusCard, 0, slot);
             appShortcutsRowWidget = shortcutsRow;
             main->addWidget(shortcutsRow);
