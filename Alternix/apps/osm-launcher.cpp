@@ -2738,6 +2738,20 @@ int main(int argc, char **argv) {
             window.activateWindow();
             return;
         }
+        // Validate the desktop-entry cache immediately before opening. A newly
+        // installed app must not wait for the hidden 15-second refresh timer.
+        QList<AppEntry> current;
+        if (!readDesktopCache(appsCachePath, current)) {
+            QVector<DesktopCacheStamp> files;
+            QList<AppEntry> changed = scanDesktopEntries(files);
+            excludePicom(changed);
+            writeDesktopCache(appsCachePath, changed, desktopDirectoryStamps(), files);
+            apps = changed;
+            LauncherIconCache::invalidate();
+            nextWarmIcon = 0;
+            controller.updateApps(apps);
+            warmTimer.start();
+        }
         syncScreenGeometry();
         // The opening row queue requests just the visible tiles' cached icons;
         // walking every offscreen QLabel here caused a startup paint burst.
