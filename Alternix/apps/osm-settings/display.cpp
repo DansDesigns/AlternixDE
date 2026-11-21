@@ -1,7 +1,5 @@
 #include <QWidget>
 #include <QVBoxLayout>
-#include <QBoxLayout>
-#include <QResizeEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -27,6 +25,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QStringList>
 #include <functional>
 
 // -----------------------------------------------------
@@ -468,22 +467,6 @@ static QMap<QString, QString> runRotateScan(bool elevated,
     return result;
 }
 
-// Compact control cards stack their label and control when the available
-// width is below the same 440px breakpoint used by System info tiles.
-class DisplayAdaptiveCard : public QFrame {
-public:
-    explicit DisplayAdaptiveCard(QWidget *parent = nullptr) : QFrame(parent) {}
-protected:
-    void resizeEvent(QResizeEvent *event) override {
-        if (auto *box = qobject_cast<QBoxLayout*>(layout())) {
-            const auto wanted = event->size().width() < 440
-                ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight;
-            if (box->direction() != wanted) box->setDirection(wanted);
-        }
-        QFrame::resizeEvent(event);
-    }
-};
-
 // -----------------------------------------------------
 // DisplayPage
 // -----------------------------------------------------
@@ -498,7 +481,7 @@ public:
         cfg = loadCfg();
 
         QVBoxLayout *root = new QVBoxLayout(this);
-        root->setContentsMargins(12, 12, 12, 12);
+        root->setContentsMargins(40, 40, 40, 40);
         root->setSpacing(10);
 
         QLabel *title = new QLabel("Display");
@@ -524,7 +507,7 @@ public:
         QFrame *outer = new QFrame(wrap);
         outer->setStyleSheet("QFrame { background:#3a3a3a; border-radius:40px; }");
         QVBoxLayout *outerLay = new QVBoxLayout(outer);
-        outerLay->setContentsMargins(16, 18, 16, 18);
+        outerLay->setContentsMargins(50, 30, 50, 30);
         outerLay->setSpacing(30);
 
         // Nightlight (BoolPill)
@@ -635,44 +618,42 @@ private:
     // ------------- rows -------------------------------
     QWidget *makeNightlightRow()
     {
-        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
+        QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
-        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
-        lay->setContentsMargins(14, 14, 14, 14);
+        QHBoxLayout *lay = new QHBoxLayout(card);
+        lay->setContentsMargins(30, 20, 30, 20);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Nightlight");
         lbl->setStyleSheet("font-size:30px; font-weight:bold;");
         lay->addWidget(lbl);
+
         lay->addStretch();
 
-        const bool on = readCfgBool("display_nightlight", false);
+        bool on = readCfgBool("display_nightlight", false);
         m_nightlightPill = new BoolPillToggle(on, card);
         lay->addWidget(m_nightlightPill);
 
         connect(m_nightlightPill, &QPushButton::clicked, this, [this]() {
             m_nightlightPill->toggle();
-            writeCfg("display_nightlight", m_nightlightPill->isOn() ? "true" : "false");
-            // Placeholder: actual nightlight overlay can be applied later.
+            bool state = m_nightlightPill->isOn();
+            writeCfg("display_nightlight", state ? "true" : "false");
+            // Placeholder: actual nightlight overlay can be applied later
         });
+
         return card;
     }
-
-    
 
     QWidget *makeSleepTimeoutRow()
     {
         QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-        QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(14, 14, 14, 14);
-        v->setSpacing(8);
 
-        DisplayAdaptiveCard *row = new DisplayAdaptiveCard(card);
-        row->setStyleSheet("QFrame { background:transparent; border:0px; }");
-        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, row);
-        lay->setContentsMargins(0, 0, 0, 0);
+        QVBoxLayout *v = new QVBoxLayout(card);
+        v->setContentsMargins(30, 20, 30, 20);
+        v->setSpacing(9);
+        QHBoxLayout *lay = new QHBoxLayout();
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Screen Timeout");
@@ -682,72 +663,58 @@ private:
 
         int st = readCfg("display_sleep_timeout", "0").toInt();
         if (st < 0 || st > 5) st = 0;
-        m_timeoutPill = new TimeoutPill(st, row);
+        m_timeoutPill = new TimeoutPill(st, card);
         lay->addWidget(m_timeoutPill);
-        v->addWidget(row);
+        v->addLayout(lay);
 
-        m_timeoutStatusLabel = new QLabel(
-            "Controls automatic screen blanking and display power-off; it does not suspend the computer.", card);
+        m_timeoutStatusLabel = new QLabel("Changes the actual X11 idle blanking and DPMS timers.", card);
         m_timeoutStatusLabel->setStyleSheet("font-size:18px; color:#dedede;");
         m_timeoutStatusLabel->setWordWrap(true);
         v->addWidget(m_timeoutStatusLabel);
-
         applyTimeoutState(st);
+
         connect(m_timeoutPill, &QPushButton::clicked, this, [this]() {
             m_timeoutPill->advance();
             const int state = m_timeoutPill->state();
             writeCfg("display_sleep_timeout", QString::number(state));
             applyTimeoutState(state);
             ensureDisplayPowerService();
-            QTimer::singleShot(1900, this, [this]() { refreshDisplayPowerStatus(); });
         });
         return card;
     }
-
-    
 
     QWidget *makeLidSwitchCard()
     {
         QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(14, 14, 14, 14);
-        v->setSpacing(10);
+        v->setContentsMargins(30, 22, 30, 22);
+        v->setSpacing(13);
 
-        DisplayAdaptiveCard *topWidget = new DisplayAdaptiveCard(card);
-        topWidget->setStyleSheet("QFrame { background:transparent; border:0px; }");
-        QBoxLayout *top = new QBoxLayout(QBoxLayout::LeftToRight, topWidget);
-        top->setContentsMargins(0, 0, 0, 0);
-        top->setSpacing(12);
-        QLabel *title = new QLabel("Lid Switch", topWidget);
+        QHBoxLayout *top = new QHBoxLayout();
+        QLabel *title = new QLabel("Lid Switch", card);
         title->setStyleSheet("font-size:30px; font-weight:bold;");
         top->addWidget(title);
         top->addStretch();
         m_lidDetectButton = makeBtn("Detect");
-        m_lidDetectButton->setMinimumWidth(0);
-        m_lidDetectButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_lidDetectButton->setMinimumWidth(160);
         top->addWidget(m_lidDetectButton);
-        v->addWidget(topWidget);
+        v->addLayout(top);
 
-        DisplayAdaptiveCard *choiceWidget = new DisplayAdaptiveCard(card);
-        choiceWidget->setStyleSheet("QFrame { background:transparent; border:0px; }");
-        QBoxLayout *choice = new QBoxLayout(QBoxLayout::LeftToRight, choiceWidget);
-        choice->setContentsMargins(0, 0, 0, 0);
-        choice->setSpacing(12);
-        QLabel *actionLabel = new QLabel("When lid closes", choiceWidget);
+        QHBoxLayout *choice = new QHBoxLayout();
+        QLabel *actionLabel = new QLabel("When lid closes", card);
         actionLabel->setStyleSheet("font-size:22px;");
-        actionLabel->setWordWrap(true);
         choice->addWidget(actionLabel);
         choice->addStretch();
-        m_lidActionCombo = makePenCombo(choiceWidget);
+        m_lidActionCombo = makePenCombo(card);
         m_lidActionCombo->addItem("Sleep", "sleep");
         m_lidActionCombo->addItem("Screen Off", "screen_off");
         m_lidActionCombo->addItem("Ignore", "ignore");
         const QString selected = readCfg("display_lid_action", "sleep");
         const int index = m_lidActionCombo->findData(selected);
         m_lidActionCombo->setCurrentIndex(index >= 0 ? index : 0);
-        choice->addWidget(m_lidActionCombo, 1);
-        v->addWidget(choiceWidget);
+        choice->addWidget(m_lidActionCombo);
+        v->addLayout(choice);
 
         m_lidStatusLabel = new QLabel("Checking lid hardware and system power manager…", card);
         m_lidStatusLabel->setStyleSheet("font-size:19px; color:#dedede;");
@@ -778,9 +745,8 @@ private:
                 probe.waitForFinished(200);
                 m_lidStatusLabel->setText("Lid scan timed out; check UPower/elogind services.");
             } else {
-                const QString out = QString::fromUtf8(probe.readAllStandardOutput()).trimmed();
-                const QString err = QString::fromUtf8(probe.readAllStandardError()).trimmed();
-                m_lidStatusLabel->setText(out + (err.isEmpty() ? QString() : QString("\n") + err));
+                m_lidStatusLabel->setText(QString::fromUtf8(probe.readAllStandardOutput()).trimmed()
+                    + "\n" + QString::fromUtf8(probe.readAllStandardError()).trimmed());
             }
             m_lidDetectButton->setEnabled(true);
             QTimer::singleShot(1800, this, [this] { refreshDisplayPowerStatus(); });
@@ -802,6 +768,77 @@ private:
         return {};
     }
 
+    // Qtile does not necessarily run XDG autostart entries. When the user's
+    // normal Qtile config exists, add one managed startup_once hook so the
+    // helper is launched in the graphical session on every login.
+    bool installQtileStartupHook(const QString &exe)
+    {
+        const QString configPath = QDir::homePath() + "/.config/qtile/config.py";
+        QFileInfo configInfo(configPath);
+        if (!configInfo.exists()) return true; // XDG autostart remains available.
+
+        QFile input(configPath);
+        if (!input.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+        const QString original = QString::fromUtf8(input.readAll());
+        input.close();
+
+        const QString begin = "# BEGIN ALTERNIXOS DISPLAY POWER AUTOSTART";
+        const QString end = "# END ALTERNIXOS DISPLAY POWER AUTOSTART";
+        QString pythonPath = exe;
+        pythonPath.replace("\\", "\\\\");
+        pythonPath.replace("'", "\\'");
+
+        const QString block =
+            begin + "\n"
+            "import subprocess as _alternix_display_power_subprocess\n"
+            "from libqtile import hook as _alternix_display_power_hook\n"
+            "\n"
+            "@_alternix_display_power_hook.subscribe.startup_once\n"
+            "def _alternix_display_power_startup():\n"
+            "    _alternix_display_power_subprocess.Popen(\n"
+            "        ['" + pythonPath + "'],\n"
+            "        stdin=_alternix_display_power_subprocess.DEVNULL,\n"
+            "        stdout=_alternix_display_power_subprocess.DEVNULL,\n"
+            "        stderr=_alternix_display_power_subprocess.DEVNULL,\n"
+            "        start_new_session=True,\n"
+            "    )\n"
+            + end + "\n";
+
+        QString updated = original;
+        const int beginPos = updated.indexOf(begin);
+        if (beginPos >= 0) {
+            const int endPos = updated.indexOf(end, beginPos + begin.size());
+            if (endPos < 0) return false;
+            const int replaceEnd = endPos + end.size();
+            updated.replace(beginPos, replaceEnd - beginPos, block.trimmed());
+            if (!updated.endsWith('\n')) updated += '\n';
+        } else {
+            if (!updated.isEmpty() && !updated.endsWith('\n')) updated += '\n';
+            updated += "\n";
+            updated += block;
+        }
+        if (updated == original) return true;
+
+        QSaveFile output(configPath);
+        if (!output.open(QIODevice::WriteOnly | QIODevice::Text)) return false;
+        output.setPermissions(configInfo.permissions());
+        if (output.write(updated.toUtf8()) < 0) {
+            output.cancelWriting();
+            return false;
+        }
+        return output.commit();
+    }
+
+    static QString displayPowerLogTail()
+    {
+        QFile file(QDir::homePath() + "/.config/Alternix/osm-display-power.log");
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
+        QStringList lines = QString::fromUtf8(file.readAll()).split('\n');
+        while (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
+        if (lines.size() > 3) lines = lines.mid(lines.size() - 3);
+        return lines.join("\n");
+    }
+
     void ensureDisplayPowerService()
     {
         const QString exe = displayPowerHelper();
@@ -813,8 +850,9 @@ private:
                 m_lidStatusLabel->setText("Lid backend not installed; no custom lid behaviour is active.");
             return;
         }
-        // Most desktop sessions honour XDG autostart. Qtile setups which
-        // explicitly bypass it should launch the executable in startup_once.
+        // Install both XDG autostart and a managed Qtile startup_once hook
+        // when the user's Qtile config exists. The helper's per-session lock
+        // makes simultaneous launches harmless.
         const QString autostartDir = QDir::homePath() + "/.config/autostart";
         QDir().mkpath(autostartDir);
         QSaveFile desktop(autostartDir + "/alternix-display-power.desktop");
@@ -828,7 +866,24 @@ private:
             out.flush();
             desktop.commit();
         }
-        if (!displayPowerServiceRunning()) QProcess::startDetached(exe, {});
+        const bool qtileHookReady = installQtileStartupHook(exe);
+        if (!qtileHookReady && m_lidStatusLabel) {
+            m_lidStatusLabel->setText("Could not update ~/.config/qtile/config.py. "
+                                      "The service may not start automatically after reboot.");
+        }
+        if (!displayPowerServiceRunning()) {
+            qint64 servicePid = 0;
+            const bool launched = QProcess::startDetached(exe, QStringList(),
+                                                          QDir::homePath(), &servicePid);
+            if (launched) {
+                if (m_lidStatusLabel)
+                    m_lidStatusLabel->setText("Starting the background display power service…");
+            } else if (m_lidStatusLabel) {
+                m_lidStatusLabel->setText("Could not launch osm-display-power. Check the helper's "
+                                          "installation and permissions.");
+            }
+        }
+        QTimer::singleShot(500, this, [this] { refreshDisplayPowerStatus(); });
         QTimer::singleShot(1900, this, [this] { refreshDisplayPowerStatus(); });
     }
 
@@ -860,11 +915,20 @@ private:
         if (!m_lidStatusLabel || !m_timeoutStatusLabel) return;
         if (!displayPowerServiceRunning()) {
             if (displayPowerHelper().isEmpty()) return;
-            m_lidStatusLabel->setText("Display power service is not running; automatic lid action unavailable.");
+            QString message = "Display power service is not running; automatic lid action unavailable.";
+            const QString logTail = displayPowerLogTail();
+            if (!logTail.isEmpty()) message += "\n" + logTail;
+            else message += "\nDiagnostic log: ~/.config/Alternix/osm-display-power.log";
+            m_lidStatusLabel->setText(message);
             m_timeoutStatusLabel->setText("Background timeout service is not running. Changes only affect this session.");
             return;
         }
         const auto st = readDisplayPowerStatus();
+        if (st.value("service_state") == "starting") {
+            m_lidStatusLabel->setText("Display power service is starting and checking hardware…");
+            m_timeoutStatusLabel->setText("The background service has launched; waiting for its first display check.");
+            return;
+        }
         const QString state = st.value("lid_state", "unknown");
         const bool found = st.value("lid_detected") == "yes";
         QString lidText = found
@@ -887,57 +951,64 @@ private:
 
     QWidget *makeAdaptiveRow()
     {
-        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
+        QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
-        lay->setContentsMargins(14, 14, 14, 14);
+
+        QHBoxLayout *lay = new QHBoxLayout(card);
+        lay->setContentsMargins(30, 20, 30, 20);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Adaptive Brightness");
         lbl->setStyleSheet("font-size:30px; font-weight:bold;");
         lay->addWidget(lbl);
+
         lay->addStretch();
 
-        const bool on = readCfgBool("display_adaptive_brightness", false);
+        bool on = readCfgBool("display_adaptive_brightness", false);
         m_adaptivePill = new BoolPillToggle(on, card);
         lay->addWidget(m_adaptivePill);
+
         connect(m_adaptivePill, &QPushButton::clicked, this, [this]() {
             m_adaptivePill->toggle();
-            writeCfg("display_adaptive_brightness", m_adaptivePill->isOn() ? "true" : "false");
-            // Placeholder for real adaptive logic.
+            bool state = m_adaptivePill->isOn();
+            writeCfg("display_adaptive_brightness", state ? "true" : "false");
+            // Placeholder for real adaptive logic
         });
+
         return card;
     }
 
-    
-
     QWidget *makeBootRow()
     {
-        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
+        QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
-        lay->setContentsMargins(14, 14, 14, 14);
+
+        QHBoxLayout *lay = new QHBoxLayout(card);
+        lay->setContentsMargins(30, 20, 30, 20);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Boot animation toggle");
         lbl->setStyleSheet("font-size:30px; font-weight:bold;");
         lay->addWidget(lbl);
+
         lay->addStretch();
 
-        const bool on = readCfgBool("display_boot_animation", true);
+        bool on = readCfgBool("display_boot_animation", true);
         m_bootPill = new BoolPillToggle(on, card);
         lay->addWidget(m_bootPill);
+
+        // Apply initial state
         applyBootState(on);
+
         connect(m_bootPill, &QPushButton::clicked, this, [this]() {
             m_bootPill->toggle();
-            const bool state = m_bootPill->isOn();
+            bool state = m_bootPill->isOn();
             writeCfg("display_boot_animation", state ? "true" : "false");
             applyBootState(state);
         });
+
         return card;
     }
-
-    
 
     void setRotationError(const QString &message)
     {
@@ -948,10 +1019,11 @@ private:
 
     QWidget *makeAutoRotateRow()
     {
-        DisplayAdaptiveCard *card = new DisplayAdaptiveCard;
+        QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
-        QBoxLayout *lay = new QBoxLayout(QBoxLayout::LeftToRight, card);
-        lay->setContentsMargins(14, 14, 14, 14);
+
+        QHBoxLayout *lay = new QHBoxLayout(card);
+        lay->setContentsMargins(30, 20, 30, 20);
         lay->setSpacing(20);
 
         QLabel *lbl = new QLabel("Auto-Rotate");
@@ -959,8 +1031,10 @@ private:
         lay->addWidget(lbl);
         lay->addStretch();
 
+        // Show the actual running state even if the configuration is stale.
         m_autoRotatePill = new BoolPillToggle(rotateMonitorRunning(), card);
         lay->addWidget(m_autoRotatePill);
+
         connect(m_autoRotatePill, &QPushButton::clicked, this, [this]() {
             const bool desired = !m_autoRotatePill->isOn();
             const QString script = rotateScriptDir() + "/alternix-rotate-toggle.sh";
@@ -968,6 +1042,10 @@ private:
                 setRotationError("Auto-Rotate script missing: " + script);
                 return;
             }
+
+            // The controller starts the monitor detached itself. Wait for its
+            // short command to exit so missing commands and permissions errors
+            // are actually reported to the user.
             QProcess controller;
             controller.start("bash", {script, desired ? "on" : "off"});
             if (!controller.waitForFinished(4500) || controller.exitCode() != 0) {
@@ -976,6 +1054,7 @@ private:
                 setRotationError(detail.isEmpty() ? "Auto-Rotate controller did not start successfully" : detail);
                 return;
             }
+
             if (!desired) {
                 m_autoRotatePill->setState(false);
                 writeCfg("display_auto_rotate", "false");
@@ -983,6 +1062,7 @@ private:
                 refreshSensorInfo();
                 return;
             }
+
             m_autoRotatePill->setEnabled(false);
             QTimer *check = new QTimer(this);
             check->setInterval(1000);
@@ -1009,10 +1089,9 @@ private:
             });
             check->start();
         });
+
         return card;
     }
-
-    
 
     QWidget *makeRotationSensorCard()
     {
@@ -1020,7 +1099,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(14, 14, 14, 14);
+        v->setContentsMargins(30, 20, 30, 20);
         v->setSpacing(10);
 
         QHBoxLayout *hdrRow = new QHBoxLayout();
@@ -1030,12 +1109,10 @@ private:
         hdrRow->addStretch();
 
         m_scanBtn = makeBtn("Scan", "white");
-        m_scanBtn->setMinimumSize(0, 54);
-        m_scanBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_scanBtn->setMinimumSize(160, 54);
         hdrRow->addWidget(m_scanBtn);
         m_adminSetupBtn = makeBtn("Admin Setup", "white");
-        m_adminSetupBtn->setMinimumSize(0, 54);
-        m_adminSetupBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        m_adminSetupBtn->setMinimumSize(210, 54);
         hdrRow->addWidget(m_adminSetupBtn);
         v->addLayout(hdrRow);
 
@@ -1134,7 +1211,7 @@ private:
     {
         QComboBox *combo = new QComboBox(parent);
         combo->setMinimumHeight(54);
-        combo->setMinimumWidth(0);
+        combo->setMinimumWidth(220);
         combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         combo->setStyleSheet(
             "QComboBox { background:#555555; color:white; border:1px solid #777777; "
@@ -1150,7 +1227,7 @@ private:
         QFrame *card = new QFrame;
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(14, 16, 14, 16);
+        v->setContentsMargins(30, 24, 30, 24);
         v->setSpacing(14);
 
         QHBoxLayout *header = new QHBoxLayout();
@@ -1159,7 +1236,7 @@ private:
         header->addWidget(title);
         header->addStretch();
         m_penScanBtn = makeBtn("Detect", "white");
-        m_penScanBtn->setMinimumWidth(0);
+        m_penScanBtn->setMinimumWidth(175);
         header->addWidget(m_penScanBtn);
         v->addLayout(header);
 
@@ -1184,8 +1261,7 @@ private:
             QHBoxLayout *h = new QHBoxLayout(row);
             h->setContentsMargins(0, 6, 0, 6);
             QLabel *label = new QLabel(caption, row);
-            label->setMinimumWidth(0);
-            label->setWordWrap(true);
+            label->setMinimumWidth(215);
             label->setStyleSheet("font-size:21px;");
             h->addWidget(label);
             combo = makePenCombo(row);
@@ -1360,7 +1436,7 @@ private:
         card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
 
         QVBoxLayout *v = new QVBoxLayout(card);
-        v->setContentsMargins(14, 14, 14, 14);
+        v->setContentsMargins(30, 20, 30, 20);
         v->setSpacing(10);
 
         QLabel *header = new QLabel("Screen Info");
@@ -1428,55 +1504,30 @@ private:
         const QString xset = QStandardPaths::findExecutable("xset");
         if (xset.isEmpty()) {
             if (m_timeoutStatusLabel)
-                m_timeoutStatusLabel->setText("xset is not installed. The background X11 backend will attempt to apply the timeout.");
-            ensureDisplayPowerService();
+                m_timeoutStatusLabel->setText("xset is not installed; screen timeout cannot be applied.");
             return;
         }
-
-        const auto invoke = [&xset](const QStringList &args, QString *error) {
+        const auto invoke = [&xset](const QStringList &args) {
             QProcess p;
             p.start(xset, args);
-            if (!p.waitForStarted(1200)) {
-                if (error) *error = p.errorString();
-                return false;
-            }
-            if (!p.waitForFinished(2200)) {
+            if (!p.waitForFinished(1700)) {
                 p.kill();
-                p.waitForFinished(300);
-                if (error) *error = "xset command timed out";
+                p.waitForFinished(200);
                 return false;
             }
-            if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) {
-                if (error) {
-                    const QString detail = QString::fromUtf8(p.readAllStandardError()).trimmed();
-                    *error = detail.isEmpty() ? QString("xset exited with code %1").arg(p.exitCode()) : detail;
-                }
-                return false;
-            }
-            return true;
+            return p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
         };
-
-        QString blankError, dpmsError;
         const bool blankOK = secs == 0
-            ? invoke({"s", "off"}, &blankError)
-            : invoke({"s", QString::number(secs), "60"}, &blankError);
+            ? invoke({"s", "off"})
+            : invoke({"s", QString::number(secs), "60"});
         const QString seconds = QString::number(secs);
-        const bool dpmsOK = (secs == 0 || invoke({"+dpms"}, &dpmsError))
-                            && invoke({"dpms", seconds, seconds, seconds}, &dpmsError);
-
-        ensureDisplayPowerService();
-        const bool helperInstalled = !displayPowerHelper().isEmpty();
+        const bool dpmsOK = (secs == 0 || invoke({"+dpms"}))
+                            && invoke({"dpms", seconds, seconds, seconds});
         if (m_timeoutStatusLabel) {
-            if (!blankOK) {
-                m_timeoutStatusLabel->setText("Could not apply X11 screen timeout: " + blankError
-                    + ". Check that osm-settings is running inside the graphical X11 session.");
-            } else if (!dpmsOK) {
-                m_timeoutStatusLabel->setText("Screen blanking applied, but DPMS could not be configured: " + dpmsError);
-            } else if (helperInstalled) {
-                m_timeoutStatusLabel->setText("Screen timeout applied immediately; the Alternix display service is starting to maintain it.");
-            } else {
-                m_timeoutStatusLabel->setText("Screen timeout applied for this graphical session only. Install osm-display-power for persistence.");
-            }
+            m_timeoutStatusLabel->setText(!blankOK
+                ? "Could not set X11 screen timeout. Check DISPLAY/XAUTHORITY and xset."
+                : (dpmsOK ? "Screen timeout applied; background service will maintain it."
+                          : "Screen blanking applied; DPMS is unsupported or unavailable."));
         }
     }
 
