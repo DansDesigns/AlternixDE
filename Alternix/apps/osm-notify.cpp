@@ -413,6 +413,7 @@ struct AlternixDesktopApp {
     QString name;
     QString icon;
     QString file;
+    QString exec;
 };
 
 static QList<AlternixDesktopApp> alternixInstalledApps() {
@@ -443,7 +444,7 @@ static QList<AlternixDesktopApp> alternixInstalledApps() {
             const QString id = fileName;
             if (seen.contains(id)) continue;
             seen.insert(id);
-            apps.append({id, name, icon, path});
+            apps.append({id, name, icon, path, exec});
         }
     }
     std::sort(apps.begin(), apps.end(), [](const AlternixDesktopApp &a, const AlternixDesktopApp &b) {
@@ -453,8 +454,12 @@ static QList<AlternixDesktopApp> alternixInstalledApps() {
 }
 
 static void alternixLaunchDesktopApp(const AlternixDesktopApp &app) {
-    // gtk-launch uses the desktop entry ID and handles Exec field codes safely.
-    QProcess::startDetached("gtk-launch", {app.id});
+    // Launch the desktop entry's actual Exec command rather than gtk-launch,
+    // which may not resolve desktop IDs in this session environment.
+    QString command = app.exec;
+    command.replace(QRegularExpression("%[fFuUdDnNickvm]"), "");
+    command = command.trimmed();
+    if (!command.isEmpty()) QProcess::startDetached("sh", {"-c", command});
 }
 
 
@@ -1136,8 +1141,7 @@ public:
                 inner->addWidget(label);
                 QFrame *card = createCard(this, inner, true, [this, circleApp]() {
                     animatedClose();
-                    if (!circleApp.id.isEmpty()) alternixLaunchDesktopApp(circleApp);
-                    else QProcess::startDetached("circle2", QStringList());
+                    QProcess::startDetached("circle2", QStringList());
                 });
                 systemCards.append(card);
                 const int r = toggleIndex / sysCols;
