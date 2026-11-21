@@ -1387,7 +1387,7 @@ echo "• Updating Circle2..."
 g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 circle2 /usr/local/bin/
 
-sudo tee "/.local/share/applications/circle2.desktop" > /dev/null <<EOF
+sudo tee "$TARGET_HOME/.local/share/applications/circle2.desktop" > /dev/null <<EOF
 
 # cat <<EOF > "$TARGET_HOME/.local/share/applications/circle2.desktop"
 [Desktop Entry]
