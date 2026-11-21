@@ -54,6 +54,7 @@
 #include <QPropertyAnimation>
 #include <QIcon>
 #include <QInputDialog>
+#include <QElapsedTimer>
 
 
 // Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
@@ -366,12 +367,108 @@ protected:
 class ClickableCard : public QFrame {
 public:
     std::function<void()> onClick;
+    std::function<void()> onRemove;
+    bool longPressRemovalEnabled = false;
     using QFrame::QFrame;
 
 protected:
     void mousePressEvent(QMouseEvent *e) override {
-        if (onClick) onClick();
-        QFrame::mousePressEvent(e);
+        if (!longPressRemovalEnabled) {
+            if (onClick) onClick();
+            QFrame::mousePressEvent(e);
+            return;
+        }
+        pressPosition = e->pos();
+        if (removeArmed) {
+            e->accept();
+            return;
+        }
+        pressClock.start();
+        holdProgress = 0.0;
+        removeMode = false;
+        holdTimer.start(16);
+        update();
+        e->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        if (!longPressRemovalEnabled) {
+            QFrame::mouseReleaseEvent(e);
+            return;
+        }
+        holdTimer.stop();
+        if (removeArmed) {
+            if (removeButtonRect().contains(e->pos())) {
+                if (onRemove) onRemove();
+                e->accept();
+                return;
+            }
+        } else if (removeMode) {
+            removeArmed = true;
+        } else if (pressClock.isValid() && pressClock.elapsed() < 500) {
+            if (onClick) onClick();
+        }
+        if (!removeArmed) {
+            holdProgress = 0.0;
+            removeMode = false;
+        }
+        update();
+        e->accept();
+    }
+
+    void paintEvent(QPaintEvent *e) override {
+        QFrame::paintEvent(e);
+        if (!longPressRemovalEnabled || (holdProgress <= 0.0 && !removeArmed)) return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        if (!removeArmed && !removeMode) {
+            const QRectF ring(pressPosition.x() - 25, pressPosition.y() - 25, 50, 50);
+            QPen track(QColor(255, 255, 255, 90), 4, Qt::SolidLine, Qt::RoundCap);
+            painter.setPen(track);
+            painter.drawEllipse(ring);
+            QPen progressPen(QColor(255, 255, 255, 240), 4, Qt::SolidLine, Qt::RoundCap);
+            painter.setPen(progressPen);
+            painter.drawArc(ring, 90 * 16, -int(360.0 * holdProgress * 16.0));
+        } else {
+            const QRect r = removeButtonRect();
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(210, 35, 45, 235));
+            painter.drawEllipse(r);
+            painter.setPen(QPen(Qt::white, 2.5, Qt::SolidLine, Qt::RoundCap));
+            painter.drawLine(r.left() + 10, r.top() + 10, r.right() - 10, r.bottom() - 10);
+            painter.drawLine(r.right() - 10, r.top() + 10, r.left() + 10, r.bottom() - 10);
+        }
+    }
+
+private:
+    QTimer holdTimer;
+    QElapsedTimer pressClock;
+    QPoint pressPosition;
+    qreal holdProgress = 0.0;
+    bool removeMode = false;
+    bool removeArmed = false;
+
+    QRect removeButtonRect() const {
+        return QRect((width() - 38) / 2, 2, 38, 38);
+    }
+
+    void timerEventUpdate() {
+        if (!pressClock.isValid()) return;
+        const qint64 elapsed = pressClock.elapsed();
+        if (elapsed <= 500) {
+            holdProgress = 0.0;
+        } else {
+            holdProgress = qBound<qreal>(0.0, (elapsed - 500) / 1000.0, 1.0);
+            if (holdProgress >= 1.0) removeMode = true;
+        }
+        update();
+        if (removeMode) holdTimer.stop();
+    }
+
+public:
+    void enableLongPressRemoval() {
+        longPressRemovalEnabled = true;
+        connect(&holdTimer, &QTimer::timeout, this, [this]() { timerEventUpdate(); });
     }
 };
 
@@ -1203,7 +1300,12 @@ public:
                 for (const auto &app : installed) if (app.id == id) return app;
                 return {};
             };
-            auto makeShortcut = [this, shortcutsGrid, findApp](const AlternixDesktopApp &app, int index) {
+            auto shortcutCards = std::make_shared<QList<QPointer<QFrame>>>();
+            auto shortcutSlot = std::make_shared<int>(0);
+            auto plusCardHolder = std::make_shared<QFrame *>(nullptr);
+
+            auto createShortcut = [this, shortcutsGrid, shortcutCards, shortcutSlot,
+                                   plusCardHolder](const AlternixDesktopApp &app) {
                 QVBoxLayout *inner = new QVBoxLayout();
                 inner->setAlignment(Qt::AlignCenter);
                 QLabel *iconLabel = new QLabel(this);
@@ -1219,18 +1321,43 @@ public:
                 nameLabel->setWordWrap(true);
                 inner->addWidget(iconLabel);
                 inner->addWidget(nameLabel);
-                QFrame *card = createCard(this, inner, true, [this, app]() { animatedClose(); alternixLaunchDesktopApp(app); });
+                QFrame *card = createCard(this, inner, true,
+                    [this, app]() { animatedClose(); alternixLaunchDesktopApp(app); });
                 card->setMinimumWidth(1);
                 card->setMinimumHeight(72);
+                auto *clickable = static_cast<ClickableCard *>(card);
+                clickable->enableLongPressRemoval();
+                shortcutCards->append(card);
+                clickable->onRemove = [app, card, shortcutsGrid, shortcutCards,
+                                       shortcutSlot, plusCardHolder]() {
+                    QSettings settings("Alternix", "osm-notify");
+                    QStringList ids = settings.value("appShortcuts").toStringList();
+                    ids.removeAll(app.id);
+                    settings.setValue("appShortcuts", ids);
+                    settings.sync();
+                    shortcutsGrid->removeWidget(card);
+                    shortcutCards->removeAll(QPointer<QFrame>(card));
+                    card->deleteLater();
+                    int column = 0;
+                    for (const QPointer<QFrame> &remaining : *shortcutCards) {
+                        if (!remaining) continue;
+                        shortcutsGrid->addWidget(remaining, 0, column++);
+                    }
+                    *shortcutSlot = column;
+                    if (*plusCardHolder)
+                        shortcutsGrid->addWidget(*plusCardHolder, 0, column);
+                };
+                const int index = (*shortcutSlot)++;
                 shortcutsGrid->addWidget(card, 0, index);
             };
-            int slot = 0;
+
             for (const QString &id : savedIds) {
-                if (slot >= 9) break; // plus card occupies one of the ten slots
+                if (*shortcutSlot >= 9) break; // plus card occupies one of the ten slots
                 const AlternixDesktopApp app = findApp(id);
                 if (app.id.isEmpty()) continue;
-                makeShortcut(app, slot++);
+                createShortcut(app);
             }
+
             // The plus card opens a picker for any installed desktop application.
             QVBoxLayout *plusInner = new QVBoxLayout();
             plusInner->setAlignment(Qt::AlignCenter);
@@ -1242,64 +1369,42 @@ public:
             plusLabel->setAlignment(Qt::AlignCenter);
             plusInner->addWidget(plusIcon);
             plusInner->addWidget(plusLabel);
-            auto shortcutSlot = std::make_shared<int>(slot);
-            auto plusCardHolder = std::make_shared<QFrame *>(nullptr);
-            QFrame *plusCard = createCard(this, plusInner, true, [this, installed, shortcutsGrid, shortcutSlot, plusCardHolder]() mutable {
-                QStringList choices;
-                for (const auto &app : installed) choices << app.name;
-                QInputDialog dialog(this);
-                dialog.setWindowTitle("Add application shortcut");
-                dialog.setLabelText("Installed application:");
-                dialog.setComboBoxItems(choices);
-                dialog.setComboBoxEditable(false);
-                dialog.setWindowFlags(Qt::Dialog | Qt::WindowStaysOnTopHint);
-                dialog.setWindowModality(Qt::ApplicationModal);
-                dialog.show();
-                dialog.raise();
-                dialog.activateWindow();
-                if (dialog.exec() != QDialog::Accepted) return;
-                const QString chosen = dialog.textValue();
-                if (chosen.isEmpty()) return;
-                for (const auto &app : installed) {
-                    if (app.name != chosen) continue;
-                    QSettings settings("Alternix", "osm-notify");
-                    QStringList ids = settings.value("appShortcuts").toStringList();
-                    if (ids.contains(app.id) || ids.size() >= 9) return;
-                    ids.append(app.id);
-                    settings.setValue("appShortcuts", ids);
-                    settings.sync();
-                    const int index = (*shortcutSlot)++;
-                    QVBoxLayout *appInner = new QVBoxLayout();
-                    appInner->setAlignment(Qt::AlignCenter);
-                    QLabel *appIcon = new QLabel(this);
-                    appIcon->setAlignment(Qt::AlignCenter);
-                    QIcon chosenIcon = app.icon.isEmpty() ? QIcon() : QIcon::fromTheme(app.icon);
-                    if (chosenIcon.isNull() && QFileInfo(app.icon).exists()) chosenIcon = QIcon(app.icon);
-                    if (chosenIcon.isNull()) chosenIcon = QIcon(app.file);
-                    if (!chosenIcon.isNull()) appIcon->setPixmap(chosenIcon.pixmap(28, 28));
-                    else appIcon->setText("•");
-                    QLabel *appName = new QLabel(app.name, this);
-                    appName->setStyleSheet("color:white; font-size:12pt;");
-                    appName->setAlignment(Qt::AlignCenter);
-                    appName->setWordWrap(true);
-                    appInner->addWidget(appIcon);
-                    appInner->addWidget(appName);
-                    QFrame *appCard = createCard(this, appInner, true, [this, app]() { animatedClose(); alternixLaunchDesktopApp(app); });
-                    appCard->setMinimumWidth(1);
-                    appCard->setMinimumHeight(72);
-                    shortcutsGrid->addWidget(appCard, 0, index);
-                    if (*plusCardHolder) shortcutsGrid->addWidget(*plusCardHolder, 0, *shortcutSlot);
-                    return;
-                }
-            });
+            QFrame *plusCard = createCard(this, plusInner, true,
+                [this, installed, createShortcut]() mutable {
+                    QStringList choices;
+                    for (const auto &app : installed) choices << app.name;
+                    QInputDialog dialog(this);
+                    dialog.setWindowTitle("Add application shortcut");
+                    dialog.setLabelText("Installed application:");
+                    dialog.setComboBoxItems(choices);
+                    dialog.setComboBoxEditable(false);
+                    dialog.setWindowFlags(Qt::Dialog | Qt::WindowStaysOnTopHint);
+                    dialog.setWindowModality(Qt::ApplicationModal);
+                    dialog.show();
+                    dialog.raise();
+                    dialog.activateWindow();
+                    if (dialog.exec() != QDialog::Accepted) return;
+                    const QString chosen = dialog.textValue();
+                    if (chosen.isEmpty()) return;
+                    for (const auto &app : installed) {
+                        if (app.name != chosen) continue;
+                        QSettings settings("Alternix", "osm-notify");
+                        QStringList ids = settings.value("appShortcuts").toStringList();
+                        if (ids.contains(app.id) || ids.size() >= 9) return;
+                        ids.append(app.id);
+                        settings.setValue("appShortcuts", ids);
+                        settings.sync();
+                        createShortcut(app);
+                        return;
+                    }
+                });
             plusCard->setMinimumWidth(1);
             plusCard->setMinimumHeight(72);
             *plusCardHolder = plusCard;
-            shortcutsGrid->addWidget(plusCard, 0, slot);
+            shortcutsGrid->addWidget(plusCard, 0, *shortcutSlot);
             appShortcutsRowWidget = shortcutsRow;
             main->addWidget(shortcutsRow);
         }
-
 
         main->addStretch();
 
@@ -2118,7 +2223,6 @@ public:
         setAttribute(Qt::WA_ShowWithoutActivating);
         setFocusPolicy(Qt::NoFocus);
         setMouseTracking(true);
-        setAttribute(Qt::WA_AcceptTouchEvents, true);
 
         setGeometry(x, y, w, h);
         // Intentionally no stylesheet or painted fill: the window is fully
