@@ -1415,6 +1415,12 @@ echo "• Updating osm-power..."
 g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-power && sudo mv osm-power /usr/local/bin/
 
+
+echo "• Updating osm-display-power (lid switch)..."
+g++ -O2 -fPIC apps/osm-display-power.cpp -o osm-display-power $(pkg-config --cflags --libs Qt5Core Qt5DBus x11 xext)
+chmod +x osm-display-power && sudo mv osm-display-power /usr/local/bin/
+
+
 echo "• Updating osm-files..."
 g++ -fPIC apps/osm-files.cpp -o osm-files $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 chmod +x osm-files && sudo mv osm-files /usr/local/bin/
