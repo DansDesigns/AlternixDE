@@ -366,6 +366,25 @@ protected:
 // ──────────────────────────────  Clickable card frame
 class ClickableCard : public QFrame {
 public:
+    static QList<QPointer<ClickableCard>> removalCards;
+
+    static void dismissRemoveOverlays(ClickableCard *except = nullptr) {
+        for (auto it = removalCards.begin(); it != removalCards.end();) {
+            if (it->isNull()) {
+                it = removalCards.erase(it);
+                continue;
+            }
+            ClickableCard *card = it->data();
+            if (card != except && card->removeArmed)
+                card->hideRemoveOverlay();
+            ++it;
+        }
+    }
+
+    static void dismissAllRemoveOverlays() {
+        dismissRemoveOverlays(nullptr);
+    }
+
     std::function<void()> onClick;
     std::function<void()> onRemove;
     bool longPressRemovalEnabled = false;
@@ -373,6 +392,9 @@ public:
 
 protected:
     void mousePressEvent(QMouseEvent *e) override {
+        const bool pressingOwnRemoveButton = removeArmed && removeButtonRect().contains(e->pos());
+        if (removeArmed) removeDismissTimer.stop();
+        dismissRemoveOverlays(pressingOwnRemoveButton ? this : nullptr);
         if (!longPressRemovalEnabled) {
             if (onClick) onClick();
             QFrame::mousePressEvent(e);
@@ -391,6 +413,21 @@ protected:
         e->accept();
     }
 
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (removeArmed) removeDismissTimer.start(5000);
+        QFrame::mouseMoveEvent(e);
+    }
+
+    void enterEvent(QEvent *e) override {
+        if (removeArmed) removeDismissTimer.start(5000);
+        QFrame::enterEvent(e);
+    }
+
+    void leaveEvent(QEvent *e) override {
+        if (removeArmed) removeDismissTimer.start(5000);
+        QFrame::leaveEvent(e);
+    }
+
     void mouseReleaseEvent(QMouseEvent *e) override {
         if (!longPressRemovalEnabled) {
             QFrame::mouseReleaseEvent(e);
@@ -403,8 +440,12 @@ protected:
                 e->accept();
                 return;
             }
+            // A press elsewhere on the card counts as activity; begin a fresh
+            // five-second idle period once that interaction has finished.
+            removeDismissTimer.start(5000);
         } else if (removeMode) {
             removeArmed = true;
+            removeDismissTimer.start(5000);
         } else if (pressClock.isValid() && pressClock.elapsed() < 500) {
             if (onClick) onClick();
         }
@@ -423,7 +464,7 @@ protected:
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
         if (!removeArmed && !removeMode) {
-            const QRectF ring(pressPosition.x() - 25, pressPosition.y() - 25, 50, 50);
+            const QRectF ring(pressPosition.x() - 50, pressPosition.y() - 50, 100, 100);
             QPen track(QColor(255, 255, 255, 90), 4, Qt::SolidLine, Qt::RoundCap);
             painter.setPen(track);
             painter.drawEllipse(ring);
@@ -435,6 +476,7 @@ protected:
 
 private:
     QTimer holdTimer;
+    QTimer removeDismissTimer;
     QElapsedTimer pressClock;
     QPoint pressPosition;
     qreal holdProgress = 0.0;
@@ -444,6 +486,15 @@ private:
 
     QRect removeButtonRect() const {
         return QRect((width() - 42) / 2, 2, 42, 42);
+    }
+
+    void hideRemoveOverlay() {
+        removeDismissTimer.stop();
+        removeArmed = false;
+        removeMode = false;
+        holdProgress = 0.0;
+        if (removeOverlay) removeOverlay->hide();
+        update();
     }
 
     void timerEventUpdate() {
@@ -469,6 +520,7 @@ private:
 public:
     void enableLongPressRemoval() {
         longPressRemovalEnabled = true;
+        removalCards.append(this);
         // This is a child overlay above createCard()'s inner #box widget.
         // Painting the close affordance in the frame itself put it underneath
         // that child widget, making it clickable but visually obscured.
@@ -478,9 +530,15 @@ public:
         removeOverlay->setStyleSheet("background:rgba(210,35,45,235); border:2px solid white; border-radius:21px; color:white; font-size:21px;");
         removeOverlay->setAttribute(Qt::WA_TransparentForMouseEvents, true);
         removeOverlay->hide();
+        removeDismissTimer.setSingleShot(true);
+        connect(&removeDismissTimer, &QTimer::timeout, this, [this]() {
+            hideRemoveOverlay();
+        });
         connect(&holdTimer, &QTimer::timeout, this, [this]() { timerEventUpdate(); });
     }
 };
+
+QList<QPointer<ClickableCard>> ClickableCard::removalCards;
 
 // ──────────────────────────────  Card creation helper
 static QFrame* createCard(QWidget *parent,
@@ -2074,6 +2132,9 @@ public:
 
     void animatedClose() {
         if (closing || !isVisible()) return;
+        // Clear pinned-app removal affordances whenever the panel is dismissed.
+        // This covers app launches, outside-tap dismissal and the edge swipe.
+        ClickableCard::dismissAllRemoveOverlays();
         closing = true;
         if (refreshTimer) { refreshEnabled = false; refreshTimer->stop(); }
         if (deviceTimer) deviceTimer->stop();
