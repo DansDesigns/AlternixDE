@@ -496,7 +496,7 @@ layouts = [
         edge_padding=10,
         column_widths=[0.34, 0.5, 0.67, 1.0],
         default_width=2,
-        centre_focused=False,     # True = niri-style always-centred column
+        centre_focused=True,     # True = niri-style always-centred column
         unmap_offscreen=True,     # keeps picom off the Atom GPU's back
     ),
     # layout.Columns(border_focus_stack=["#d75f5f", "#8f3d3d"], border_width=8),
@@ -601,7 +601,7 @@ screens = [
             float_button,
             widget.Spacer(length=15),
             close_button,
-            widget.Spacer(length=15),
+            widget.Spacer(length=25),
             # widget.QuickExit(padding=8),
         ], size=35,
             # N,E,S,W compass directions for margin:
