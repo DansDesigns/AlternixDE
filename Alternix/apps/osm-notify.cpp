@@ -1392,7 +1392,9 @@ public:
                 [this, installed, createShortcut]() mutable {
                     QStringList choices;
                     for (const auto &app : installed) choices << app.name;
-                    QInputDialog dialog(this);
+                    // Keep the picker independent of the overlay's native
+                    // bypass-WM window so it can be stacked above it on X11.
+                    QInputDialog dialog(nullptr);
                     dialog.setWindowTitle("Add application shortcut");
                     dialog.setLabelText("Installed application:");
                     dialog.setComboBoxItems(choices);
@@ -1402,6 +1404,10 @@ public:
                     dialog.show();
                     dialog.raise();
                     dialog.activateWindow();
+                    if (Display *dpy = alternixX11Display()) {
+                        XRaiseWindow(dpy, static_cast<Window>(dialog.winId()));
+                        XFlush(dpy);
+                    }
                     if (dialog.exec() != QDialog::Accepted) return;
                     const QString chosen = dialog.textValue();
                     if (chosen.isEmpty()) return;
