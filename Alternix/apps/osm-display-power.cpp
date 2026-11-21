@@ -36,6 +36,18 @@ namespace {
 QString configDir() { return QDir::homePath() + "/.config/Alternix"; }
 QString settingsPath() { return configDir() + "/osm-settings.conf"; }
 QString statusPath() { return configDir() + "/display-power.status"; }
+QString logPath() { return configDir() + "/osm-display-power.log"; }
+
+void appendLog(const QString &message)
+{
+    QDir().mkpath(configDir());
+    QFile file(logPath());
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+        return;
+    QTextStream out(&file);
+    out << QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
+        << " " << message << '\n';
+}
 
 QMap<QString, QString> readConfig()
 {
@@ -181,11 +193,14 @@ void writeStatus(const QMap<QString, QString> &status)
 {
     QDir().mkpath(configDir());
     QSaveFile f(statusPath());
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) return;
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        appendLog("STATUS WRITE FAILED: " + f.errorString());
+        return;
+    }
     QTextStream out(&f);
     for (auto it = status.cbegin(); it != status.cend(); ++it)
         out << it.key() << '=' << it.value().simplified() << '\n';
-    f.commit();
+    if (!f.commit()) appendLog("STATUS COMMIT FAILED: " + f.errorString());
 }
 } // namespace
 
@@ -309,6 +324,7 @@ private:
             // Do not retain a machine-wide lid inhibitor after the graphical
             // X session has disappeared (e.g. the user logs out).
             if (!screen.connected && ++m_missingDisplayChecks >= 3) {
+                appendLog("STOPPING: X11 display unavailable for three consecutive checks");
                 QCoreApplication::quit();
                 return;
             }
@@ -370,6 +386,7 @@ private:
     {
         QMap<QString, QString> status;
         status["pid"] = QString::number(QCoreApplication::applicationPid());
+        status["service_state"] = "running";
         status["lid_detected"] = m_lid.found ? "yes" : "no";
         status["lid_state"] = !m_lid.found ? "unknown" : (m_lid.closed ? "closed" : "open");
         status["lid_source"] = m_lid.source;
@@ -415,6 +432,7 @@ int main(int argc, char **argv)
 {
     QCoreApplication app(argc, argv);
     app.setApplicationName("osm-display-power");
+
     if (app.arguments().contains("--probe")) {
         LidReading lid = viaUPower();
         if (!lid.found) lid = viaProcAcpi();
@@ -425,24 +443,60 @@ int main(int argc, char **argv)
             << "Source: " << lid.source << '\n';
         return lid.found ? 0 : 2;
     }
-    if (qEnvironmentVariableIsEmpty("DISPLAY")) {
+
+    const QString display = qEnvironmentVariable("DISPLAY");
+    if (display.isEmpty()) {
+        appendLog("START FAILED: DISPLAY is empty; helper must start inside the graphical X11 session");
         qWarning() << "No X11 DISPLAY in this session; not taking a lid inhibitor";
         return 3;
     }
+
     Display *checkDisplay = XOpenDisplay(nullptr);
     if (!checkDisplay) {
+        appendLog("START FAILED: cannot open X11 display " + display
+                  + "; check DISPLAY and XAUTHORITY");
         qWarning() << "X11 display unavailable; not taking a lid inhibitor";
         return 3;
     }
     XCloseDisplay(checkDisplay);
+
+    // Keep the original per-user lock path so an older helper instance
+    // cannot overlap this version while the executable is being upgraded.
     const QString lockBase = configDir() + "/runtime";
-    QDir().mkpath(lockBase);
+    if (!QDir().mkpath(lockBase)) {
+        appendLog("START FAILED: cannot create lock directory " + lockBase);
+        qWarning() << "Cannot create lock directory" << lockBase;
+        return 4;
+    }
+
     QLockFile lock(lockBase + "/alternix-display-power.lock");
     lock.setStaleLockTime(0);
     if (!lock.tryLock(100)) {
-        qWarning() << "osm-display-power is already running in this user session";
+        qint64 ownerPid = 0;
+        QString ownerHost, ownerApp;
+        lock.getLockInfo(&ownerPid, &ownerHost, &ownerApp);
+        appendLog(QString("START SKIPPED: session lock is held (pid=%1 host=%2 app=%3)")
+                  .arg(ownerPid).arg(ownerHost, ownerApp));
+        qWarning() << "osm-display-power is already running or its session lock is held";
         return 0;
     }
+
+    QMap<QString, QString> starting;
+    starting["pid"] = QString::number(QCoreApplication::applicationPid());
+    starting["service_state"] = "starting";
+    starting["lid_detected"] = "no";
+    starting["lid_state"] = "unknown";
+    starting["lid_source"] = "Checking hardware";
+    starting["inhibitor"] = "checking";
+    starting["x11"] = "yes";
+    starting["dpms"] = "unknown";
+    starting["last_action"] = "Starting display power service";
+    writeStatus(starting);
+    appendLog(QString("STARTED: pid=%1 DISPLAY=%2")
+              .arg(QCoreApplication::applicationPid()).arg(display));
+
     DisplayPowerService service;
-    return app.exec();
+    const int result = app.exec();
+    appendLog(QString("STOPPED: exit_code=%1").arg(result));
+    return result;
 }
