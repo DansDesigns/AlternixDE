@@ -2800,6 +2800,11 @@ int main(int argc, char **argv) {
         tileWidgets.reserve(tiles.size());
         for (AppTile *tile : tiles) tileWidgets.append(tile);
         window.openWithAnimation(scroll, tileWidgets, cols, closeBtn);
+        // The hidden warm-up pass may have stopped after preloading the
+        // desktop-entry icons. Restart it on every opening so any tiles whose
+        // icons were not cached during the cascade are decoded once the
+        // transition has finished.
+        warmTimer.start();
         window.setUpdatesEnabled(true);
         QTimer::singleShot(0, &window, syncScreenGeometry);
         QTimer::singleShot(100, &window, syncScreenGeometry);
