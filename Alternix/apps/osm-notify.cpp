@@ -411,6 +411,7 @@ protected:
         if (!removeArmed) {
             holdProgress = 0.0;
             removeMode = false;
+            if (removeOverlay) removeOverlay->hide();
         }
         update();
         e->accept();
@@ -429,14 +430,6 @@ protected:
             QPen progressPen(QColor(255, 255, 255, 240), 4, Qt::SolidLine, Qt::RoundCap);
             painter.setPen(progressPen);
             painter.drawArc(ring, 90 * 16, -int(360.0 * holdProgress * 16.0));
-        } else {
-            const QRect r = removeButtonRect();
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(210, 35, 45, 235));
-            painter.drawEllipse(r);
-            painter.setPen(QPen(Qt::white, 2.5, Qt::SolidLine, Qt::RoundCap));
-            painter.drawLine(r.left() + 10, r.top() + 10, r.right() - 10, r.bottom() - 10);
-            painter.drawLine(r.right() - 10, r.top() + 10, r.left() + 10, r.bottom() - 10);
         }
     }
 
@@ -447,9 +440,10 @@ private:
     qreal holdProgress = 0.0;
     bool removeMode = false;
     bool removeArmed = false;
+    QLabel *removeOverlay = nullptr;
 
     QRect removeButtonRect() const {
-        return QRect((width() - 38) / 2, 2, 38, 38);
+        return QRect((width() - 42) / 2, 2, 42, 42);
     }
 
     void timerEventUpdate() {
@@ -459,7 +453,14 @@ private:
             holdProgress = 0.0;
         } else {
             holdProgress = qBound<qreal>(0.0, (elapsed - 500) / 1000.0, 1.0);
-            if (holdProgress >= 1.0) removeMode = true;
+            if (holdProgress >= 1.0) {
+                removeMode = true;
+                if (removeOverlay) {
+                    removeOverlay->setGeometry(removeButtonRect());
+                    removeOverlay->show();
+                    removeOverlay->raise();
+                }
+            }
         }
         update();
         if (removeMode) holdTimer.stop();
@@ -468,6 +469,15 @@ private:
 public:
     void enableLongPressRemoval() {
         longPressRemovalEnabled = true;
+        // This is a child overlay above createCard()'s inner #box widget.
+        // Painting the close affordance in the frame itself put it underneath
+        // that child widget, making it clickable but visually obscured.
+        removeOverlay = new QLabel(QStringLiteral("❌"), this);
+        removeOverlay->setAlignment(Qt::AlignCenter);
+        removeOverlay->setFixedSize(42, 42);
+        removeOverlay->setStyleSheet("background:rgba(210,35,45,235); border:2px solid white; border-radius:21px; color:white; font-size:21px;");
+        removeOverlay->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        removeOverlay->hide();
         connect(&holdTimer, &QTimer::timeout, this, [this]() { timerEventUpdate(); });
     }
 };
@@ -1303,9 +1313,24 @@ public:
             auto shortcutCards = std::make_shared<QList<QPointer<QFrame>>>();
             auto shortcutSlot = std::make_shared<int>(0);
             auto plusCardHolder = std::make_shared<QFrame *>(nullptr);
+            auto reflowShortcuts = std::make_shared<std::function<void()>>();
+
+            *reflowShortcuts = [shortcutsGrid, shortcutCards, shortcutSlot, plusCardHolder]() {
+                int column = 0;
+                for (const QPointer<QFrame> &remaining : *shortcutCards) {
+                    if (!remaining) continue;
+                    shortcutsGrid->removeWidget(remaining);
+                    shortcutsGrid->addWidget(remaining, 0, column++);
+                }
+                *shortcutSlot = column;
+                if (*plusCardHolder) {
+                    shortcutsGrid->removeWidget(*plusCardHolder);
+                    shortcutsGrid->addWidget(*plusCardHolder, 0, column);
+                }
+            };
 
             auto createShortcut = [this, shortcutsGrid, shortcutCards, shortcutSlot,
-                                   plusCardHolder](const AlternixDesktopApp &app) {
+                                   plusCardHolder, reflowShortcuts](const AlternixDesktopApp &app) {
                 QVBoxLayout *inner = new QVBoxLayout();
                 inner->setAlignment(Qt::AlignCenter);
                 QLabel *iconLabel = new QLabel(this);
@@ -1329,7 +1354,7 @@ public:
                 clickable->enableLongPressRemoval();
                 shortcutCards->append(card);
                 clickable->onRemove = [app, card, shortcutsGrid, shortcutCards,
-                                       shortcutSlot, plusCardHolder]() {
+                                       reflowShortcuts]() {
                     QSettings settings("Alternix", "osm-notify");
                     QStringList ids = settings.value("appShortcuts").toStringList();
                     ids.removeAll(app.id);
@@ -1338,17 +1363,11 @@ public:
                     shortcutsGrid->removeWidget(card);
                     shortcutCards->removeAll(QPointer<QFrame>(card));
                     card->deleteLater();
-                    int column = 0;
-                    for (const QPointer<QFrame> &remaining : *shortcutCards) {
-                        if (!remaining) continue;
-                        shortcutsGrid->addWidget(remaining, 0, column++);
-                    }
-                    *shortcutSlot = column;
-                    if (*plusCardHolder)
-                        shortcutsGrid->addWidget(*plusCardHolder, 0, column);
+                    if (*reflowShortcuts) (*reflowShortcuts)();
                 };
                 const int index = (*shortcutSlot)++;
                 shortcutsGrid->addWidget(card, 0, index);
+                if (*reflowShortcuts) (*reflowShortcuts)();
             };
 
             for (const QString &id : savedIds) {
@@ -1402,6 +1421,7 @@ public:
             plusCard->setMinimumHeight(72);
             *plusCardHolder = plusCard;
             shortcutsGrid->addWidget(plusCard, 0, *shortcutSlot);
+            if (*reflowShortcuts) (*reflowShortcuts)();
             appShortcutsRowWidget = shortcutsRow;
             main->addWidget(shortcutsRow);
         }
