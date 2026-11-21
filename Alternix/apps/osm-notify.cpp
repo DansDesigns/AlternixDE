@@ -52,6 +52,8 @@
 #include <memory>
 #include <algorithm>
 #include <QPropertyAnimation>
+#include <QIcon>
+#include <QInputDialog>
 
 
 // Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
@@ -404,6 +406,57 @@ static QFrame* createCard(QWidget *parent,
 
     return frame;
 }
+
+// ──────────────────────────────  Installed application shortcuts
+struct AlternixDesktopApp {
+    QString id;
+    QString name;
+    QString icon;
+    QString file;
+};
+
+static QList<AlternixDesktopApp> alternixInstalledApps() {
+    QStringList roots = {"/usr/share/applications", "/usr/local/share/applications",
+                        QDir::homePath() + "/.local/share/applications"};
+    QList<AlternixDesktopApp> apps;
+    QSet<QString> seen;
+    for (const QString &root : roots) {
+        QDir dir(root);
+        const QStringList files = dir.entryList({"*.desktop"}, QDir::Files, QDir::Name);
+        for (const QString &fileName : files) {
+            const QString path = dir.absoluteFilePath(fileName);
+            QFile file(path);
+            if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+            QString name, icon, exec;
+            bool hidden = false, inDesktopEntry = false;
+            QTextStream stream(&file);
+            while (!stream.atEnd()) {
+                const QString line = stream.readLine().trimmed();
+                if (line.startsWith("[")) { inDesktopEntry = (line == "[Desktop Entry]"); continue; }
+                if (!inDesktopEntry) continue;
+                if (line.startsWith("Name=") && name.isEmpty()) name = line.mid(5).trimmed();
+                else if (line.startsWith("Icon=") && icon.isEmpty()) icon = line.mid(5).trimmed();
+                else if (line.startsWith("Exec=") && exec.isEmpty()) exec = line.mid(5).trimmed();
+                else if (line == "Hidden=true" || line == "NoDisplay=true") hidden = true;
+            }
+            if (hidden || name.isEmpty() || exec.isEmpty()) continue;
+            const QString id = fileName;
+            if (seen.contains(id)) continue;
+            seen.insert(id);
+            apps.append({id, name, icon, path});
+        }
+    }
+    std::sort(apps.begin(), apps.end(), [](const AlternixDesktopApp &a, const AlternixDesktopApp &b) {
+        return a.name.toLower() < b.name.toLower();
+    });
+    return apps;
+}
+
+static void alternixLaunchDesktopApp(const AlternixDesktopApp &app) {
+    // gtk-launch uses the desktop entry ID and handles Exec field codes safely.
+    QProcess::startDetached("gtk-launch", {app.id});
+}
+
 
 // Forward declaration
 class NotificationOverlay;
@@ -776,6 +829,7 @@ public:
     QWidget *topCardWidget;
     QWidget *sysRowWidget;
     QWidget *brightnessCardWidget;
+    QWidget *appShortcutsRowWidget = nullptr;
     AlternixBrightnessController *brightnessController = nullptr;
     QWidget *batteryCardWidget;
 
@@ -979,6 +1033,42 @@ public:
             addToggle("gps", "gps.png", "GPS chip");
             addToggle("rotation", "rotate.png", "Auto-Rotate");
 
+            // Circle2 application launch card
+            {
+                QVBoxLayout *inner = new QVBoxLayout();
+                inner->setAlignment(Qt::AlignCenter);
+                QLabel *icon = new QLabel(this);
+                icon->setAlignment(Qt::AlignCenter);
+                const QList<AlternixDesktopApp> installedForCircle = alternixInstalledApps();
+                AlternixDesktopApp circleApp;
+                for (const auto &candidate : installedForCircle) {
+                    if (candidate.name.compare("Circle2", Qt::CaseInsensitive) == 0 ||
+                        candidate.id.contains("circle2", Qt::CaseInsensitive)) {
+                        circleApp = candidate;
+                        break;
+                    }
+                }
+                QIcon circleIcon = circleApp.icon.isEmpty() ? QIcon() : QIcon::fromTheme(circleApp.icon);
+                if (circleIcon.isNull() && QFileInfo(circleApp.icon).exists()) circleIcon = QIcon(circleApp.icon);
+                if (circleIcon.isNull()) circleIcon = QIcon::fromTheme("circle2");
+                if (!circleIcon.isNull()) icon->setPixmap(circleIcon.pixmap(42, 42));
+                else icon->setText(QString::fromUtf8("◉"));
+                QLabel *label = new QLabel("Circle2", this);
+                label->setStyleSheet("color:white; font-size:18pt;");
+                label->setAlignment(Qt::AlignCenter);
+                inner->addWidget(icon);
+                inner->addWidget(label);
+                QFrame *card = createCard(this, inner, true, [circleApp]() {
+                    if (!circleApp.id.isEmpty()) alternixLaunchDesktopApp(circleApp);
+                    else QProcess::startDetached("circle2", QStringList());
+                });
+                systemCards.append(card);
+                const int r = toggleIndex / sysCols;
+                const int c = toggleIndex % sysCols;
+                grid->addWidget(card, r, c);
+                ++toggleIndex;
+            }
+
             // ───────── Battery (icon based on status + saver)
             {
                 QVBoxLayout *inner = new QVBoxLayout();
@@ -1092,12 +1182,113 @@ public:
             main->addWidget(brightnessCard);
         }
 
+        // ───────── Installed application shortcuts (half-width cards)
+        {
+            QWidget *shortcutsRow = new QWidget(this);
+            QGridLayout *shortcutsGrid = new QGridLayout(shortcutsRow);
+            shortcutsGrid->setSpacing(8);
+            shortcutsGrid->setContentsMargins(0, 0, 0, 0);
+            for (int c = 0; c < 10; ++c) shortcutsGrid->setColumnStretch(c, 1);
+            QSettings appSettings("Alternix", "osm-notify");
+            QStringList savedIds = appSettings.value("appShortcuts").toStringList();
+            const QList<AlternixDesktopApp> installed = alternixInstalledApps();
+            auto findApp = [&installed](const QString &id) -> AlternixDesktopApp {
+                for (const auto &app : installed) if (app.id == id) return app;
+                return {};
+            };
+            auto makeShortcut = [this, shortcutsGrid, findApp](const AlternixDesktopApp &app, int index) {
+                QVBoxLayout *inner = new QVBoxLayout();
+                inner->setAlignment(Qt::AlignCenter);
+                QLabel *iconLabel = new QLabel(this);
+                iconLabel->setAlignment(Qt::AlignCenter);
+                QIcon icon = app.icon.isEmpty() ? QIcon() : QIcon::fromTheme(app.icon);
+                if (icon.isNull() && QFileInfo(app.icon).exists()) icon = QIcon(app.icon);
+                if (icon.isNull()) icon = QIcon(app.file);
+                if (!icon.isNull()) iconLabel->setPixmap(icon.pixmap(28, 28));
+                else iconLabel->setText("•");
+                QLabel *nameLabel = new QLabel(app.name, this);
+                nameLabel->setStyleSheet("color:white; font-size:12pt;");
+                nameLabel->setAlignment(Qt::AlignCenter);
+                nameLabel->setWordWrap(true);
+                inner->addWidget(iconLabel);
+                inner->addWidget(nameLabel);
+                QFrame *card = createCard(this, inner, true, [app]() { alternixLaunchDesktopApp(app); });
+                card->setMinimumWidth(1);
+                card->setMinimumHeight(72);
+                shortcutsGrid->addWidget(card, 0, index);
+            };
+            int slot = 0;
+            for (const QString &id : savedIds) {
+                if (slot >= 9) break; // plus card occupies one of the ten slots
+                const AlternixDesktopApp app = findApp(id);
+                if (app.id.isEmpty()) continue;
+                makeShortcut(app, slot++);
+            }
+            // The plus card opens a picker for any installed desktop application.
+            QVBoxLayout *plusInner = new QVBoxLayout();
+            plusInner->setAlignment(Qt::AlignCenter);
+            QLabel *plusIcon = new QLabel("+", this);
+            plusIcon->setStyleSheet("color:white; font-size:30pt;");
+            plusIcon->setAlignment(Qt::AlignCenter);
+            QLabel *plusLabel = new QLabel("Add", this);
+            plusLabel->setStyleSheet("color:white; font-size:12pt;");
+            plusLabel->setAlignment(Qt::AlignCenter);
+            plusInner->addWidget(plusIcon);
+            plusInner->addWidget(plusLabel);
+            auto shortcutSlot = std::make_shared<int>(slot);
+            QFrame *plusCard = createCard(this, plusInner, true, [this, installed, shortcutsGrid, shortcutSlot]() mutable {
+                QStringList choices;
+                for (const auto &app : installed) choices << app.name;
+                bool ok = false;
+                const QString chosen = QInputDialog::getItem(this, "Add application shortcut",
+                    "Installed application:", choices, 0, false, &ok);
+                if (!ok || chosen.isEmpty()) return;
+                for (const auto &app : installed) {
+                    if (app.name != chosen) continue;
+                    QSettings settings("Alternix", "osm-notify");
+                    QStringList ids = settings.value("appShortcuts").toStringList();
+                    if (ids.contains(app.id) || ids.size() >= 9) return;
+                    ids.append(app.id);
+                    settings.setValue("appShortcuts", ids);
+                    settings.sync();
+                    const int index = (*shortcutSlot)++;
+                    QVBoxLayout *appInner = new QVBoxLayout();
+                    appInner->setAlignment(Qt::AlignCenter);
+                    QLabel *appIcon = new QLabel(this);
+                    appIcon->setAlignment(Qt::AlignCenter);
+                    QIcon chosenIcon = app.icon.isEmpty() ? QIcon() : QIcon::fromTheme(app.icon);
+                    if (chosenIcon.isNull() && QFileInfo(app.icon).exists()) chosenIcon = QIcon(app.icon);
+                    if (chosenIcon.isNull()) chosenIcon = QIcon(app.file);
+                    if (!chosenIcon.isNull()) appIcon->setPixmap(chosenIcon.pixmap(28, 28));
+                    else appIcon->setText("•");
+                    QLabel *appName = new QLabel(app.name, this);
+                    appName->setStyleSheet("color:white; font-size:12pt;");
+                    appName->setAlignment(Qt::AlignCenter);
+                    appName->setWordWrap(true);
+                    appInner->addWidget(appIcon);
+                    appInner->addWidget(appName);
+                    QFrame *appCard = createCard(this, appInner, true, [app]() { alternixLaunchDesktopApp(app); });
+                    appCard->setMinimumWidth(1);
+                    appCard->setMinimumHeight(72);
+                    shortcutsGrid->addWidget(appCard, 0, index);
+                    return;
+                }
+            });
+            plusCard->setMinimumWidth(1);
+            plusCard->setMinimumHeight(72);
+            shortcutsGrid->addWidget(plusCard, 0, slot);
+            appShortcutsRowWidget = shortcutsRow;
+            main->addWidget(shortcutsRow);
+        }
+
+
         main->addStretch();
 
         orderedWidgets.clear();
         orderedWidgets << topCardWidget
                        << sysRowWidget
-                       << brightnessCardWidget;
+                       << brightnessCardWidget
+                       << appShortcutsRowWidget;
 
         for (QWidget *w : orderedWidgets) {
             if (w) w->setVisible(false);
@@ -1583,6 +1774,7 @@ public:
                 if (!it.value().isEmpty()) stages.append(it.value());
         }
         if (brightnessCardWidget) stages.append(QList<QWidget*>{brightnessCardWidget});
+        if (appShortcutsRowWidget) stages.append(QList<QWidget*>{appShortcutsRowWidget});
         return stages;
     }
 
@@ -1853,6 +2045,7 @@ protected:
                 if (w == topCardWidget  ||
                     w == sysRowWidget   ||
                     w == brightnessCardWidget ||
+                    w == appShortcutsRowWidget ||
                     w == batteryCardWidget) {
                     QWidget::mousePressEvent(e);
                     return;
