@@ -1853,6 +1853,11 @@ echo "• Building osm-power..."
 g++ -fPIC apps/osm-power.cpp -o osm-power $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 osm-power /usr/local/bin/
 
+echo "• Updating osm-display-power (lid switch)..."
+g++ -O2 -fPIC apps/osm-display-power.cpp -o osm-display-power $(pkg-config --cflags --libs Qt5Core Qt5DBus x11 xext)
+sudo install -m 755 osm-display-power /usr/local/bin/
+
+
 echo "• Compiling osm-powerd..."
 sudo g++ -O2 apps/osm-powerd.cpp -o osm-powerd
 sudo install -m 755 osm-powerd /usr/local/bin/
