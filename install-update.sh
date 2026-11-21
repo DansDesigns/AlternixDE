@@ -1387,9 +1387,13 @@ echo "• Updating Circle2..."
 g++ -fPIC apps/circle2.cpp -o circle2 $(pkg-config --cflags --libs Qt5Widgets Qt5Gui Qt5Core)
 sudo install -m 755 circle2 /usr/local/bin/
 
-sudo tee "$TARGET_HOME/.local/share/applications/circle2.desktop" > /dev/null <<EOF
+if [ -f "icons/circle2.png" ]; then
+    sudo cp icons/circle2.png /usr/share/icons/hicolor/64x64/apps/circle2.png
+fi
 
-# cat <<EOF > "$TARGET_HOME/.local/share/applications/circle2.desktop"
+sudo tee "$HOME/.local/share/applications/circle2.desktop" > /dev/null <<EOF
+
+# cat <<EOF > "$HOME/.local/share/applications/circle2.desktop"
 [Desktop Entry]
 Type=Application
 Name=Circle2
@@ -1400,7 +1404,7 @@ Terminal=false
 Categories=Utility;
 StartupNotify=false
 EOF
-chmod +x "$TARGET_HOME/.local/share/applications/circle2.desktop"
+chmod +x "$HOME/.local/share/applications/circle2.desktop"
 
 
 echo "• Updating osm-clock..."
