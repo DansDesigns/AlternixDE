@@ -1396,7 +1396,7 @@ sudo tee "$HOME/.local/share/applications/circle2.desktop" > /dev/null <<EOF
 # cat <<EOF > "$HOME/.local/share/applications/circle2.desktop"
 [Desktop Entry]
 Type=Application
-Name=Circle2
+Name=Circle2..
 Comment=Circle to Search, Copy, Screenshot and Share for Alternix / OSM-Phone
 Exec=/usr/local/bin/circle2 %U
 Icon=circle2
