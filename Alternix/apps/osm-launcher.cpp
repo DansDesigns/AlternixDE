@@ -1379,6 +1379,9 @@ class AppTile : public QFrame {
     QWidget *hoverBox = nullptr;
     bool iconReady = false;
     bool moved = false;
+    bool hoverHighlighted = false;
+    bool dropHighlighted = false;
+    bool clickHighlighted = false;
     QPoint pressedAt;
     std::function<void(const LauncherItem &)> activated;
     std::function<void(const LauncherItem &, const QPoint &)> contextMenu;
@@ -1522,12 +1525,22 @@ public:
     void setContextHandler(std::function<void(const LauncherItem &, const QPoint &)> callback) {
         contextMenu = std::move(callback);
     }
-    void setDropHighlighted(bool active) {
+    void refreshHighlight() {
         if (!hoverBox) return;
-        hoverBox->setStyleSheet(active
-            ? "#hoverBox { background: #63619ccc; border: 2px solid white; border-radius: 20px; }"
-            : "#hoverBox { background: #80708099; border-radius: 20px; }"
-              "#hoverBox:hover { background-color: #282828; border: 1px solid white; }");
+        if (dropHighlighted || clickHighlighted) {
+            hoverBox->setStyleSheet(
+                "#hoverBox { background: #63619ccc; border: 2px solid white; border-radius: 20px; }");
+        } else if (hoverHighlighted) {
+            hoverBox->setStyleSheet(
+                "#hoverBox { background: #282828; border: 1px solid white; border-radius: 20px; }");
+        } else {
+            hoverBox->setStyleSheet(
+                "#hoverBox { background: #80708099; border: none; border-radius: 20px; }");
+        }
+    }
+    void setDropHighlighted(bool active) {
+        dropHighlighted = active;
+        refreshHighlight();
     }
     bool hasLoadedIcon() const { return iconReady; }
     bool loadIcon(bool decodeMissing = true) {
@@ -1598,10 +1611,22 @@ public:
     }
 
 protected:
+    void enterEvent(QEvent *event) override {
+        hoverHighlighted = true;
+        refreshHighlight();
+        QFrame::enterEvent(event);
+    }
+    void leaveEvent(QEvent *event) override {
+        hoverHighlighted = false;
+        refreshHighlight();
+        QFrame::leaveEvent(event);
+    }
     void mousePressEvent(QMouseEvent *event) override {
         if (event->button() == Qt::LeftButton) {
             moved = false;
             pressedAt = event->pos();
+            clickHighlighted = true;
+            refreshHighlight();
         }
         QFrame::mousePressEvent(event);
     }
@@ -1611,8 +1636,21 @@ protected:
         QFrame::mouseMoveEvent(event);
     }
     void mouseReleaseEvent(QMouseEvent *event) override {
-        if (event->button() == Qt::LeftButton && !moved && activated)
-            activated(data);
+        if (event->button() == Qt::LeftButton) {
+            const bool clicked = !moved;
+            clickHighlighted = clicked;
+            refreshHighlight();
+            if (clicked) {
+                QTimer::singleShot(140, this, [this]() {
+                    clickHighlighted = false;
+                    refreshHighlight();
+                });
+                if (activated) activated(data);
+            } else {
+                clickHighlighted = false;
+                refreshHighlight();
+            }
+        }
         QFrame::mouseReleaseEvent(event);
     }
     void contextMenuEvent(QContextMenuEvent *event) override {
