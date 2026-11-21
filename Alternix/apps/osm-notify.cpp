@@ -1219,7 +1219,7 @@ public:
                 nameLabel->setWordWrap(true);
                 inner->addWidget(iconLabel);
                 inner->addWidget(nameLabel);
-                QFrame *card = createCard(this, inner, true, [app]() { alternixLaunchDesktopApp(app); });
+                QFrame *card = createCard(this, inner, true, [this, app]() { animatedClose(); alternixLaunchDesktopApp(app); });
                 card->setMinimumWidth(1);
                 card->setMinimumHeight(72);
                 shortcutsGrid->addWidget(card, 0, index);
@@ -1247,10 +1247,19 @@ public:
             QFrame *plusCard = createCard(this, plusInner, true, [this, installed, shortcutsGrid, shortcutSlot, plusCardHolder]() mutable {
                 QStringList choices;
                 for (const auto &app : installed) choices << app.name;
-                bool ok = false;
-                const QString chosen = QInputDialog::getItem(this, "Add application shortcut",
-                    "Installed application:", choices, 0, false, &ok);
-                if (!ok || chosen.isEmpty()) return;
+                QInputDialog dialog(this);
+                dialog.setWindowTitle("Add application shortcut");
+                dialog.setLabelText("Installed application:");
+                dialog.setComboBoxItems(choices);
+                dialog.setComboBoxEditable(false);
+                dialog.setWindowFlags(Qt::Dialog | Qt::WindowStaysOnTopHint);
+                dialog.setWindowModality(Qt::ApplicationModal);
+                dialog.show();
+                dialog.raise();
+                dialog.activateWindow();
+                if (dialog.exec() != QDialog::Accepted) return;
+                const QString chosen = dialog.textValue();
+                if (chosen.isEmpty()) return;
                 for (const auto &app : installed) {
                     if (app.name != chosen) continue;
                     QSettings settings("Alternix", "osm-notify");
@@ -1275,7 +1284,7 @@ public:
                     appName->setWordWrap(true);
                     appInner->addWidget(appIcon);
                     appInner->addWidget(appName);
-                    QFrame *appCard = createCard(this, appInner, true, [app]() { alternixLaunchDesktopApp(app); });
+                    QFrame *appCard = createCard(this, appInner, true, [this, app]() { animatedClose(); alternixLaunchDesktopApp(app); });
                     appCard->setMinimumWidth(1);
                     appCard->setMinimumHeight(72);
                     shortcutsGrid->addWidget(appCard, 0, index);
