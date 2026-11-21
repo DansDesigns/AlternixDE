@@ -225,7 +225,7 @@ private:
         if (m_acpiListen->state() != QProcess::NotRunning) return;
         if (m_cycles % 20 != 1) return;
         const QString listener = QStandardPaths::findExecutable("acpi_listen");
-        if (!listener.isEmpty()) m_acpiListen->start(listener, {});
+        if (!listener.isEmpty()) m_acpiListen->start(listener, QStringList{});
     }
 
     LidReading detectLid()
