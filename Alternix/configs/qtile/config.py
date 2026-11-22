@@ -220,7 +220,7 @@ def lock_on_resume():
 @hook.subscribe.startup
 def autostart():
     # Autostart Programs
-    subprocess.Popen(['osm-launcher'])
+#    subprocess.Popen(['osm-launcher'])
     subprocess.Popen(['osm-paper-restore'])
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-lockd'])
@@ -237,6 +237,8 @@ def _scrollbar():
     scrollerbar.install(qtile, height=16)
 def start_alternix_display_power():
     subprocess.Popen(["/usr/local/bin/osm-display-power"])
+def osm-launcher():
+    subprocess.Popen(['osm-launcher'])
 
 
     # Function to update the time
