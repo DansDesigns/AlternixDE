@@ -3,6 +3,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QStandardPaths>
 #include <QScrollArea>
@@ -530,7 +531,8 @@ public:
         // Wacom AES, libinput stylus and integrated touchscreen settings.
         outerLay->addWidget(makeTouchPenCard());
 
-        // Screen Info (mini-cards)
+        // Multi-monitor configuration and live screen information.
+        outerLay->addWidget(makeMonitorSettingsCard());
         outerLay->addWidget(makeScreenInfoCard());
 
         wrapLay->addWidget(outer);
@@ -593,6 +595,21 @@ private:
     QLabel *m_penHardwareLabel = nullptr;
     QPushButton *m_penScanBtn = nullptr;
     QPushButton *m_penApplyBtn = nullptr;
+
+    // XRandR-backed controls for physical display outputs.
+    struct MonitorControls {
+        QString name;
+        QCheckBox *enabled = nullptr;
+        QCheckBox *primary = nullptr;
+        QComboBox *resolution = nullptr;
+        QComboBox *position = nullptr;
+    };
+    QWidget *m_monitorRows = nullptr;
+    QVBoxLayout *m_monitorRowsLayout = nullptr;
+    QLabel *m_monitorStatusLabel = nullptr;
+    QPushButton *m_monitorRefreshButton = nullptr;
+    QPushButton *m_monitorApplyButton = nullptr;
+    QList<MonitorControls> m_monitorControls;
 
     // ------------- config helpers (local) -------------
     QString readCfg(const QString &k, const QString &def = QString()) const
@@ -1428,6 +1445,249 @@ private:
             m_penStatusLabel->setText(status);
         }
         m_penApplyBtn->setEnabled(true);
+    }
+
+    // ------------- multi-monitor settings -----------------
+    QWidget *makeMonitorSettingsCard()
+    {
+        QFrame *card = new QFrame;
+        card->setStyleSheet("QFrame { background:#444444; border-radius:30px; }");
+        QVBoxLayout *v = new QVBoxLayout(card);
+        v->setContentsMargins(30, 22, 30, 22);
+        v->setSpacing(12);
+
+        QHBoxLayout *header = new QHBoxLayout;
+        QLabel *title = new QLabel("Multiple Monitors", card);
+        title->setStyleSheet("font-size:28px; font-weight:bold;");
+        header->addWidget(title);
+        header->addStretch();
+        m_monitorRefreshButton = makeBtn("Refresh", "white");
+        m_monitorRefreshButton->setMinimumWidth(155);
+        header->addWidget(m_monitorRefreshButton);
+        v->addLayout(header);
+
+        QLabel *hint = new QLabel(
+            "Configure connected X11 displays. Choose a resolution and position for each "
+            "monitor, then Apply. Keep at least one display enabled and select one primary display.", card);
+        hint->setWordWrap(true);
+        hint->setStyleSheet("font-size:18px; color:#dddddd;");
+        v->addWidget(hint);
+
+        m_monitorRows = new QWidget(card);
+        m_monitorRows->setStyleSheet("background:transparent;");
+        m_monitorRowsLayout = new QVBoxLayout(m_monitorRows);
+        m_monitorRowsLayout->setContentsMargins(0, 0, 0, 0);
+        m_monitorRowsLayout->setSpacing(9);
+        v->addWidget(m_monitorRows);
+
+        m_monitorStatusLabel = new QLabel("Detecting connected displays…", card);
+        m_monitorStatusLabel->setWordWrap(true);
+        m_monitorStatusLabel->setStyleSheet("font-size:18px; color:#dedede;");
+        v->addWidget(m_monitorStatusLabel);
+        m_monitorApplyButton = makeBtn("Apply Display Layout", "white");
+        m_monitorApplyButton->setStyleSheet(altBtnBright());
+        v->addWidget(m_monitorApplyButton, 0, Qt::AlignRight);
+
+        connect(m_monitorRefreshButton, &QPushButton::clicked, this,
+                [this] { refreshMonitorControls(); });
+        connect(m_monitorApplyButton, &QPushButton::clicked, this,
+                [this] { applyMonitorLayout(); });
+        QTimer::singleShot(0, this, [this] { refreshMonitorControls(); });
+        return card;
+    }
+
+    void clearMonitorRows()
+    {
+        m_monitorControls.clear();
+        while (m_monitorRowsLayout && m_monitorRowsLayout->count()) {
+            QLayoutItem *item = m_monitorRowsLayout->takeAt(0);
+            if (item->widget()) item->widget()->deleteLater();
+            delete item;
+        }
+    }
+
+    void refreshMonitorControls()
+    {
+        if (!m_monitorRowsLayout || !m_monitorStatusLabel) return;
+        clearMonitorRows();
+        const QString xrandr = QStandardPaths::findExecutable("xrandr");
+        if (xrandr.isEmpty()) {
+            m_monitorStatusLabel->setText("XRandR is unavailable. Install x11-xserver-utils and run this app inside the Qtile X11 session.");
+            m_monitorApplyButton->setEnabled(false);
+            return;
+        }
+
+        QProcess query;
+        query.start(xrandr, {"--query"});
+        if (!query.waitForFinished(3000) || query.exitStatus() != QProcess::NormalExit || query.exitCode() != 0) {
+            if (query.state() != QProcess::NotRunning) query.kill();
+            const QString error = QString::fromUtf8(query.readAllStandardError()).trimmed();
+            m_monitorStatusLabel->setText("Could not query XRandR. Check DISPLAY/XAUTHORITY. " + error);
+            m_monitorApplyButton->setEnabled(false);
+            return;
+        }
+
+        const QStringList lines = QString::fromUtf8(query.readAllStandardOutput()).split('\n');
+        const QRegularExpression outputRe("^([^\\s]+)\\s+(connected|disconnected)(?:\\s+(primary))?(?:\\s+(\\d+x\\d+)([+-]\\d+[+-]\\d+))?");
+        const QRegularExpression modeRe("^\\s+(\\d+x\\d+)\\s+(.+)$");
+        QString currentOutput;
+        int connected = 0;
+
+        for (const QString &line : lines) {
+            const auto outputMatch = outputRe.match(line);
+            if (outputMatch.hasMatch()) {
+                currentOutput.clear();
+                if (outputMatch.captured(2) != "connected") continue;
+                currentOutput = outputMatch.captured(1);
+                ++connected;
+
+                QFrame *row = new QFrame(m_monitorRows);
+                row->setStyleSheet("QFrame { background:#555555; border-radius:16px; }");
+                QVBoxLayout *rowLayout = new QVBoxLayout(row);
+                rowLayout->setContentsMargins(16, 12, 16, 12);
+                rowLayout->setSpacing(7);
+                QHBoxLayout *top = new QHBoxLayout;
+                QLabel *name = new QLabel(currentOutput, row);
+                name->setStyleSheet("font-size:22px; font-weight:bold;");
+                top->addWidget(name);
+                top->addStretch();
+                QCheckBox *enabled = new QCheckBox("Enabled", row);
+                enabled->setChecked(true);
+                enabled->setStyleSheet("font-size:18px;");
+                top->addWidget(enabled);
+                QCheckBox *primary = new QCheckBox("Primary", row);
+                primary->setChecked(outputMatch.captured(3) == "primary");
+                primary->setStyleSheet("font-size:18px;");
+                top->addWidget(primary);
+                rowLayout->addLayout(top);
+
+                QHBoxLayout *settings = new QHBoxLayout;
+                QComboBox *resolution = makePenCombo(row);
+                resolution->setMinimumWidth(150);
+                QComboBox *position = makePenCombo(row);
+                position->addItem("Right of primary", "right");
+                position->addItem("Left of primary", "left");
+                position->addItem("Above primary", "above");
+                position->addItem("Below primary", "below");
+                position->addItem("Mirror primary", "same");
+                settings->addWidget(new QLabel("Resolution", row));
+                settings->addWidget(resolution, 1);
+                settings->addWidget(new QLabel("Position", row));
+                settings->addWidget(position, 1);
+                rowLayout->addLayout(settings);
+                m_monitorRowsLayout->addWidget(row);
+
+                MonitorControls controls;
+                controls.name = currentOutput;
+                controls.enabled = enabled;
+                controls.primary = primary;
+                controls.resolution = resolution;
+                controls.position = position;
+                m_monitorControls.append(controls);
+
+                connect(enabled, &QCheckBox::toggled, this, [resolution, position, primary](bool on) {
+                    resolution->setEnabled(on);
+                    position->setEnabled(on && !primary->isChecked());
+                    primary->setEnabled(on);
+                });
+                connect(primary, &QCheckBox::toggled, this, [this, primary](bool checked) {
+                    if (checked) {
+                        for (const MonitorControls &other : m_monitorControls)
+                            if (other.primary && other.primary != primary) other.primary->setChecked(false);
+                    }
+                    for (const MonitorControls &item : m_monitorControls)
+                        if (item.primary == primary && item.position)
+                            item.position->setEnabled(item.enabled->isChecked() && !checked);
+                });
+                continue;
+            }
+
+            if (currentOutput.isEmpty()) continue;
+            const auto modeMatch = modeRe.match(line);
+            if (!modeMatch.hasMatch()) continue;
+            const QString modeName = modeMatch.captured(1);
+            for (MonitorControls &item : m_monitorControls) {
+                if (item.name == currentOutput && item.resolution->findData(modeName) < 0)
+                    item.resolution->addItem(modeName, modeName);
+            }
+        }
+
+        for (MonitorControls &item : m_monitorControls) {
+            const QRegularExpression activeRe("^" + QRegularExpression::escape(item.name)
+                + "\\s+connected(?:\\s+primary)?\\s+(\\d+x\\d+)");
+            for (const QString &line : lines) {
+                const auto match = activeRe.match(line);
+                if (match.hasMatch()) {
+                    const int index = item.resolution->findData(match.captured(1));
+                    if (index >= 0) item.resolution->setCurrentIndex(index);
+                    break;
+                }
+            }
+            if (item.primary->isChecked()) item.position->setEnabled(false);
+        }
+        if (connected == 0) {
+            QLabel *none = new QLabel("No connected XRandR outputs detected.", m_monitorRows);
+            none->setStyleSheet("font-size:20px; color:#dddddd;");
+            m_monitorRowsLayout->addWidget(none);
+        }
+        m_monitorApplyButton->setEnabled(connected > 0);
+        m_monitorStatusLabel->setText(QString("Detected %1 connected display(s). Changes apply to the current X11 session.").arg(connected));
+    }
+
+    void applyMonitorLayout()
+    {
+        if (m_monitorControls.isEmpty()) return;
+        const QString xrandr = QStandardPaths::findExecutable("xrandr");
+        if (xrandr.isEmpty()) return;
+        QList<MonitorControls*> active;
+        MonitorControls *primary = nullptr;
+        for (MonitorControls &item : m_monitorControls) {
+            if (!item.enabled->isChecked()) continue;
+            active.append(&item);
+            if (item.primary->isChecked()) primary = &item;
+        }
+        if (active.isEmpty()) {
+            QMessageBox::warning(this, "Display layout", "At least one monitor must remain enabled.");
+            return;
+        }
+        if (!primary) {
+            primary = active.first();
+            primary->primary->setChecked(true);
+        }
+        for (MonitorControls *item : active)
+            if (item != primary) item->primary->setChecked(false);
+
+        QStringList args;
+        for (const MonitorControls &item : m_monitorControls)
+            if (!item.enabled->isChecked()) args << "--output" << item.name << "--off";
+        args << "--output" << primary->name
+             << "--mode" << primary->resolution->currentData().toString()
+             << "--primary" << "--pos" << "0x0";
+        for (MonitorControls *item : active) {
+            if (item == primary) continue;
+            args << "--output" << item->name << "--mode" << item->resolution->currentData().toString();
+            const QString relation = item->position->currentData().toString();
+            if (relation == "left") args << "--left-of" << primary->name;
+            else if (relation == "above") args << "--above" << primary->name;
+            else if (relation == "below") args << "--below" << primary->name;
+            else if (relation == "same") args << "--same-as" << primary->name;
+            else args << "--right-of" << primary->name;
+        }
+
+        m_monitorApplyButton->setEnabled(false);
+        QProcess apply;
+        apply.start(xrandr, args);
+        const bool finished = apply.waitForFinished(7000);
+        const QString error = QString::fromUtf8(apply.readAllStandardError()).trimmed();
+        if (!finished || apply.exitStatus() != QProcess::NormalExit || apply.exitCode() != 0) {
+            if (apply.state() != QProcess::NotRunning) { apply.kill(); apply.waitForFinished(250); }
+            m_monitorStatusLabel->setText("Could not apply display layout. " + error);
+            QMessageBox::warning(this, "Display layout", m_monitorStatusLabel->text());
+        } else {
+            m_monitorStatusLabel->setText("Display layout applied successfully.");
+            QTimer::singleShot(500, this, [this] { refreshMonitorControls(); });
+        }
+        m_monitorApplyButton->setEnabled(true);
     }
 
     QWidget *makeScreenInfoCard()
