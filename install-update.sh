@@ -1440,48 +1440,10 @@ chmod +x osm-paper && sudo mv osm-paper /usr/local/bin/
 echo "• Installing osm-paper-restore (rotation-safe full redraw)..."
 sudo install -m 755 "$ALT_PAPER_RESTORE_SOURCE" /usr/local/bin/ || exit 1
 
-# Only update the wallpaper hook inside the installed Qtile config. The
-# updater intentionally does NOT overwrite personal keybindings, layouts,
-# groups, widgets, or user customization with the full repository config.
-echo "• Enabling wallpaper redraw after Qtile screen rotation..."
-if ! sudo python3 - "$ALT_PAPER_QTILE_SOURCE" "$ALT_VLC_HOME/.config/qtile/config.py" <<'ALT_PAPER_QTILE_INSTALL'
-from pathlib import Path
-import ast
-import os
-import shutil
-import sys
-
-source = Path(sys.argv[1]); target = Path(sys.argv[2])
-start_marker = '# --- Alternix wallpaper refresh after XRandR/Qtile reconfiguration ---'
-end_marker = '# --- End Alternix wallpaper refresh ---'
-s = source.read_text(encoding='utf-8')
-assert s.count(start_marker) == 1 and s.count(end_marker) == 1
-hook = s[s.index(start_marker):s.index(end_marker) + len(end_marker)]
-if target.exists():
-    current = target.read_text(encoding='utf-8')
-    if start_marker in current:
-        if end_marker not in current:
-            raise ValueError('Existing wallpaper refresh section has no end marker')
-        prior = current[current.index(start_marker):current.index(end_marker) + len(end_marker)]
-        updated = current.replace(prior, hook, 1)
-    else:
-        updated = current.rstrip('\n') + '\n\n' + hook + '\n'
-    ast.parse(updated, filename=str(target))
-    if updated != current:
-        target.write_text(updated, encoding='utf-8')
-        print('Qtile: updated wallpaper hook, retained existing configuration')
-    else:
-        print('Qtile: wallpaper hook already current, no changes necessary')
-else:
-    ast.parse(s, filename=str(source))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
-    print('Qtile: installed complete configuration for missing user config')
-ALT_PAPER_QTILE_INSTALL
-then
-    echo "ERROR: Could not update live Qtile wallpaper rotation hook." >&2
-    exit 1
-fi
+# Install the repository's complete Qtile config into the desktop user's
+# ~/.config/qtile/config.py and the default config for future users.
+echo "• Updating Qtile config..."
+sudo install -Dm644 "$ALT_PAPER_QTILE_SOURCE" "$ALT_VLC_HOME/.config/qtile/config.py" || exit 1
 sudo chown "$ALT_VLC_USER:$(id -gn "$ALT_VLC_USER")" \
     "$ALT_VLC_HOME/.config/qtile/config.py" || exit 1
 sudo install -Dm644 "$ALT_PAPER_QTILE_SOURCE" /etc/skel/.config/qtile/config.py || exit 1
