@@ -226,6 +226,11 @@ def autostart():
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
+    subprocess.Popen(['osm-launcher'])
+    subprocess.Popen(['osm-widgets'])
+    subprocess.Popen(['osm-notify'])
+    subprocess.Popen(['osm-status'])
+    subprocess.Popen(['osm-running'])
 
 
 @hook.subscribe.startup_complete
@@ -234,12 +239,7 @@ def _scrollbar():
     subprocess.Popen([os.path.expanduser("~/.local/bin/alternix-touchscroll.py")])
 def start_alternix_display_power():
     subprocess.Popen(["/usr/local/bin/osm-display-power"])
-def start_when_complete():
-    subprocess.Popen(['osm-launcher'])
-    subprocess.Popen(['osm-widgets'])
-    subprocess.Popen(['osm-notify'])
-    subprocess.Popen(['osm-status'])
-    subprocess.Popen(['osm-running'])
+# def start_when_complete():
 
     # Function to update the time
     def update_time():
