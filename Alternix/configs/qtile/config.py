@@ -213,6 +213,7 @@ def _osm_lockclean():
 # to hear elogind's resume signal. osm-lockd only allows one copy, so
 # it is safe if the screen was already locked before sleeping.
 # No screen_change hook: that fires on every auto-rotate too.
+
 @hook.subscribe.resume
 def lock_on_resume():
     subprocess.Popen(["osm-lockd"])
@@ -231,8 +232,10 @@ def autostart():
 def _scrollbar():
     scrollerbar.install(qtile, height=16)
     subprocess.Popen([os.path.expanduser("~/.local/bin/alternix-touchscroll.py")])
+
 def start_alternix_display_power():
     subprocess.Popen(["/usr/local/bin/osm-display-power"])
+
 def start_when_complete():
     subprocess.Popen(['osm-launcher'])
     subprocess.Popen(['osm-widgets'])
