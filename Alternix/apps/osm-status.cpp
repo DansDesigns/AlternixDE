@@ -1057,16 +1057,10 @@ void NotificationBadge::mousePressEvent(QMouseEvent *e) {
 class ActivationEdgeBar : public QWidget {
 public:
     explicit ActivationEdgeBar(OverlayRoot *overlay, QWidget *parent = nullptr)
-        // This handle must outlive the hidden OverlayRoot window. Giving it
-        // root as its QWidget parent ties its visibility to root on Qt/X11;
-        // root is deliberately hidden until the panel opens, which can hide
-        // the activation handle as well. Keep it as an independent top-level
-        // window and retain only the non-owning OverlayRoot pointer.
-        : QWidget(nullptr),
+        : QWidget(parent),
           m_overlay(overlay),
           m_dragging(false)
     {
-        Q_UNUSED(parent);
         setWindowFlags(Qt::FramelessWindowHint
                        | Qt::WindowStaysOnTopHint
                        | Qt::BypassWindowManagerHint
@@ -1084,12 +1078,13 @@ public:
         show();
         raise();
 
-        // Restore the original ability of the transparent swipe handle to
-        // stay reachable after other windows are stacked by X11/Qtile.
+        // Match the known-working legacy implementation: keep the edge
+        // handle raised continuously. Qtile/X11 can restack transparent
+        // override-redirect windows even while the overlay is hidden.
         m_raiseTimer = new QTimer(this);
         m_raiseTimer->setInterval(1500);
         connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-            if (m_overlay && !m_overlay->isVisible()) raise();
+            raise();
         });
         m_raiseTimer->start();
     }
@@ -1115,11 +1110,9 @@ protected:
                 }
             } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
                        !touch->touchPoints().isEmpty()) {
-                const qreal dx = m_pressPos.x() -
-                    touch->touchPoints().first().screenPos().x();
-                if (dx > 12) {
-                    m_dragging = false;
+                if (m_pressPos.x() - touch->touchPoints().first().screenPos().x() > 12) {
                     if (m_overlay) m_overlay->showPanel();
+                    m_dragging = false;
                 }
             } else if (event->type() != QEvent::TouchUpdate) {
                 m_dragging = false;
