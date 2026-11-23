@@ -338,6 +338,7 @@ public:
     void syncScreenGeometry(const QRect &screen);
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;   // body defined later
 
