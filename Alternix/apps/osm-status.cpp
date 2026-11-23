@@ -1078,13 +1078,11 @@ public:
         show();
         raise();
 
-        // Match the known-working legacy implementation: keep the edge
-        // handle raised continuously. Qtile/X11 can restack transparent
-        // override-redirect windows even while the overlay is hidden.
+        // keep stubbornly on top, like osm-running
         m_raiseTimer = new QTimer(this);
         m_raiseTimer->setInterval(1500);
         connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-            raise();
+            this->raise();
         });
         m_raiseTimer->start();
     }
@@ -1111,12 +1109,10 @@ protected:
             } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
                        !touch->touchPoints().isEmpty()) {
                 if (m_pressPos.x() - touch->touchPoints().first().screenPos().x() > 12) {
-                    // A leftward edge swipe activates the panel immediately.
-                    m_dragging = false;
                     if (m_overlay) m_overlay->showPanel();
+                    m_dragging = false;
                 }
             } else if (event->type() == QEvent::TouchEnd) {
-                // A simple touchscreen tap on the handle must also activate it.
                 const bool wasTap = m_dragging;
                 m_dragging = false;
                 if (wasTap && m_overlay) m_overlay->showPanel();
@@ -1133,15 +1129,7 @@ protected:
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
             m_pressPos = e->globalPos();
-            raise();
-
-            // QWidget's default mousePressEvent() ignores ordinary left
-            // clicks. On X11 that can let the press propagate to the window
-            // underneath, so this edge widget never receives the drag.
-            // Accept and grab explicitly to keep the complete gesture.
-            e->accept();
-            grabMouse();
-            return;
+            raise();  // assert on top when touched
         }
         QWidget::mousePressEvent(e);
     }
@@ -1152,31 +1140,24 @@ protected:
             return;
         }
 
-        // Swipe left from the right edge. The mouse grab keeps motion
-        // events arriving even after the pointer leaves this narrow bar.
-        const int dx = m_pressPos.x() - e->globalPos().x();
+        // swipe left from the right edge
+        int dx = m_pressPos.x() - e->globalPos().x();
         if (dx > 12) {
-            m_dragging = false;
-            releaseMouse();
-            if (m_overlay)
+            if (m_overlay) {
                 m_overlay->showPanel();
-            e->accept();
-            return;
+            }
+            m_dragging = false;
         }
 
-        e->accept();
+        QWidget::mouseMoveEvent(e);
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
-        // A swipe clears m_dragging in mouseMoveEvent; if it is still set,
-        // this was an ordinary click/tap on the activation handle.
         const bool wasTap = m_dragging;
         m_dragging = false;
-        if (QWidget::mouseGrabber() == this)
-            releaseMouse();
         if (e->button() == Qt::LeftButton && wasTap && m_overlay)
             m_overlay->showPanel();
-        e->accept();
+        QWidget::mouseReleaseEvent(e);
     }
 
     void paintEvent(QPaintEvent *) override {
@@ -1187,7 +1168,7 @@ private:
     OverlayRoot *m_overlay;
     bool         m_dragging;
     QPoint       m_pressPos;
-    QTimer      *m_raiseTimer = nullptr;
+    QTimer      *m_raiseTimer;
 };
 
 // ───────────────────────────────────────────── Notification helpers
