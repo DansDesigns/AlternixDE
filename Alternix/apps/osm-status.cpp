@@ -750,6 +750,8 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
+    // Native touch input is not guaranteed to synthesize a mouse click.
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
 
     syncScreenGeometry(alternixActiveScreenGeometry());
 
@@ -1042,6 +1044,18 @@ private:
 // ───────────────────────────────────────────── NotificationBadge::mousePressEvent
 // (now after OverlayRoot is fully defined)
 
+bool NotificationBadge::event(QEvent *event) {
+    if (event->type() == QEvent::TouchBegin ||
+        event->type() == QEvent::TouchEnd ||
+        event->type() == QEvent::TouchCancel) {
+        if (event->type() == QEvent::TouchEnd && m_overlay)
+            m_overlay->showPanel();
+        event->accept();
+        return true;
+    }
+    return QWidget::event(event);
+}
+
 void NotificationBadge::mousePressEvent(QMouseEvent *e) {
     if (e->button() == Qt::LeftButton && m_overlay) {
         e->accept();
@@ -1114,7 +1128,11 @@ protected:
                     if (m_overlay) m_overlay->showPanel();
                     m_dragging = false;
                 }
-            } else if (event->type() != QEvent::TouchUpdate) {
+            } else if (event->type() == QEvent::TouchEnd) {
+                if (m_dragging && m_overlay)
+                    m_overlay->showPanel(); // tap without a swipe
+                m_dragging = false;
+            } else if (event->type() == QEvent::TouchCancel) {
                 m_dragging = false;
             }
             event->accept();
@@ -1162,9 +1180,12 @@ protected:
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
+        const bool wasTap = m_dragging;
         m_dragging = false;
         if (QWidget::mouseGrabber() == this)
             releaseMouse();
+        if (wasTap && e->button() == Qt::LeftButton && m_overlay)
+            m_overlay->showPanel();
         e->accept();
     }
 
