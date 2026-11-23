@@ -1126,7 +1126,15 @@ protected:
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
             m_pressPos = e->globalPos();
-            raise(); // restore immediate touch activation
+            raise();
+
+            // QWidget's default mousePressEvent() ignores ordinary left
+            // clicks. On X11 that can let the press propagate to the window
+            // underneath, so this edge widget never receives the drag.
+            // Accept and grab explicitly to keep the complete gesture.
+            e->accept();
+            grabMouse();
+            return;
         }
         QWidget::mousePressEvent(e);
     }
@@ -1137,21 +1145,26 @@ protected:
             return;
         }
 
-        // swipe left from the right edge
-        int dx = m_pressPos.x() - e->globalPos().x();
+        // Swipe left from the right edge. The mouse grab keeps motion
+        // events arriving even after the pointer leaves this narrow bar.
+        const int dx = m_pressPos.x() - e->globalPos().x();
         if (dx > 12) {
-            if (m_overlay) {
-                m_overlay->showPanel();
-            }
             m_dragging = false;
+            releaseMouse();
+            if (m_overlay)
+                m_overlay->showPanel();
+            e->accept();
+            return;
         }
 
-        QWidget::mouseMoveEvent(e);
+        e->accept();
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
         m_dragging = false;
-        QWidget::mouseReleaseEvent(e);
+        if (QWidget::mouseGrabber() == this)
+            releaseMouse();
+        e->accept();
     }
 
     void paintEvent(QPaintEvent *) override {
