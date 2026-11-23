@@ -241,12 +241,12 @@ def start_when_complete():
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
 
-# Function to update the time
-def update_time():
-    clock_text.update(datetime.now().strftime("%H:%M:%S"))
-    qtile.call_later(1, update_time)  # refresh every second
+    # Function to update the time
+    def update_time():
+        clock_text.update(datetime.now().strftime("%H:%M:%S"))
+        qtile.call_later(1, update_time)  # refresh every second
 
-update_time()
+    update_time()
 
 #############################
 ## Three Alternix desktops ##
