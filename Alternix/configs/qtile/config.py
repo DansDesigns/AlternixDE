@@ -226,11 +226,11 @@ def autostart():
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-powerd'])
     subprocess.Popen(['touchegg'])
-    subprocess.Popen(['osm-launcher'])
     subprocess.Popen(['osm-widgets'])
     subprocess.Popen(['osm-notify'])
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
+    subprocess.Popen(['osm-launcher --daemon'])
 
 
 @hook.subscribe.startup_complete
