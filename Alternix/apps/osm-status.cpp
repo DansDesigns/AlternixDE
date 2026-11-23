@@ -15,8 +15,6 @@
 #include <QDir>
 #include <QDebug>
 #include <QPropertyAnimation>
-#include <QCryptographicHash>
-#include <QPointer>
 #include <QEasingCurve>
 #include <QFile>
 #include <QFileInfo>
@@ -40,8 +38,6 @@
 #include <QtDBus/QDBusMetaType>
 
 #include <functional>
-#include <algorithm>
-#include <memory>
 
 // Keep Xlib AFTER every Qt and C++ header. Xlib exports macros such as
 // None, Status and Unsorted that corrupt Qt5's QUrl/QTextStream/QDir enums
@@ -77,34 +73,6 @@ static QRect alternixActiveScreenGeometry() {
         return QRect(0, 0, int(width), int(height));
     }
     return qtGeometry;
-}
-
-// This marker protocol is shared with osm-lockscreen / osm-power. It
-// identifies a *live* owner, not merely a stale file left in ~/.cache.
-static QString statusOverlayMarkerPath(const QString &name) {
-    const QByteArray display = qgetenv("DISPLAY").isEmpty()
-        ? qgetenv("WAYLAND_DISPLAY") : qgetenv("DISPLAY");
-    const QByteArray session = QCryptographicHash::hash(display, QCryptographicHash::Sha256)
-                                   .toHex().left(16);
-    const QString dir = QDir::homePath() + "/.cache/Alternix/overlay-locks";
-    QDir().mkpath(dir);
-    return dir + "/" + name + "-" + QString::fromLatin1(session) + ".lock";
-}
-
-static bool statusOverlayMarkerActive(const QString &name) {
-    const QString marker = statusOverlayMarkerPath(name);
-    if (!QFileInfo::exists(marker)) return false;
-    QLockFile probe(marker);
-    probe.setStaleLockTime(0);
-    if (probe.tryLock(0)) {
-        probe.unlock();
-        return false;
-    }
-    return probe.error() == QLockFile::LockFailedError;
-}
-
-static bool statusSessionLocked() {
-    return statusOverlayMarkerActive(QStringLiteral("osm-lockscreen"));
 }
 
 // ───────────────────────────────────────────── Structures
@@ -263,7 +231,6 @@ public:
     explicit StatusPanel(QWidget *parent=nullptr);
 
     void refreshNotifications();
-    QGraphicsDropShadowEffect *shadow() const { return m_shadow; }
     void removeNotification(const QString &path);
     void resizeToItems(int count);
     void syncScreenGeometry(const QRect &screen);
@@ -287,8 +254,6 @@ public:
     void setCloseCallback(std::function<void()> fn) { onClose = fn; }
 
     int notificationCount() const { return m_notificationCount; }
-    bool readOnly() const { return m_readOnly; }
-    void setReadOnly(bool enabled);
 
 public:
     std::function<void()>    onClose;
@@ -303,10 +268,6 @@ private:
     QString      m_dirPath;
     int          m_notificationCount;
     QSet<QString> m_seenPaths;
-    QStringList m_fileSnapshot;
-    bool m_snapshotReady = false;
-    bool m_readOnly = false;
-    QGraphicsDropShadowEffect *m_shadow = nullptr;
     bool          m_firstScan = true;
 };
 
@@ -315,7 +276,6 @@ private:
 class NotificationCard : public QFrame {
 public:
     NotificationCard(StatusPanel *panel, const NotificationInfo &info, QWidget *parent=nullptr);
-    void setReadOnly(bool enabled);
 
 protected:
     void mousePressEvent(QMouseEvent *e) override;
@@ -324,7 +284,6 @@ private:
     StatusPanel      *m_panel;
     NotificationInfo  m_info;
     QLabel           *m_titleLabel;
-    QPushButton      *m_closeButton = nullptr;
 };
 
 // ───────────────────────────────────────────── NotificationBadge
@@ -338,13 +297,13 @@ public:
     void syncScreenGeometry(const QRect &screen);
 
 protected:
-    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;   // body defined later
 
 private:
     OverlayRoot *m_overlay;
     int          m_count;
+    QTimer      *m_raiseTimer;
 };
 
 // ───────────────────────────────────────────── StatusPanel impl
@@ -409,7 +368,6 @@ StatusPanel::StatusPanel(QWidget *parent)
     sh->setOffset(0, 0);
     sh->setColor(QColor(0, 0, 0, 220));
     m_inner->setGraphicsEffect(sh);
-    m_shadow = sh;
 
     // notifications folder
     m_dirPath = QDir::homePath() + "/.osm-notify";
@@ -422,18 +380,6 @@ StatusPanel::StatusPanel(QWidget *parent)
     t->start();
 
     refreshNotifications();
-}
-
-// Keep notification cards readable on the lockscreen, but never let a
-// notification be removed, activated or dismissed until authentication.
-void StatusPanel::setReadOnly(bool enabled) {
-    if (m_readOnly == enabled) return;
-    m_readOnly = enabled;
-    if (!m_list) return;
-    for (int i = 0; i < m_list->count(); ++i) {
-        if (auto *card = dynamic_cast<NotificationCard*>(m_list->itemAt(i)->widget()))
-            card->setReadOnly(enabled);
-    }
 }
 
 // HEIGHT BASED ON ACTUAL CARD SIZEHINTS (auto height)
@@ -487,6 +433,13 @@ void StatusPanel::syncScreenGeometry(const QRect &screen) {
 }
 
 void StatusPanel::refreshNotifications() {
+    // clear list
+    QLayoutItem *it;
+    while((it = m_list->takeAt(0))) {
+        if(it->widget()) it->widget()->deleteLater();
+        delete it;
+    }
+
     QDir dir(m_dirPath);
     dir.setNameFilters(QStringList() << "*.txt");
 
@@ -497,38 +450,6 @@ void StatusPanel::refreshNotifications() {
 
     // newest first
     std::reverse(files.begin(), files.end());
-
-    // Only rebuild the widget tree when files have actually been added,
-    // deleted or modified. The original 600ms loop destroyed and recreated
-    // every notification card, even while the panel was closed.
-    QStringList snapshot;
-    snapshot.reserve(files.size());
-    for (const QFileInfo &fi : files) {
-        snapshot << fi.fileName() + QLatin1Char(':') +
-                    QString::number(fi.size()) + QLatin1Char(':') +
-                    QString::number(fi.lastModified().toMSecsSinceEpoch());
-    }
-    if (m_snapshotReady && snapshot == m_fileSnapshot) {
-        // The original tray automatically closes whenever it is empty.
-        // Keep this check even on a cache hit, otherwise an already-empty
-        // visible panel can stay open indefinitely.
-        if (m_notificationCount == 0 && isVisible() && onClose)
-            onClose();
-        return;
-    }
-    m_snapshotReady = true;
-    m_fileSnapshot = snapshot;
-
-    QLayoutItem *it;
-    while ((it = m_list->takeAt(0))) {
-        // A close-button click can trigger this refresh from inside a card's
-        // own event handler. Defer destruction, as the original did.
-        if (QWidget *w = it->widget()) {
-            w->hide();
-            w->deleteLater();
-        }
-        delete it;
-    }
 
     QStringList titles;
     QSet<QString> newSeen;
@@ -602,7 +523,6 @@ void StatusPanel::refreshNotifications() {
         }
 
         NotificationCard *card = new NotificationCard(this, info, m_content);
-        card->setReadOnly(m_readOnly);
         m_list->addWidget(card);
         count++;
     }
@@ -627,17 +547,12 @@ void StatusPanel::refreshNotifications() {
     if (onCountChanged)
         onCountChanged(m_notificationCount);
 
-    // Preserve auto-close when the notification list becomes empty. The
-    // callback distinguishes an intentionally opened empty tray (briefly
-    // displayed) from deleting the final notification (close immediately).
-    if (count == 0 && isVisible() && onClose)
+    // auto-close when empty, same behaviour as SidePanel’s onClose
+    if (count == 0 && onClose)
         onClose();
 }
 
 void StatusPanel::removeNotification(const QString &path) {
-    // The check in the action handler is repeated here so even a queued
-    // click cannot dismiss notifications after the screen becomes locked.
-    if (m_readOnly || statusSessionLocked()) return;
     QFile::remove(path);
     refreshNotifications();
 }
@@ -692,17 +607,14 @@ NotificationCard::NotificationCard(
         v->addWidget(body);
     }
 
-    // CLOSE BUTTON — match osm-running exactly
-    QPushButton *close = new QPushButton("❌", this);
-    close->setFixedSize(48, 48);
+    // CLOSE BUTTON
+    QPushButton *close = new QPushButton(" ❌", this);
+    close->setFixedSize(48,48);
     close->setStyleSheet(
-        "QPushButton{color:#ff4a6a;background:#00000099;border:none;"
-        "border-radius:14px;font-size:26px;}"
+        "QPushButton { color:#ff4a6a; }"
         "QPushButton:hover { color:#ff1616; background:#ad1236; border-radius:18px; }"
         "QPushButton:pressed { color:#ffffff; background:#550000; border-radius:18px; }"
     );
-
-    m_closeButton = close;
 
     // build layout
     h->addWidget(timeLbl);
@@ -710,24 +622,12 @@ NotificationCard::NotificationCard(
     h->addWidget(close);
 
     connect(close, &QPushButton::clicked, [this]() {
-        if (m_panel && !m_panel->readOnly() && !statusSessionLocked())
+        if (m_panel)
             m_panel->removeNotification(m_info.path);
     });
 }
 
-void NotificationCard::setReadOnly(bool enabled) {
-    if (m_closeButton) {
-        m_closeButton->setEnabled(!enabled);
-        m_closeButton->setToolTip(enabled ? "Unlock to dismiss this notification"
-                                           : QString());
-    }
-}
-
 void NotificationCard::mousePressEvent(QMouseEvent *e) {
-    if (m_panel && (m_panel->readOnly() || statusSessionLocked())) {
-        e->accept(); // read-only: never dispatch entry activation while locked
-        return;
-    }
     if(e->button()==Qt::LeftButton) {
         // could later add “tap to open file” etc; for now do nothing
     }
@@ -740,7 +640,8 @@ void NotificationCard::mousePressEvent(QMouseEvent *e) {
 NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     : QWidget(nullptr),        // force top-level window
       m_overlay(overlay),
-      m_count(0)
+      m_count(0),
+      m_raiseTimer(nullptr)
 {
     Q_UNUSED(parent);
 
@@ -751,14 +652,18 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
-    // Native touch input is not guaranteed to synthesize a mouse click.
-    setAttribute(Qt::WA_AcceptTouchEvents, true);
 
     syncScreenGeometry(alternixActiveScreenGeometry());
 
     hide();
 
-    // Avoid repeatedly raising this ARGB window over the compositor and lockscreen.
+    m_raiseTimer = new QTimer(this);
+    m_raiseTimer->setInterval(1500);
+    connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
+        if (isVisible())
+            this->raise();
+    });
+    m_raiseTimer->start();
 }
 
 void NotificationBadge::syncScreenGeometry(const QRect &g) {
@@ -771,17 +676,14 @@ void NotificationBadge::syncScreenGeometry(const QRect &g) {
 }
 
 void NotificationBadge::setCount(int c) {
-    c = qMax(0, c);
-    if (c == m_count && isVisible() == (c > 0)) return;
-    const bool countChanged = c != m_count;
     m_count = c;
     if (m_count <= 0) {
-        if (isVisible()) hide();
-    } else if (!isVisible()) {
+        hide();
+    } else {
         show();
-        raise(); // only on a hidden -> visible transition
+        raise();
     }
-    if (countChanged && isVisible()) update();
+    update();
 }
 
 void NotificationBadge::paintEvent(QPaintEvent *e) {
@@ -832,39 +734,49 @@ void NotificationBadge::paintEvent(QPaintEvent *e) {
 class OverlayRoot : public QWidget {
 public:
     explicit OverlayRoot()
-        : m_panel(nullptr), m_badge(nullptr), m_panelVisible(false),
-          m_statusOverlayLock(statusOverlayMarkerPath(QStringLiteral("osm-status")))
+        : m_panel(nullptr),
+          m_badge(nullptr),
+          m_panelVisible(false)
     {
-        m_statusOverlayLock.setStaleLockTime(0);
         setWindowFlags(Qt::FramelessWindowHint |
                        Qt::Tool |
                        Qt::WindowStaysOnTopHint |
                        Qt::X11BypassWindowManagerHint |
                        Qt::WindowDoesNotAcceptFocus);
+
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_DeleteOnClose);
 
         m_screenGeo = alternixActiveScreenGeometry();
         setGeometry(m_screenGeo);
+
         m_panel = new StatusPanel(this);
-        m_shadow = m_panel->shadow();
-        m_panel->move(m_screenGeo.width(), m_panel->y());
+
+        QRect finalGeo = m_panel->geometry();
+        QRect startGeo = finalGeo;
+        // start off-screen to the RIGHT
+        startGeo.moveLeft(m_screenGeo.width());
+        m_panel->setGeometry(startGeo);
         m_panel->hide();
-        // Empty trays must still respond to a swipe, as in the original.
-        // Only a tray that was opened empty gets a short grace period before
-        // automatically closing; deleting the last notification closes now.
+
         m_panel->setCloseCallback([this]() {
-            if (m_panelVisible && !m_openedEmpty) hidePanel();
+            hidePanel();
         });
 
+        // badge window (separate always-on-top widget)
         m_badge = new NotificationBadge(this);
+
+        // sync badge count with panel
         m_panel->onCountChanged = [this](int n) {
-            if (n > 0) m_openedEmpty = false;
-            if (m_badge) m_badge->setCount(m_panelVisible ? 0 : n);
+            if (!m_badge) return;
+            if (!this->isVisible() || !m_panel->isVisible()) {
+                m_badge->setCount(n);  // overlay closed ⇒ show badge
+            } else {
+                m_badge->setCount(0);  // overlay open ⇒ hide badge
+            }
         };
-        // StatusPanel's initial scan happened before onCountChanged was set.
-        m_badge->setCount(m_panel->notificationCount());
-        hide();
+
+        hide(); // start hidden
     }
 
     void syncScreenGeometry(const QRect &g) {
@@ -874,188 +786,81 @@ public:
         setGeometry(g);
         if (m_panel) {
             m_panel->syncScreenGeometry(g);
-            if (!m_animation || m_animation->state() != QAbstractAnimation::Running)
-                m_panel->move(m_panelVisible ? g.width() - m_panel->width() : g.width(),
-                              m_panel->y());
+            if (m_panelVisible) m_panel->move(g.width() - m_panel->width(), m_panel->y());
+            else m_panel->move(g.width(), m_panel->y());
         }
         if (m_badge) m_badge->syncScreenGeometry(g);
     }
 
     void showPanel() {
-        if (m_panelVisible || !m_panel ||
-            statusOverlayMarkerActive(QStringLiteral("osm-power"))) return;
-        // The lockscreen must explicitly yield only to this read-only popup;
-        // the marker is acquired before the popup is raised. The lockscreen
-        // continues to own the keyboard grab and never releases authentication.
-        const bool locked = statusSessionLocked();
-        if (locked && !m_statusOverlayLock.isLocked() &&
-            !m_statusOverlayLock.tryLock(0)) return;
-        m_panel->setReadOnly(locked);
         syncScreenGeometry(alternixActiveScreenGeometry());
-        // Refresh first so newly created notifications are shown at once.
-        // Unlike V4, NEVER reject opening just because the tray is empty.
-        // The original allowed the swipe to open it and then auto-closed it.
-        m_panel->refreshNotifications();
-        m_openedEmpty = m_panel->notificationCount() == 0;
-        const quint64 openingId = ++m_openingId;
-
-        const bool reversing = m_animation &&
-                               m_animation->state() == QAbstractAnimation::Running;
-        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
+        if (m_panelVisible) return;
         m_panelVisible = true;
-        if (!isVisible()) show();
+
+        setGeometry(m_screenGeo);
+        show();
         raise();
-        if (locked) {
-            // The lockscreen can run one more enforcement tick before it
-            // notices the popup marker. One delayed raise handles that race,
-            // rather than introducing a constant X11 restacking loop.
-            QTimer::singleShot(180, this, [this]() {
-                if (m_panelVisible && statusSessionLocked() &&
-                    m_statusOverlayLock.isLocked()) raise();
-            });
-        }
-        const QRect end(m_screenGeo.width() - m_panel->width(), m_panel->y(),
-                        m_panel->width(), m_panel->height());
-        QRect start = m_panel->geometry();
-        if (!reversing) start.moveLeft(m_screenGeo.width());
-        m_panel->setGeometry(start);
-        if (m_shadow) m_shadow->setEnabled(false);
+
+        QRect finalGeo = m_panel->geometry();
+        finalGeo = QRect(m_screenGeo.width() - finalGeo.width(),
+                         finalGeo.y(), finalGeo.width(), finalGeo.height());
+        QRect startGeo = finalGeo;
+        startGeo.moveLeft(m_screenGeo.width());
+        m_panel->setGeometry(startGeo);
         m_panel->show();
-        if (m_badge) m_badge->setCount(0);
 
-        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
-        m_animation = anim;
-        anim->setDuration(180);
-        anim->setStartValue(start);
-        anim->setEndValue(end);
+        if (m_badge)
+            m_badge->setCount(0); // hide while open
+
+        QPropertyAnimation *anim = new QPropertyAnimation(m_panel,"geometry",this);
+        anim->setDuration(220);
+        anim->setStartValue(startGeo);
+        anim->setEndValue(finalGeo);
         anim->setEasingCurve(QEasingCurve::OutCubic);
-        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
-            if (m_animation != anim || !m_panelVisible) return;
-            m_animation = nullptr;
-            if (m_shadow) m_shadow->setEnabled(true);
-        });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
-
-        if (m_openedEmpty) {
-            // The 600 ms background poll can otherwise interrupt the slide-in
-            // immediately, making the handle appear broken. Allow the original
-            // slide animation to be visible before automatically closing.
-            QTimer::singleShot(750, this, [this, openingId]() {
-                if (openingId == m_openingId && m_panelVisible && m_panel &&
-                    m_panel->notificationCount() == 0)
-                    hidePanel();
-            });
-        }
-    }
-
-    void checkSessionSecurity() {
-        if (!m_panel) return;
-        const bool locked = statusSessionLocked();
-        if (statusOverlayMarkerActive(QStringLiteral("osm-power"))) {
-            // Power actions must not be obscured by the notification tray.
-            if (m_panelVisible) {
-                ++m_openingId;
-                m_panelVisible = false;
-                m_openedEmpty = false;
-                if (m_animation) {
-                    m_animation->stop();
-                    m_animation->deleteLater();
-                    m_animation = nullptr;
-                }
-                m_panel->hide();
-                hide();
-                if (m_statusOverlayLock.isLocked()) m_statusOverlayLock.unlock();
-                if (m_badge) m_badge->setCount(m_panel->notificationCount());
-            }
-            return;
-        }
-        m_panel->setReadOnly(locked);
-        if (m_panelVisible && locked && !m_statusOverlayLock.isLocked()) {
-            if (!m_statusOverlayLock.tryLock(0)) {
-                hidePanel();
-                return;
-            }
-            raise();
-        } else if (!locked && m_statusOverlayLock.isLocked()) {
-            m_statusOverlayLock.unlock();
-        }
-        // On unlock the regular badge may be under the old lockscreen.
-        if (m_lastLocked && !locked && !m_panelVisible && m_badge &&
-            m_panel->notificationCount() > 0)
-            m_badge->raise();
-        m_lastLocked = locked;
     }
 
     void hidePanel() {
         if (!m_panelVisible || !m_panel) return;
-        ++m_openingId; // cancel any pending empty-tray close from this opening
         m_panelVisible = false;
-        m_openedEmpty = false;
-        if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
-        if (m_shadow) m_shadow->setEnabled(false);
-        const QRect start = m_panel->geometry();
-        QRect end = start;
-        end.moveLeft(m_screenGeo.width());
 
-        auto *anim = new QPropertyAnimation(m_panel, "geometry", this);
-        m_animation = anim;
-        anim->setDuration(170);
-        anim->setStartValue(start);
-        anim->setEndValue(end);
+        QRect cur = m_panel->geometry();
+        QRect endGeo = cur;
+        endGeo.moveLeft(m_screenGeo.width());
+
+        QPropertyAnimation *anim = new QPropertyAnimation(m_panel,"geometry",this);
+        anim->setDuration(220);
+        anim->setStartValue(cur);
+        anim->setEndValue(endGeo);
         anim->setEasingCurve(QEasingCurve::InCubic);
-        connect(anim, &QPropertyAnimation::finished, this, [this, anim]() {
-            if (m_animation != anim || m_panelVisible) return;
-            m_animation = nullptr;
-            m_panel->hide();
-            if (m_statusOverlayLock.isLocked()) {
-                // Allow the lockscreen's 120 ms enforcement timer to reclaim
-                // its mouse grab BEFORE the full-screen input shield goes away.
-                m_statusOverlayLock.unlock();
-                QTimer::singleShot(200, this, [this]() {
-                    if (!m_panelVisible) hide();
-                });
-            } else {
-                hide();
-            }
-            if (m_badge) m_badge->setCount(m_panel->notificationCount());
+        connect(anim,&QPropertyAnimation::finished,[this](){
+            if (m_panel) m_panel->hide();
+            hide();
+            if (m_badge)
+                m_badge->setCount(m_panel->notificationCount());
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
     }
 
 protected:
     void mousePressEvent(QMouseEvent *e) override {
-        if (m_panel && !m_panel->geometry().contains(e->pos())) hidePanel();
-        else QWidget::mousePressEvent(e);
+        if (m_panel && !m_panel->geometry().contains(e->pos()))
+            hidePanel();
+        else
+            QWidget::mousePressEvent(e);
     }
 
 private:
-    StatusPanel *m_panel;
+    StatusPanel       *m_panel;
     NotificationBadge *m_badge;
-    bool m_panelVisible;
-    bool m_openedEmpty = false;
-    bool m_lastLocked = false;
-    QLockFile m_statusOverlayLock;
-    quint64 m_openingId = 0;
-    QRect m_screenGeo;
-    QPointer<QPropertyAnimation> m_animation;
-    QGraphicsDropShadowEffect *m_shadow = nullptr;
+    bool               m_panelVisible;
+    QRect              m_screenGeo;
+
     friend class NotificationBadge;
 };
 
 // ───────────────────────────────────────────── NotificationBadge::mousePressEvent
 // (now after OverlayRoot is fully defined)
-
-bool NotificationBadge::event(QEvent *event) {
-    if (event->type() == QEvent::TouchBegin ||
-        event->type() == QEvent::TouchEnd ||
-        event->type() == QEvent::TouchCancel) {
-        if (event->type() == QEvent::TouchEnd && m_overlay)
-            m_overlay->showPanel();
-        event->accept();
-        return true;
-    }
-    return QWidget::event(event);
-}
 
 void NotificationBadge::mousePressEvent(QMouseEvent *e) {
     if (e->button() == Qt::LeftButton && m_overlay) {
@@ -1093,13 +898,11 @@ public:
         show();
         raise();
 
-        // Match the known-working legacy implementation: keep the edge
-        // handle raised continuously. Qtile/X11 can restack transparent
-        // override-redirect windows even while the overlay is hidden.
+        // keep stubbornly on top, like osm-running
         m_raiseTimer = new QTimer(this);
         m_raiseTimer->setInterval(1500);
         connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-            raise();
+            this->raise();
         });
         m_raiseTimer->start();
     }
@@ -1129,11 +932,7 @@ protected:
                     if (m_overlay) m_overlay->showPanel();
                     m_dragging = false;
                 }
-            } else if (event->type() == QEvent::TouchEnd) {
-                if (m_dragging && m_overlay)
-                    m_overlay->showPanel(); // tap without a swipe
-                m_dragging = false;
-            } else if (event->type() == QEvent::TouchCancel) {
+            } else if (event->type() != QEvent::TouchUpdate) {
                 m_dragging = false;
             }
             event->accept();
@@ -1146,15 +945,7 @@ protected:
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
             m_pressPos = e->globalPos();
-            raise();
-
-            // QWidget's default mousePressEvent() ignores ordinary left
-            // clicks. On X11 that can let the press propagate to the window
-            // underneath, so this edge widget never receives the drag.
-            // Accept and grab explicitly to keep the complete gesture.
-            e->accept();
-            grabMouse();
-            return;
+            raise();  // assert on top when touched
         }
         QWidget::mousePressEvent(e);
     }
@@ -1165,29 +956,21 @@ protected:
             return;
         }
 
-        // Swipe left from the right edge. The mouse grab keeps motion
-        // events arriving even after the pointer leaves this narrow bar.
-        const int dx = m_pressPos.x() - e->globalPos().x();
+        // swipe left from the right edge
+        int dx = m_pressPos.x() - e->globalPos().x();
         if (dx > 12) {
-            m_dragging = false;
-            releaseMouse();
-            if (m_overlay)
+            if (m_overlay) {
                 m_overlay->showPanel();
-            e->accept();
-            return;
+            }
+            m_dragging = false;
         }
 
-        e->accept();
+        QWidget::mouseMoveEvent(e);
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
-        const bool wasTap = m_dragging;
         m_dragging = false;
-        if (QWidget::mouseGrabber() == this)
-            releaseMouse();
-        if (wasTap && e->button() == Qt::LeftButton && m_overlay)
-            m_overlay->showPanel();
-        e->accept();
+        QWidget::mouseReleaseEvent(e);
     }
 
     void paintEvent(QPaintEvent *) override {
@@ -1198,7 +981,7 @@ private:
     OverlayRoot *m_overlay;
     bool         m_dragging;
     QPoint       m_pressPos;
-    QTimer      *m_raiseTimer = nullptr;
+    QTimer      *m_raiseTimer;
 };
 
 // ───────────────────────────────────────────── Notification helpers
@@ -1575,29 +1358,6 @@ int main(int argc,char**argv) {
     });
     geometryPoll.start();
     updateScreen(alternixActiveScreenGeometry());
-
-    // The lockscreen owns the global pointer grab while locked and can send a
-    // lightweight, session-scoped file request from its right-edge gesture.
-    // Polling one file name avoids QtNetwork or an extra resident process.
-    const QString requestPath = statusOverlayMarkerPath(
-        QStringLiteral("osm-status-request"));
-    QTimer requestPoll(&app);
-    requestPoll.setInterval(120);
-    QObject::connect(&requestPoll, &QTimer::timeout, &root,
-                     [&root, requestPath]() {
-        if (!QFile::exists(requestPath)) return;
-        // A stale request must not open an ordinary application over an
-        // unlocked desktop after a crash/restart.
-        QFile::remove(requestPath);
-        if (statusSessionLocked()) root.showPanel();
-    });
-    requestPoll.start();
-    QTimer securityPoll(&app);
-    securityPoll.setInterval(180);
-    QObject::connect(&securityPoll, &QTimer::timeout, &root,
-                     [&root]() { root.checkSessionSecurity(); });
-    securityPoll.start();
-    root.checkSessionSecurity();
 
     // ensure the default sound folders exist — boot/ and notifications/
     QDir().mkpath(soundDirPath() + "/boot");
