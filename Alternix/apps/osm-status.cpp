@@ -937,7 +937,6 @@ public:
         // The original allowed the swipe to open it and then auto-closed it.
         m_panel->refreshNotifications();
         m_openedEmpty = m_panel->notificationCount() == 0;
-        ++m_openingId;
 
         const bool reversing = m_animation &&
                                m_animation->state() == QAbstractAnimation::Running;
