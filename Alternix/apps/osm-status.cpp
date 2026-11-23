@@ -107,6 +107,18 @@ static bool statusSessionLocked() {
     return statusOverlayMarkerActive(QStringLiteral("osm-lockscreen"));
 }
 
+// Persistent activation trace for diagnosing overlay input/z-order on the device.
+static void logStatusActivation(const QString &message) {
+    const QString dir = QDir::homePath() + "/.cache/osm-status";
+    QDir().mkpath(dir);
+    QFile f(dir + "/activation.log");
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+    QTextStream out(&f);
+    out << QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
+        << "  " << message << "\n";
+    out.flush();
+}
+
 // ───────────────────────────────────────────── Structures
 
 struct NotificationInfo {
@@ -338,12 +350,15 @@ public:
     void syncScreenGeometry(const QRect &screen);
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;   // body defined later
 
 private:
     OverlayRoot *m_overlay;
     int          m_count;
+    bool         m_touchDown = false;
+    QTimer      *m_raiseTimer = nullptr;
 };
 
 // ───────────────────────────────────────────── StatusPanel impl
@@ -750,12 +765,19 @@ NotificationBadge::NotificationBadge(OverlayRoot *overlay, QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground);
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_ShowWithoutActivating);
+    setAttribute(Qt::WA_AcceptTouchEvents, true);
 
     syncScreenGeometry(alternixActiveScreenGeometry());
 
     hide();
 
-    // Avoid repeatedly raising this ARGB window over the compositor and lockscreen.
+    // Keep the visible handle above ordinary windows and other top-level overlays.
+    m_raiseTimer = new QTimer(this);
+    m_raiseTimer->setInterval(250);
+    connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
+        if (isVisible()) raise();
+    });
+    m_raiseTimer->start();
 }
 
 void NotificationBadge::syncScreenGeometry(const QRect &g) {
@@ -862,6 +884,18 @@ public:
         // StatusPanel's initial scan happened before onCountChanged was set.
         m_badge->setCount(m_panel->notificationCount());
         hide();
+
+        // The panel is a child of this full-screen transparent window. Re-raise
+        // the root while open so the popout remains above lockscreen/desktop
+        // windows that periodically restack themselves.
+        m_raiseTimer = new QTimer(this);
+        m_raiseTimer->setInterval(100);
+        connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
+            if (!m_panelVisible) return;
+            raise();
+            if (m_panel) m_panel->raise();
+        });
+        m_raiseTimer->start();
     }
 
     void syncScreenGeometry(const QRect &g) {
@@ -879,14 +913,23 @@ public:
     }
 
     void showPanel() {
-        if (m_panelVisible || !m_panel ||
-            statusOverlayMarkerActive(QStringLiteral("osm-power"))) return;
+        logStatusActivation(QStringLiteral("showPanel requested; visible=%1; locked=%2; powerMarker=%3")
+            .arg(m_panelVisible).arg(statusSessionLocked())
+            .arg(statusOverlayMarkerActive(QStringLiteral("osm-power"))));
+        if (m_panelVisible || !m_panel) {
+            logStatusActivation(QStringLiteral("showPanel ignored: already visible or panel missing"));
+            return;
+        }
         // The lockscreen must explicitly yield only to this read-only popup;
         // the marker is acquired before the popup is raised. The lockscreen
         // continues to own the keyboard grab and never releases authentication.
         const bool locked = statusSessionLocked();
         if (locked && !m_statusOverlayLock.isLocked() &&
-            !m_statusOverlayLock.tryLock(0)) return;
+            !m_statusOverlayLock.tryLock(0)) {
+            // Keep the popup read-only even if the lockscreen marker cannot
+            // be acquired; the lockscreen retains its keyboard grab.
+            logStatusActivation(QStringLiteral("lockscreen yield marker unavailable; showing read-only popup anyway"));
+        }
         m_panel->setReadOnly(locked);
         syncScreenGeometry(alternixActiveScreenGeometry());
         // Refresh first so newly created notifications are shown at once.
@@ -894,7 +937,7 @@ public:
         // The original allowed the swipe to open it and then auto-closed it.
         m_panel->refreshNotifications();
         m_openedEmpty = m_panel->notificationCount() == 0;
-        const quint64 openingId = ++m_openingId;
+        ++m_openingId;
 
         const bool reversing = m_animation &&
                                m_animation->state() == QAbstractAnimation::Running;
@@ -902,6 +945,8 @@ public:
         m_panelVisible = true;
         if (!isVisible()) show();
         raise();
+        if (m_panel) m_panel->raise();
+        logStatusActivation(QStringLiteral("showPanel opened; readOnly=%1").arg(locked));
         if (locked) {
             // The lockscreen can run one more enforcement tick before it
             // notices the popup marker. One delayed raise handles that race,
@@ -933,46 +978,23 @@ public:
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
 
-        if (m_openedEmpty) {
-            // The 600 ms background poll can otherwise interrupt the slide-in
-            // immediately, making the handle appear broken. Allow the original
-            // slide animation to be visible before automatically closing.
-            QTimer::singleShot(750, this, [this, openingId]() {
-                if (openingId == m_openingId && m_panelVisible && m_panel &&
-                    m_panel->notificationCount() == 0)
-                    hidePanel();
-            });
-        }
+        // Keep an intentionally opened empty tray visible, matching the
+        // known-working legacy behaviour. It closes when dismissed or when
+        // the notification list becomes empty after containing items.
     }
 
     void checkSessionSecurity() {
         if (!m_panel) return;
         const bool locked = statusSessionLocked();
-        if (statusOverlayMarkerActive(QStringLiteral("osm-power"))) {
-            // Power actions must not be obscured by the notification tray.
-            if (m_panelVisible) {
-                ++m_openingId;
-                m_panelVisible = false;
-                m_openedEmpty = false;
-                if (m_animation) {
-                    m_animation->stop();
-                    m_animation->deleteLater();
-                    m_animation = nullptr;
-                }
-                m_panel->hide();
-                hide();
-                if (m_statusOverlayLock.isLocked()) m_statusOverlayLock.unlock();
-                if (m_badge) m_badge->setCount(m_panel->notificationCount());
-            }
-            return;
-        }
+        // osm-status is intentionally the topmost notification surface. Do not
+        // silently cancel its activation merely because osm-power is running.
         m_panel->setReadOnly(locked);
-        if (m_panelVisible && locked && !m_statusOverlayLock.isLocked()) {
-            if (!m_statusOverlayLock.tryLock(0)) {
-                hidePanel();
-                return;
+        if (m_panelVisible && locked) {
+            if (!m_statusOverlayLock.isLocked() && !m_statusOverlayLock.tryLock(0)) {
+                logStatusActivation(QStringLiteral("security poll: lockscreen yield marker unavailable; retaining read-only popup"));
             }
             raise();
+            if (m_panel) m_panel->raise();
         } else if (!locked && m_statusOverlayLock.isLocked()) {
             m_statusOverlayLock.unlock();
         }
@@ -985,7 +1007,7 @@ public:
 
     void hidePanel() {
         if (!m_panelVisible || !m_panel) return;
-        ++m_openingId; // cancel any pending empty-tray close from this opening
+        logStatusActivation(QStringLiteral("hidePanel requested"));
         m_panelVisible = false;
         m_openedEmpty = false;
         if (m_animation) { m_animation->stop(); m_animation->deleteLater(); m_animation = nullptr; }
@@ -1032,19 +1054,44 @@ private:
     bool m_openedEmpty = false;
     bool m_lastLocked = false;
     QLockFile m_statusOverlayLock;
-    quint64 m_openingId = 0;
     QRect m_screenGeo;
     QPointer<QPropertyAnimation> m_animation;
     QGraphicsDropShadowEffect *m_shadow = nullptr;
+    QTimer *m_raiseTimer = nullptr;
     friend class NotificationBadge;
 };
 
 // ───────────────────────────────────────────── NotificationBadge::mousePressEvent
 // (now after OverlayRoot is fully defined)
 
+bool NotificationBadge::event(QEvent *event) {
+    if (event->type() == QEvent::TouchBegin) {
+        m_touchDown = true;
+        event->accept();
+        return true;
+    }
+    if (event->type() == QEvent::TouchEnd) {
+        const bool wasTap = m_touchDown;
+        m_touchDown = false;
+        event->accept();
+        if (wasTap && m_overlay) {
+            logStatusActivation(QStringLiteral("badge touchscreen tap"));
+            m_overlay->showPanel();
+        }
+        return true;
+    }
+    if (event->type() == QEvent::TouchCancel) {
+        m_touchDown = false;
+        event->accept();
+        return true;
+    }
+    return QWidget::event(event);
+}
+
 void NotificationBadge::mousePressEvent(QMouseEvent *e) {
     if (e->button() == Qt::LeftButton && m_overlay) {
         e->accept();
+        logStatusActivation(QStringLiteral("badge mouse click"));
         m_overlay->showPanel();
         return;
     }
@@ -1078,11 +1125,13 @@ public:
         show();
         raise();
 
-        // keep stubbornly on top, like osm-running
+        // Match the known-working legacy implementation: keep the edge
+        // handle raised continuously. Qtile/X11 can restack transparent
+        // override-redirect windows even while the overlay is hidden.
         m_raiseTimer = new QTimer(this);
-        m_raiseTimer->setInterval(1500);
+        m_raiseTimer->setInterval(200);
         connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
-            this->raise();
+            raise();
         });
         m_raiseTimer->start();
     }
@@ -1109,13 +1158,17 @@ protected:
             } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
                        !touch->touchPoints().isEmpty()) {
                 if (m_pressPos.x() - touch->touchPoints().first().screenPos().x() > 12) {
+                    logStatusActivation(QStringLiteral("edge touchscreen swipe left"));
                     if (m_overlay) m_overlay->showPanel();
                     m_dragging = false;
                 }
             } else if (event->type() == QEvent::TouchEnd) {
                 const bool wasTap = m_dragging;
                 m_dragging = false;
-                if (wasTap && m_overlay) m_overlay->showPanel();
+                if (wasTap && m_overlay) {
+                    logStatusActivation(QStringLiteral("edge touchscreen tap"));
+                    m_overlay->showPanel();
+                }
             } else if (event->type() == QEvent::TouchCancel) {
                 m_dragging = false;
             }
@@ -1129,7 +1182,17 @@ protected:
         if (e->button() == Qt::LeftButton) {
             m_dragging = true;
             m_pressPos = e->globalPos();
-            raise();  // assert on top when touched
+            raise();
+            logStatusActivation(QStringLiteral("edge mouse press at %1,%2")
+                .arg(m_pressPos.x()).arg(m_pressPos.y()));
+
+            // QWidget's default mousePressEvent() ignores ordinary left
+            // clicks. On X11 that can let the press propagate to the window
+            // underneath, so this edge widget never receives the drag.
+            // Accept and grab explicitly to keep the complete gesture.
+            e->accept();
+            grabMouse();
+            return;
         }
         QWidget::mousePressEvent(e);
     }
@@ -1140,24 +1203,32 @@ protected:
             return;
         }
 
-        // swipe left from the right edge
-        int dx = m_pressPos.x() - e->globalPos().x();
+        // Swipe left from the right edge. The mouse grab keeps motion
+        // events arriving even after the pointer leaves this narrow bar.
+        const int dx = m_pressPos.x() - e->globalPos().x();
         if (dx > 12) {
-            if (m_overlay) {
-                m_overlay->showPanel();
-            }
             m_dragging = false;
+            releaseMouse();
+            logStatusActivation(QStringLiteral("edge mouse swipe left"));
+            if (m_overlay)
+                m_overlay->showPanel();
+            e->accept();
+            return;
         }
 
-        QWidget::mouseMoveEvent(e);
+        e->accept();
     }
 
     void mouseReleaseEvent(QMouseEvent *e) override {
         const bool wasTap = m_dragging;
         m_dragging = false;
-        if (e->button() == Qt::LeftButton && wasTap && m_overlay)
+        if (QWidget::mouseGrabber() == this)
+            releaseMouse();
+        if (e->button() == Qt::LeftButton && wasTap && m_overlay) {
+            logStatusActivation(QStringLiteral("edge mouse tap"));
             m_overlay->showPanel();
-        QWidget::mouseReleaseEvent(e);
+        }
+        e->accept();
     }
 
     void paintEvent(QPaintEvent *) override {
@@ -1168,7 +1239,7 @@ private:
     OverlayRoot *m_overlay;
     bool         m_dragging;
     QPoint       m_pressPos;
-    QTimer      *m_raiseTimer;
+    QTimer      *m_raiseTimer = nullptr;
 };
 
 // ───────────────────────────────────────────── Notification helpers
