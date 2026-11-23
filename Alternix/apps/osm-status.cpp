@@ -1057,10 +1057,16 @@ void NotificationBadge::mousePressEvent(QMouseEvent *e) {
 class ActivationEdgeBar : public QWidget {
 public:
     explicit ActivationEdgeBar(OverlayRoot *overlay, QWidget *parent = nullptr)
-        : QWidget(parent),
+        // This handle must outlive the hidden OverlayRoot window. Giving it
+        // root as its QWidget parent ties its visibility to root on Qt/X11;
+        // root is deliberately hidden until the panel opens, which can hide
+        // the activation handle as well. Keep it as an independent top-level
+        // window and retain only the non-owning OverlayRoot pointer.
+        : QWidget(nullptr),
           m_overlay(overlay),
           m_dragging(false)
     {
+        Q_UNUSED(parent);
         setWindowFlags(Qt::FramelessWindowHint
                        | Qt::WindowStaysOnTopHint
                        | Qt::BypassWindowManagerHint
@@ -1109,9 +1115,11 @@ protected:
                 }
             } else if (event->type() == QEvent::TouchUpdate && m_dragging &&
                        !touch->touchPoints().isEmpty()) {
-                if (m_pressPos.x() - touch->touchPoints().first().screenPos().x() > 12) {
-                    if (m_overlay) m_overlay->showPanel();
+                const qreal dx = m_pressPos.x() -
+                    touch->touchPoints().first().screenPos().x();
+                if (dx > 12) {
                     m_dragging = false;
+                    if (m_overlay) m_overlay->showPanel();
                 }
             } else if (event->type() != QEvent::TouchUpdate) {
                 m_dragging = false;
