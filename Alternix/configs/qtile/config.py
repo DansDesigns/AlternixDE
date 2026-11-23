@@ -232,10 +232,8 @@ def autostart():
 def _scrollbar():
     scrollerbar.install(qtile, height=16)
     subprocess.Popen([os.path.expanduser("~/.local/bin/alternix-touchscroll.py")])
-
 def start_alternix_display_power():
     subprocess.Popen(["/usr/local/bin/osm-display-power"])
-
 def start_when_complete():
     subprocess.Popen(['osm-launcher'])
     subprocess.Popen(['osm-widgets'])
@@ -243,12 +241,12 @@ def start_when_complete():
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
 
-    # Function to update the time
-    def update_time():
-        clock_text.update(datetime.now().strftime("%H:%M:%S"))
-        qtile.call_later(1, update_time)  # refresh every second
+# Function to update the time
+def update_time():
+    clock_text.update(datetime.now().strftime("%H:%M:%S"))
+    qtile.call_later(1, update_time)  # refresh every second
 
-    update_time()
+update_time()
 
 #############################
 ## Three Alternix desktops ##
