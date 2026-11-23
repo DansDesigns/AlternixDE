@@ -32,6 +32,9 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QDateTime>
+#include <QMessageBox>
+#include <QTemporaryFile>
+#include <QRegularExpression>
 #include <functional>
 #include <utility>
 
@@ -188,11 +191,16 @@ public:
         btnGrid->addWidget(tileBtn,   1,0);
         btnGrid->addWidget(centerBtn, 1,1);
 
+        auto *visorBtn = new QPushButton("Set as Visor Background");
+        visorBtn->setMinimumHeight(48);
+        visorBtn->setFocusPolicy(Qt::NoFocus);
+        btnGrid->addWidget(visorBtn, 2, 0, 1, 2);
+
         auto *buttonsFrame = new QFrame;
         buttonsFrame->setObjectName("card");
         buttonsFrame->setLayout(btnGrid);
 
-        int buttonHeight = 220;
+        int buttonHeight = 270;
         buttonsFrame->setMinimumHeight(buttonHeight);
         buttonsFrame->setMaximumHeight(buttonHeight);
 
@@ -287,6 +295,9 @@ public:
         });
         connect(centerBtn, &QPushButton::clicked, this, [this, fade]() {
             if (applyWallpaper("center")) fade();
+        });
+        connect(visorBtn, &QPushButton::clicked, this, [this]() {
+            setVisorBackground();
         });
 
         // Load initial folder
@@ -459,6 +470,91 @@ private:
         saveLastWallpaper(modeName, currentImagePath);
         return true;
     }
+
+    // ───────────────────── Visor boot background ─────────────────────
+    QString detectVisorEsp() const
+    {
+        QProcess findmnt;
+        findmnt.start("findmnt", {"-rn", "-o", "TARGET,FSTYPE"});
+        if (!findmnt.waitForFinished(3000) || findmnt.exitCode() != 0)
+            return {};
+
+        const QStringList lines = QString::fromLocal8Bit(findmnt.readAllStandardOutput())
+            .split('\n', Qt::SkipEmptyParts);
+        for (const QString &line : lines) {
+            const QStringList fields = line.trimmed().split(QRegularExpression("\\s+"));
+            if (fields.size() < 2 || fields.last() != "vfat") continue;
+            const QString mountPoint = fields.first();
+            const QString visorDir = mountPoint + "/EFI/visor";
+            if (QFileInfo(visorDir + "/boot.conf").isFile()
+                && QDir(visorDir + "/backgrounds").exists())
+                return mountPoint;
+        }
+        return {};
+    }
+
+    void setVisorBackground()
+    {
+        if (currentImagePath.isEmpty()) {
+            QMessageBox::warning(this, "Visor Background", "Select a wallpaper first.");
+            return;
+        }
+
+        const QString esp = detectVisorEsp();
+        if (esp.isEmpty()) {
+            QMessageBox::warning(this, "Visor Background",
+                "Could not detect a mounted EFI System Partition containing Visor.\n"
+                "Make sure the ESP is mounted and Visor is installed.");
+            return;
+        }
+
+        QTemporaryFile temp(QDir::tempPath() + "/osm-paper-visor-XXXXXX.png");
+        temp.setAutoRemove(false);
+        if (!temp.open()) {
+            QMessageBox::warning(this, "Visor Background", "Could not create a temporary image file.");
+            return;
+        }
+        const QString tempImage = temp.fileName();
+        temp.close();
+        QImage image(currentImagePath);
+        if (image.isNull() || !image.save(tempImage, "PNG")) {
+            QFile::remove(tempImage);
+            QMessageBox::warning(this, "Visor Background", "Could not convert the selected wallpaper to PNG.");
+            return;
+        }
+
+        const QString pythonScript = QStringLiteral(
+            "import os,sys,shutil,re\n"
+            "esp,src=sys.argv[1],sys.argv[2]\n"
+            "dest=os.path.join(esp,'EFI','visor','backgrounds','alternix-wallpaper.png')\n"
+            "conf=os.path.join(esp,'EFI','visor','boot.conf')\n"
+            "os.makedirs(os.path.dirname(dest),exist_ok=True)\n"
+            "shutil.copy2(src,dest)\n"
+            "with open(conf,'r',encoding='utf-8') as f: lines=f.readlines()\n"
+            "key=r'\\EFI\\visor\\backgrounds\\alternix-wallpaper.png'\n"
+            "out=[]; replaced=False\n"
+            "for line in lines:\n"
+            "    if re.match(r'^\\s*background\\s*=',line):\n"
+            "        out.append('background='+key+'\\n'); replaced=True\n"
+            "    else: out.append(line)\n"
+            "if not replaced: out.append('background='+key+'\\n')\n"
+            "with open(conf,'w',encoding='utf-8') as f: f.writelines(out)\n");
+
+        QProcess process;
+        process.start("pkexec", {"python3", "-c", pythonScript, esp, tempImage});
+        if (!process.waitForFinished(-1) || process.exitCode() != 0) {
+            QFile::remove(tempImage);
+            const QString error = QString::fromLocal8Bit(process.readAllStandardError()).trimmed();
+            QMessageBox::warning(this, "Visor Background",
+                error.isEmpty() ? "Failed to update Visor's background." : error);
+            return;
+        }
+        QFile::remove(tempImage);
+        QMessageBox::information(this, "Visor Background",
+            "Wallpaper saved to Visor's background folder and boot.conf updated.\n"
+            "The selected image will appear in Visor at the next boot.");
+    }
+
 
     // ───────────────────── Grid management ───────────────────────────
 
