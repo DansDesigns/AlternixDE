@@ -334,20 +334,32 @@ MODEL=$(cat /sys/class/dmi/id/product_name 2>/dev/null || printf unknown)
 VENDOR=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || printf unknown)
 BOARD=$(cat /sys/class/dmi/id/board_name 2>/dev/null || printf unknown)
 KERNEL=$(uname -r)
-CODECS=$( (cat /proc/asound/card*/codec\#* 2>/dev/null || true) | grep -i -m4 '^Codec:' || true)
+CODEC_DUMP=$(cat /proc/asound/card*/codec\#* 2>/dev/null || true)
+CODECS=$(printf '%s\n' "$CODEC_DUMP" | grep -i '^Codec:' || true)
+CODEC_SUBSYSTEMS=$(printf '%s\n' "$CODEC_DUMP" | grep -i 'Subsystem Id:' || true)
 LSPCI=$(lspci -nnk 2>/dev/null || true)
 IS_APPLE=0
+IS_IMAC16_1=0
 IS_LINX810B=0
 IS_ELITEPAD1000G2=0
 IS_CS8409=0
+IS_CS4208=0
+IS_IMAC16_CS4208=0
 IS_RT5640=0
 IS_INTEL_AUDIO=0
 case "$MODEL $VENDOR" in *Apple*|*iMac*|*MacBook*) IS_APPLE=1;; esac
+[ "$MODEL" = 'iMac16,1' ] && IS_IMAC16_1=1
 case "$MODEL" in 'HP ElitePad 1000 G2'|'ElitePad 1000 G2')
   case "$VENDOR" in 'Hewlett-Packard'|'HP') IS_ELITEPAD1000G2=1 ;; esac ;;
 esac
 case "$MODEL" in *LINX810B*|*Linx810B*|*Linx\ 810B*|*linx810b*) IS_LINX810B=1;; esac
 if printf '%s\n' "$CODECS" | grep -qi 'CS8409'; then IS_CS8409=1; fi
+if printf '%s\n' "$CODECS" | grep -qi 'CS4208'; then IS_CS4208=1; fi
+# Require exact DMI model, codec name, and codec subsystem ID.
+if [ "$IS_IMAC16_1" -eq 1 ] && [ "$IS_CS4208" -eq 1 ] && \
+   printf '%s\n' "$CODEC_SUBSYSTEMS" | grep -qiE '0x106b7f00([[:space:]]|$)'; then
+  IS_IMAC16_CS4208=1
+fi
 if compgen -G '/sys/bus/acpi/devices/10EC5640:*' >/dev/null || \
    grep -qiE '(bytcr[-_]?rt5640|rt5640)' /proc/asound/cards 2>/dev/null; then
   IS_RT5640=1
@@ -497,7 +509,7 @@ scan_audio_hardware() {
     HAS_HDMI_AUDIO=1
   fi
   if [ "$IS_RT5640" -eq 1 ]; then HAS_REALTEK_AUDIO=1; fi
-  if [ "$IS_CS8409" -eq 1 ]; then HAS_CIRRUS_AUDIO=1; fi
+  if [ "$IS_CS8409" -eq 1 ] || [ "$IS_CS4208" -eq 1 ]; then HAS_CIRRUS_AUDIO=1; fi
 }
 
 show_hardware_inventory() {
@@ -628,7 +640,10 @@ if [ "$IS_LINX810B" -eq 1 ]; then
   say "Linx 810B detected. RT5640 codec found: $IS_RT5640"
 fi
 if [ "$IS_APPLE" -eq 1 ]; then
-  say "Apple hardware detected. CS8409 codec found: $IS_CS8409"
+  say "Apple hardware detected. CS8409 codec found: $IS_CS8409; CS4208 codec found: $IS_CS4208"
+fi
+if [ "$IS_IMAC16_CS4208" -eq 1 ]; then
+  say "Exact iMac16,1 + Cirrus CS4208 + subsystem 106b:7f00 match detected (kernel $KERNEL)."
 fi
 
 if [ "$MODE" = diagnose ]; then
@@ -892,7 +907,84 @@ if [ "$MODE" = apple-driver ]; then
   exit 0
 fi
 
+# iMac16,1 (Late 2015) with CS4208 subsystem 106b:7f00 needs the
+# MacBookPro 11.x HDA fixup: GPIO0 controls the internal-speaker amplifier.
+# Kernels carrying the upstream quirk already select the same fixup. The
+# model=mbp11 compatibility option is therefore a narrowly-scoped fallback
+# for this exact codec/subsystem/model tuple; it is never applied to other Macs.
+apply_imac16_cs4208_quirk() {
+  [ "$IS_IMAC16_CS4208" -eq 1 ] || return 0
+
+  local root="${TARGET_ROOT:-}"
+  local conf_dir conf existing_model
+  conf_dir="${root}/etc/modprobe.d"
+  conf="$conf_dir/alternix-imac16-audio.conf"
+
+  # Do not replace or compete with a model selection supplied by the user or
+  # another package. An existing mbp11 selection already provides the fixup.
+  existing_model=$(grep -RhsE '^[[:space:]]*options[[:space:]]+snd[-_]hda[-_]intel[[:space:]].*([[:space:]]|^)model=' \
+    "$conf_dir" 2>/dev/null || true)
+  if printf '%s\n' "$existing_model" | grep -qE '(^|[[:space:]])model=mbp11([[:space:]]|$)'; then
+    say 'CS4208 iMac16,1 mbp11 fixup is already configured; leaving it unchanged.'
+    return 0
+  fi
+  if [ -n "$existing_model" ]; then
+    warn 'An existing snd_hda_intel model override was found; not overriding user/package configuration.'
+    warn 'If internal speakers remain silent, review the existing model option manually.'
+    return 0
+  fi
+
+  if [ -e "$conf" ] && ! grep -q '^# AlternixOS iMac16,1 CS4208 speaker fix$' "$conf"; then
+    warn "Unrecognised file at $conf; leaving it unchanged."
+    return 1
+  fi
+
+  if [ "$ROOT" -ne 1 ] && ! has sudo; then
+    warn 'The iMac16,1 CS4208 fixup needs root privileges; sudo is unavailable.'
+    return 1
+  fi
+
+  local temp install_source
+  if [ -n "$TARGET_ROOT" ]; then
+    # The installer target's /tmp is visible inside chroot; a host /tmp path
+    # generally is not, so create the staging file inside the target root.
+    temp=$(mktemp "$TARGET_ROOT/tmp/alternix-imac16.XXXXXX") || return 1
+    install_source="/tmp/${temp##*/}"
+  else
+    temp=$(mktemp) || return 1
+    install_source="$temp"
+  fi
+  {
+    printf '%s\n' '# AlternixOS iMac16,1 CS4208 speaker fix'
+    printf '%s\n' '# Exact match: DMI iMac16,1, CS4208, codec subsystem 106b:7f00.'
+    printf '%s\n' '# Selects the kernel CS4208_MBP11 fixup (GPIO0 speaker amplifier).'
+    printf '%s\n' 'options snd-hda-intel model=mbp11'
+  } > "$temp"
+
+  if ! priv install -D -m 0644 "$install_source" "$conf"; then
+    rm -f "$temp"
+    warn 'Could not install the iMac16,1 CS4208 compatibility configuration.'
+    return 1
+  fi
+  rm -f "$temp"
+  say "Installed the exact-hardware CS4208 GPIO0 amplifier fixup at $conf."
+
+  # Rebuild the target's initramfs when applicable. This also covers systems
+  # where snd_hda_intel is loaded early; no live module unload/reload is done.
+  if has update-initramfs; then
+    if priv update-initramfs -u; then
+      say 'Initramfs updated; reboot to initialise the CS4208 with the mbp11 fixup.'
+    else
+      warn 'Initramfs update failed; the modprobe configuration remains installed.'
+      return 1
+    fi
+  else
+    warn 'update-initramfs is unavailable; the configuration will apply when the module next loads.'
+  fi
+}
+
 if [ "$MODE" = repair ] || [ "$MODE" = system ] || [ "$MODE" = install ]; then
+  apply_imac16_cs4208_quirk || warn 'iMac16,1 CS4208 speaker fixup could not be fully applied.'
   show_hardware_inventory
   select_audio_packages
   say "Selected hardware support: ${WANTED[*]}"
@@ -1047,11 +1139,14 @@ fix_disabled_profiles() {
     [ -n "$details" ] || continue
     profile=$(printf '%s\n' "$details" | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n1)
     [ "$profile" = off ] || continue
-    candidate=$(printf '%s\n' "$details" | awk '
+    candidate=$(printf '%s\n' "$details" | awk -v prefer_surround="$IS_IMAC16_CS4208" '
       /^[[:space:]]*Profiles:/ {profiles=1;next}
       profiles && /^[[:space:]]*Active Profile:/ {exit}
       profiles && /\(sinks:[[:space:]]*[1-9]/ && !/available: no/ {
         p=$1; sub(/:$/, "", p)
+        if (prefer_surround == 1 && p ~ /output:analog-surround-40/) {
+          selected=1; print p; exit
+        }
         if (p ~ /output:analog-stereo|HiFi|Speaker/) {selected=1; print p; exit}
         if (fallback == "") fallback=p
       }
@@ -1134,6 +1229,10 @@ if [ "$IS_LINX810B" -eq 1 ]; then
   else
     warn 'Linx 810B RT5640 is not enumerating. ALSA user-space changes cannot repair an absent codec.'
   fi
+fi
+if [ "$IS_IMAC16_CS4208" -eq 1 ]; then
+  say 'iMac16,1 CS4208: GPIO0 amplifier fixup configured for the next module load/reboot.'
+  say 'When available, the four-channel output:analog-surround-40 profile is preferred if the card is disabled.'
 fi
 if [ "$IS_APPLE" -eq 1 ] && [ "$IS_CS8409" -eq 1 ]; then
   warn 'Apple Cirrus CS8409 found: standard Linux audio packages may not initialise speaker amps.'
