@@ -4181,9 +4181,6 @@ except Exception as exc:
             "QPushButton:pressed { background:#1a72ca; }"
         ));
         layout->addWidget(scanBtn);
-        connect(scanBtn, &QPushButton::clicked, &dlg, [this, addrEdit]() {
-            showNasScanDialog(addrEdit);
-        });
 
         // Optional credentials
         QHBoxLayout *credRow = new QHBoxLayout;
@@ -4199,6 +4196,9 @@ except Exception as exc:
         credRow->addWidget(userEdit);
         credRow->addWidget(passEdit);
         layout->addLayout(credRow);
+        connect(scanBtn, &QPushButton::clicked, &dlg, [this, addrEdit, userEdit, passEdit]() {
+            showNasScanDialog(addrEdit, userEdit, passEdit);
+        });
 
         // Buttons
         QHBoxLayout *btnRow = new QHBoxLayout;
@@ -4532,25 +4532,33 @@ except Exception as exc:
 
     // Shares exported by an SMB host. Uses smbclient when it is installed and
     // falls back to gvfs, which osm-files already needs for network browsing.
-    static QStringList listSmbShares(const QString &host) {
+    static QStringList listSmbShares(const QString &host, const QString &user = QString(),
+                                     const QString &pass = QString()) {
         QStringList shares;
 
         QProcess sc;
         sc.setProcessChannelMode(QProcess::MergedChannels);
-        sc.start("smbclient", QStringList() << "-L" << host << "-N" << "-g");
-        if (sc.waitForStarted(1500) && sc.waitForFinished(8000)) {
-            const QStringList lines =
-                QString::fromUtf8(sc.readAll()).split('\n', Qt::SkipEmptyParts);
-            for (const QString &l : lines) {
-                if (!l.startsWith("Disk|")) continue;      // grepable output
-                const QString n = l.section('|', 1, 1).trimmed();
-                if (n.isEmpty() || n.endsWith('$')) continue;   // hide admin shares
-                if (!shares.contains(n)) shares << n;
+        QStringList args = QStringList() << "-L" << host << "-g";
+        if (user.isEmpty()) args << "-N";
+        else args << "-U" << user;
+        sc.start("smbclient", args);
+        if (sc.waitForStarted(1500)) {
+            if (!user.isEmpty()) {
+                sc.write((pass + "\n").toUtf8());
+                sc.closeWriteChannel();
             }
-        } else {
-            sc.kill();
+            if (sc.waitForFinished(8000)) {
+                const QStringList lines =
+                    QString::fromUtf8(sc.readAll()).split('\n', Qt::SkipEmptyParts);
+                for (const QString &l : lines) {
+                    if (!l.startsWith("Disk|")) continue;      // grepable output
+                    const QString n = l.section('|', 1, 1).trimmed();
+                    if (n.isEmpty() || n.endsWith('$')) continue;   // hide admin shares
+                    if (!shares.contains(n)) shares << n;
+                }
+            } else sc.kill();
         }
-        if (!shares.isEmpty()) return shares;
+        if (!shares.isEmpty() || !user.isEmpty()) return shares;
 
         QProcess gm;
         gm.setProcessChannelMode(QProcess::MergedChannels);
@@ -4580,7 +4588,7 @@ except Exception as exc:
 
     // Scan the local network for SMB file servers and let the user pick one.
     // The chosen address is written into the Network dialog's address box.
-    void showNasScanDialog(QLineEdit *addrEdit) {
+    void showNasScanDialog(QLineEdit *addrEdit, QLineEdit *userEdit, QLineEdit *passEdit) {
         QDialog dlg(this);
         dlg.setWindowTitle("Scan for NAS");
         dlg.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
@@ -4694,18 +4702,47 @@ except Exception as exc:
             status->setText("Reading shared folders from " + host + " ...");
             QCoreApplication::processEvents();
 
-            const QStringList shares = listSmbShares(host);
+            QStringList shares = listSmbShares(host);
             int at = list->row(item) + 1;
 
             if (shares.isEmpty()) {
+                QDialog credentials(&dlg);
+                credentials.setWindowTitle("NAS credentials");
+                credentials.setStyleSheet(themed("QDialog { background:#282828; color:white; }"));
+                QVBoxLayout credentialLayout(&credentials);
+                credentialLayout.setSpacing(10);
+                QLabel prompt("This NAS requires a username and password.");
+                prompt.setWordWrap(true);
+                credentialLayout.addWidget(&prompt);
+                QLineEdit username;
+                username.setPlaceholderText("Username");
+                username.setText(userEdit ? userEdit->text() : QString());
+                QLineEdit password;
+                password.setPlaceholderText("Password");
+                password.setEchoMode(QLineEdit::Password);
+                password.setText(passEdit ? passEdit->text() : QString());
+                credentialLayout.addWidget(&username);
+                credentialLayout.addWidget(&password);
+                QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+                credentialLayout.addWidget(&buttons);
+                connect(&buttons, &QDialogButtonBox::accepted, &credentials, &QDialog::accept);
+                connect(&buttons, &QDialogButtonBox::rejected, &credentials, &QDialog::reject);
+                if (credentials.exec() == QDialog::Accepted && !username.text().trimmed().isEmpty()) {
+                    if (userEdit) userEdit->setText(username.text().trimmed());
+                    if (passEdit) passEdit->setText(password.text());
+                    shares = listSmbShares(host, username.text().trimmed(), password.text());
+                }
+            }
+
+            if (shares.isEmpty()) {
                 QListWidgetItem *none = new QListWidgetItem(
-                    "        no shared folders visible - a username and password "
-                    "may be needed");
+                    "        no shared folders found (check credentials or permissions)");
                 none->setData(Qt::UserRole,     "");
                 none->setData(Qt::UserRole + 1, "");
                 none->setData(Qt::UserRole + 2, true);
                 list->insertItem(at, none);
                 status->setText("Tap a server to see its shared folders.");
+                item->setData(Qt::UserRole + 2, false); // allow retry with credentials
                 return;
             }
 
