@@ -120,7 +120,6 @@ case "$MODE" in
         touch "$MIGRATION_FLAG"
         rm -f "$AUTOSTART"
         stop_monitor
-        reset_orientation
         ;;
     status)
         pid=$(monitor_pid) || exit 1
