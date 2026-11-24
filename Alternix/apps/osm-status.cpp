@@ -912,6 +912,21 @@ public:
         if (m_badge) m_badge->syncScreenGeometry(g);
     }
 
+    // Place the activation handle alongside the notification panel rather
+    // than stretching it over the full screen height. StatusPanel is a child
+    // of this root, so its y/height are root-local; convert y to screen space
+    // while keeping the handle flush with the active screen's right edge.
+    QRect activationHandleGeometry(const QRect &screen) const {
+        const int width = qMin(25, screen.width());
+        const int top = m_panel ? m_panel->y() : int(screen.height() * 0.15);
+        const int height = m_panel ? m_panel->height()
+                                   : qMax(1, int(screen.height() * 0.9));
+        return QRect(screen.x() + screen.width() - width,
+                     screen.y() + top,
+                     width,
+                     qMax(1, height));
+    }
+
     void showPanel() {
         logStatusActivation(QStringLiteral("showPanel requested; visible=%1; locked=%2; powerMarker=%3")
             .arg(m_panelVisible).arg(statusSessionLocked())
@@ -1130,6 +1145,9 @@ public:
         m_raiseTimer = new QTimer(this);
         m_raiseTimer->setInterval(200);
         connect(m_raiseTimer, &QTimer::timeout, this, [this]() {
+            // The panel height can change as notifications arrive or disappear.
+            // Follow its current geometry, then keep the handle topmost.
+            syncScreenGeometry(alternixActiveScreenGeometry());
             raise();
         });
         m_raiseTimer->start();
@@ -1137,8 +1155,12 @@ public:
 
     void syncScreenGeometry(const QRect &g) {
         if (!g.isValid() || g.isEmpty()) return;
-        const int w = qMin(25, g.width());
-        const QRect target(g.x() + g.width() - w, g.y(), w, g.height());
+        const QRect target = m_overlay
+            ? m_overlay->activationHandleGeometry(g)
+            : QRect(g.x() + g.width() - qMin(25, g.width()),
+                    g.y() + int(g.height() * 0.15),
+                    qMin(25, g.width()),
+                    qMax(1, int(g.height() * 0.9)));
         if (geometry() != target) setGeometry(target);
     }
 
