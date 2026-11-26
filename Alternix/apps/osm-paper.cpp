@@ -169,16 +169,15 @@ public:
         scrollProperties.setScrollMetric(QScrollerProperties::MousePressEventDelay, 0.0);
         scroller->setScrollerProperties(scrollProperties);
 
-        // ───────────────── BUTTON PANEL (2×2) ─────────────────
-        zoomBtn   = new QPushButton("Zoom");
-        fitBtn    = new QPushButton("Fit");
+        // ───────────────── BUTTON PANEL (3 columns × 2 rows) ─────────────────
+        fitBtn    = new QPushButton("Fill");
         tileBtn   = new QPushButton("Tile");
-        centerBtn = new QPushButton("Center");
+        zoomBtn   = new QPushButton("Zoom");
 
         // Identical checked-button highlight to osm-kernels' navigation.
         modeGroup = new QButtonGroup(this);
         modeGroup->setExclusive(true);
-        for (QPushButton *button : {zoomBtn, fitBtn, tileBtn, centerBtn}) {
+        for (QPushButton *button : {fitBtn, tileBtn, zoomBtn}) {
             button->setCheckable(true);
             button->setMinimumHeight(48);
             button->setFocusPolicy(Qt::NoFocus);
@@ -187,50 +186,48 @@ public:
         selectedModeButton(lastMode)->setChecked(true);
 
         auto *btnGrid = new QGridLayout;
-        btnGrid->setContentsMargins(6,6,6,6);
+        btnGrid->setContentsMargins(6, 6, 6, 6);
         btnGrid->setSpacing(6);
+        btnGrid->addWidget(fitBtn,  0, 0);
+        btnGrid->addWidget(tileBtn, 0, 1);
+        btnGrid->addWidget(zoomBtn, 0, 2);
 
-        btnGrid->addWidget(zoomBtn,   0,0);
-        btnGrid->addWidget(fitBtn,    0,1);
-        btnGrid->addWidget(tileBtn,   1,0);
-        btnGrid->addWidget(centerBtn, 1,1);
-
-        auto *visorBtn = new QPushButton("Set as Visor Background");
-        visorBtn->setMinimumHeight(48);
-        visorBtn->setFocusPolicy(Qt::NoFocus);
-        btnGrid->addWidget(visorBtn, 2, 0, 1, 2);
-
-        // Timed shuffle controls: the interval is shown beside its toggle.
-        auto *shuffleRow = new QWidget;
-        auto *shuffleLayout = new QHBoxLayout(shuffleRow);
-        shuffleLayout->setContentsMargins(0, 0, 0, 0);
-        shuffleLayout->setSpacing(6);
+        // The minutes field appears inside the Shuffle control when enabled.
+        auto *shuffleControl = new QWidget;
+        shuffleControl->setObjectName("shuffleControl");
+        auto *shuffleLayout = new QHBoxLayout(shuffleControl);
+        shuffleLayout->setContentsMargins(4, 2, 4, 2);
+        shuffleLayout->setSpacing(4);
         shuffleBtn = new QPushButton("Shuffle");
         shuffleBtn->setCheckable(true);
-        shuffleBtn->setMinimumHeight(48);
+        shuffleBtn->setMinimumHeight(44);
         shuffleBtn->setFocusPolicy(Qt::NoFocus);
         shuffleMinutesEdit = new QLineEdit("5");
         shuffleMinutesEdit->setValidator(new QIntValidator(1, 1440, shuffleMinutesEdit));
         shuffleMinutesEdit->setAlignment(Qt::AlignCenter);
-        shuffleMinutesEdit->setPlaceholderText("Minutes");
-        shuffleMinutesEdit->setMaximumWidth(90);
+        shuffleMinutesEdit->setPlaceholderText("min");
+        shuffleMinutesEdit->setMaximumWidth(58);
         shuffleMinutesEdit->setToolTip("Minutes between shuffled wallpapers");
-        auto *minutesLabel = new QLabel("min");
+        shuffleMinutesEdit->setVisible(false);
         shuffleLayout->addWidget(shuffleBtn, 1);
         shuffleLayout->addWidget(shuffleMinutesEdit);
-        shuffleLayout->addWidget(minutesLabel);
-        btnGrid->addWidget(shuffleRow, 3, 0, 1, 2);
+        btnGrid->addWidget(shuffleControl, 1, 0);
 
-        sequentialBtn = new QPushButton("Sequential  →");
+        sequentialBtn = new QPushButton("Sequential");
         sequentialBtn->setMinimumHeight(48);
         sequentialBtn->setFocusPolicy(Qt::NoFocus);
-        btnGrid->addWidget(sequentialBtn, 4, 0, 1, 2);
+        btnGrid->addWidget(sequentialBtn, 1, 1);
+
+        auto *visorBtn = new QPushButton("Visor");
+        visorBtn->setMinimumHeight(48);
+        visorBtn->setFocusPolicy(Qt::NoFocus);
+        btnGrid->addWidget(visorBtn, 1, 2);
 
         auto *buttonsFrame = new QFrame;
         buttonsFrame->setObjectName("card");
         buttonsFrame->setLayout(btnGrid);
 
-        int buttonHeight = 380;
+        const int buttonHeight = 124;
         buttonsFrame->setMinimumHeight(buttonHeight);
         buttonsFrame->setMaximumHeight(buttonHeight);
 
@@ -323,15 +320,13 @@ public:
         connect(tileBtn, &QPushButton::clicked, this, [this, fade]() {
             if (applyWallpaper("tile")) fade();
         });
-        connect(centerBtn, &QPushButton::clicked, this, [this, fade]() {
-            if (applyWallpaper("center")) fade();
-        });
         connect(visorBtn, &QPushButton::clicked, this, [this]() {
             setVisorBackground();
         });
 
         shuffleTimer = new QTimer(this);
         connect(shuffleBtn, &QPushButton::toggled, this, [this](bool enabled) {
+            shuffleMinutesEdit->setVisible(enabled);
             if (enabled) startShuffleTimer();
             else shuffleTimer->stop();
         });
@@ -353,6 +348,7 @@ public:
         applyLastWallpaperOnStartup();
         // The folder path should not steal the initial keyboard focus.
         pathEdit->setFocusPolicy(Qt::ClickFocus);
+        pathEdit->clearFocus();
         QTimer::singleShot(0, this, [this]() { focusSelectedWallpaper(); });
     }
 
@@ -390,7 +386,6 @@ private:
     QPushButton *zoomBtn{};
     QPushButton *fitBtn{};
     QPushButton *tileBtn{};
-    QPushButton *centerBtn{};
     QSplitter   *splitter{};
     QVBoxLayout *rootLayout{};
     QTimer      *thumbRequestTimer{};
@@ -420,7 +415,6 @@ private:
     {
         if (mode == "fit") return fitBtn;
         if (mode == "tile") return tileBtn;
-        if (mode == "center") return centerBtn;
         return zoomBtn;
     }
 
@@ -531,7 +525,7 @@ private:
     {
         if (modeName == "fit")    return "--stretch";
         if (modeName == "tile")   return "--tile";
-        if (modeName == "center") return "--center";
+        if (modeName == "center") return "--center"; // retain older saved settings
         return "--zoom";
     }
 
@@ -914,6 +908,8 @@ QPushButton:pressed { background: #504945; }
 QPushButton:checked { background: #458588; color: #fbf1c7; border-color: #83a598; }
 QPushButton:disabled { color: #7c6f64; }
 QLineEdit { background: #1d2021; color: #ebdbb2; border: 1px solid #3c3836; border-radius: 8px; padding: 8px; selection-background-color: #458588; }
+QWidget#shuffleControl { background: #3c3836; border: 1px solid #504945; border-radius: 8px; }
+QWidget#shuffleControl QLineEdit { padding: 5px 2px; }
 QScrollArea#wallpaperScroll { background: #1d2021; border: 1px solid #3c3836; border-radius: 8px; }
 QWidget#wallpaperGrid { background: #1d2021; }
 QPushButton#wallpaperCard { background: #3c3836; border: 1px solid #504945; border-radius: 12px; padding: 0px; }
