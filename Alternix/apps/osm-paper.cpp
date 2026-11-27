@@ -121,7 +121,7 @@ public:
 
         loadLastWallpaperSettings();
         loadLastFolder();
-        loadShuffleMinutes();
+        loadAutoSettings();
 
         // Match the compact header card used by osm-kernels.
         auto *headerFrame = new QFrame;
@@ -191,35 +191,15 @@ public:
         }
         selectedModeButton(lastMode)->setChecked(true);
 
-        // Shuffle toggle. Its minutes field lives inside the button and is
-        // only shown while shuffle is switched on.
-        shuffleBtn = new QPushButton;
-        shuffleBtn->setObjectName("shuffleBtn");
-        shuffleBtn->setCheckable(true);
-        shuffleBtn->setToolTip("Change to a random wallpaper every N minutes");
-        auto *shuffleInner = new QHBoxLayout(shuffleBtn);
-        shuffleInner->setContentsMargins(8, 0, 8, 0);
-        shuffleInner->setSpacing(4);
-        auto *shuffleLbl = new QLabel("Shuffle");
-        shuffleLbl->setAlignment(Qt::AlignCenter);
-        shuffleLbl->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        shuffleMinutesEdit = new QLineEdit(QString::number(shuffleMinutes));
-        shuffleMinutesEdit->setObjectName("shuffleMinutes");
-        shuffleMinutesEdit->setValidator(new QIntValidator(1, 1440, shuffleMinutesEdit));
-        shuffleMinutesEdit->setAlignment(Qt::AlignCenter);
-        shuffleMinutesEdit->setFixedSize(52, 32);
-        shuffleMinutesEdit->setFocusPolicy(Qt::ClickFocus);
-        shuffleMinutesEdit->setToolTip("Minutes between shuffled wallpapers");
-        shuffleMinutesLabel = new QLabel("min");
-        shuffleMinutesLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        shuffleMinutesEdit->hide();
-        shuffleMinutesLabel->hide();
-        shuffleInner->addWidget(shuffleLbl, 1);
-        shuffleInner->addWidget(shuffleMinutesEdit);
-        shuffleInner->addWidget(shuffleMinutesLabel);
-
-        sequentialBtn = new QPushButton("Sequential");
-        sequentialBtn->setToolTip("Switch to the next picture in alphanumeric order");
+        // Timed auto-change toggles. Each has its own minutes field inside
+        // the button, shown only while that mode is switched on. Only one
+        // of the two can be active at a time.
+        shuffleBtn = makeAutoButton("Shuffle",
+            "Change to a random wallpaper every N minutes",
+            shuffleMinutes, shuffleMinutesEdit, shuffleMinutesLabel);
+        sequentialBtn = makeAutoButton("Sequential",
+            "Change to the next picture (alphanumeric order) every N minutes",
+            sequentialMinutes, sequentialMinutesEdit, sequentialMinutesLabel);
         auto *visorBtn = new QPushButton("Visor");
         visorBtn->setToolTip("Set as Visor boot background");
 
@@ -340,20 +320,31 @@ public:
             setVisorBackground();
         });
 
-        shuffleTimer = new QTimer(this);
-        connect(shuffleBtn, &QPushButton::toggled, this, [this](bool enabled) {
-            shuffleMinutesEdit->setVisible(enabled);
-            shuffleMinutesLabel->setVisible(enabled);
-            if (enabled) startShuffleTimer();
-            else shuffleTimer->stop();
+        autoTimer = new QTimer(this);
+        connect(autoTimer, &QTimer::timeout, this, [this]() {
+            advanceWallpaper(shuffleBtn->isChecked());
         });
-        connect(shuffleMinutesEdit, &QLineEdit::editingFinished,
-                this, [this]() { commitShuffleMinutes(); });
-        connect(shuffleTimer, &QTimer::timeout, this, [this]() {
-            advanceWallpaper(true, false);   // timed: don't move the user's view
+        connect(shuffleBtn, &QPushButton::toggled, this, [this](bool on) {
+            shuffleMinutesEdit->setVisible(on);
+            shuffleMinutesLabel->setVisible(on);
+            if (on && sequentialBtn->isChecked()) sequentialBtn->setChecked(false);
+            updateAutoTimer();
         });
-        connect(sequentialBtn, &QPushButton::clicked, this, [this]() {
-            advanceWallpaper(false, true);
+        connect(sequentialBtn, &QPushButton::toggled, this, [this](bool on) {
+            sequentialMinutesEdit->setVisible(on);
+            sequentialMinutesLabel->setVisible(on);
+            if (on && shuffleBtn->isChecked()) shuffleBtn->setChecked(false);
+            updateAutoTimer();
+        });
+        // Only user clicks are saved, so an empty or missing folder at
+        // startup can never overwrite the remembered choice.
+        connect(shuffleBtn, &QPushButton::clicked, this, [this]() { saveAutoSettings(); });
+        connect(sequentialBtn, &QPushButton::clicked, this, [this]() { saveAutoSettings(); });
+        connect(shuffleMinutesEdit, &QLineEdit::editingFinished, this, [this]() {
+            commitAutoMinutes(shuffleMinutesEdit, shuffleMinutes);
+        });
+        connect(sequentialMinutesEdit, &QLineEdit::editingFinished, this, [this]() {
+            commitAutoMinutes(sequentialMinutesEdit, sequentialMinutes);
         });
 
         // Load initial folder
@@ -362,6 +353,10 @@ public:
         loadImagesFrom(defaultDir);
 
         applyLastWallpaperOnStartup();
+
+        // Restore the remembered auto-change mode (starts its timer).
+        if (savedAutoMode == "shuffle") shuffleBtn->setChecked(true);
+        else if (savedAutoMode == "sequential") sequentialBtn->setChecked(true);
     }
 
     ~WallpaperBrowser() override
@@ -390,7 +385,9 @@ private:
     QLabel      *shuffleMinutesLabel{};
     QPushButton *shuffleBtn{};
     QPushButton *sequentialBtn{};
-    QTimer      *shuffleTimer{};
+    QLineEdit   *sequentialMinutesEdit{};
+    QLabel      *sequentialMinutesLabel{};
+    QTimer      *autoTimer{};
     QScrollArea *scrollArea{};
     QWidget     *gridWidget{};
     QGridLayout *gridLayout{};
@@ -418,6 +415,8 @@ private:
     int         loadGeneration = 0;     // ignore results from a previous folder
     int         nextCardIndex = 0;
     int         shuffleMinutes = 5;
+    int         sequentialMinutes = 5;
+    QString     savedAutoMode;           // "shuffle", "sequential" or empty
     bool        focusWhenBuilt = false;  // focus the selected card once it exists
     bool        initialFocusDone = false;
 
@@ -466,38 +465,82 @@ private:
         });
     }
 
-    void loadShuffleMinutes()
+    QPushButton *makeAutoButton(const QString &title, const QString &tip, int minutes,
+                                QLineEdit *&edit, QLabel *&unit)
     {
-        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
-        shuffleMinutes = qBound(1, s.value("shuffle/minutes", 5).toInt(), 1440);
+        auto *btn = new QPushButton;
+        btn->setObjectName("autoBtn");
+        btn->setCheckable(true);
+        btn->setToolTip(tip);
+        auto *inner = new QHBoxLayout(btn);
+        inner->setContentsMargins(8, 0, 8, 0);
+        inner->setSpacing(4);
+        auto *lbl = new QLabel(title);
+        lbl->setAlignment(Qt::AlignCenter);
+        lbl->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        edit = new QLineEdit(QString::number(minutes));
+        edit->setObjectName("autoMinutes");
+        edit->setValidator(new QIntValidator(1, 1440, edit));
+        edit->setAlignment(Qt::AlignCenter);
+        edit->setFixedSize(46, 32);
+        edit->setFocusPolicy(Qt::ClickFocus);
+        edit->setToolTip("Minutes between wallpaper changes");
+        unit = new QLabel("min");
+        unit->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        edit->hide();
+        unit->hide();
+        inner->addWidget(lbl, 1);
+        inner->addWidget(edit);
+        inner->addWidget(unit);
+        return btn;
     }
 
-    void commitShuffleMinutes()
+    void loadAutoSettings()
+    {
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+        s.beginGroup("auto");
+        savedAutoMode = s.value("mode").toString();
+        shuffleMinutes = qBound(1, s.value("shuffleMinutes", 5).toInt(), 1440);
+        sequentialMinutes = qBound(1, s.value("sequentialMinutes", 5).toInt(), 1440);
+        s.endGroup();
+    }
+
+    void saveAutoSettings()
+    {
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+        s.beginGroup("auto");
+        s.setValue("mode", shuffleBtn->isChecked() ? "shuffle"
+                           : sequentialBtn->isChecked() ? "sequential" : "");
+        s.setValue("shuffleMinutes", shuffleMinutes);
+        s.setValue("sequentialMinutes", sequentialMinutes);
+        s.endGroup();
+        s.sync();
+    }
+
+    void commitAutoMinutes(QLineEdit *edit, int &minutes)
     {
         bool ok = false;
-        const int minutes = shuffleMinutesEdit->text().toInt(&ok);
-        shuffleMinutes = qBound(1, ok ? minutes : shuffleMinutes, 1440);
-        shuffleMinutesEdit->setText(QString::number(shuffleMinutes));
-        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
-        s.setValue("shuffle/minutes", shuffleMinutes);
-        if (shuffleBtn->isChecked()) startShuffleTimer();
+        const int typed = edit->text().toInt(&ok);
+        const int old = minutes;
+        minutes = qBound(1, ok ? typed : minutes, 1440);
+        edit->setText(QString::number(minutes));
+        saveAutoSettings();
+        if (minutes != old) updateAutoTimer();
     }
 
-    int shuffleIntervalMs() const
+    // (Re)start the single auto-change timer from the toggle states.
+    void updateAutoTimer()
     {
-        return qBound(1, shuffleMinutes, 1440) * 60 * 1000;
+        autoTimer->stop();
+        const bool shuffle = shuffleBtn->isChecked();
+        const bool sequential = sequentialBtn->isChecked();
+        if (!shuffle && !sequential) return;
+        if (imagePaths.size() < 2) return;   // restarted once a folder is loaded
+        const int minutes = shuffle ? shuffleMinutes : sequentialMinutes;
+        autoTimer->start(qBound(1, minutes, 1440) * 60 * 1000);
     }
 
-    void startShuffleTimer()
-    {
-        if (!shuffleTimer || imagePaths.size() < 2) {
-            if (shuffleBtn) shuffleBtn->setChecked(false);
-            return;
-        }
-        shuffleTimer->start(shuffleIntervalMs());
-    }
-
-    void advanceWallpaper(bool random, bool reveal)
+    void advanceWallpaper(bool random)
     {
         if (imagePaths.size() < 2) return;
         const int currentIndex = imagePaths.indexOf(currentImagePath);
@@ -509,7 +552,7 @@ private:
         } else {
             nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % imagePaths.size();
         }
-        selectWallpaper(nextIndex, reveal);
+        selectWallpaper(nextIndex);
         const QString mode = lastMode.isEmpty() ? QStringLiteral("zoom") : lastMode;
         applyWallpaper(mode);
     }
@@ -749,13 +792,8 @@ private:
     void buildPlaceholdersAndStartLoader()
     {
         if (imagePaths.isEmpty()) {
-            if (shuffleTimer) shuffleTimer->stop();
-            if (shuffleBtn) shuffleBtn->setChecked(false);
+            if (autoTimer) autoTimer->stop();
             return;
-        }
-        if (imagePaths.size() < 2 && shuffleBtn) {
-            shuffleBtn->setChecked(false);
-            if (shuffleTimer) shuffleTimer->stop();
         }
 
         // The image list is cheap. Construct the actual button widgets in
@@ -766,6 +804,7 @@ private:
             ? 0 : imagePaths.indexOf(lastWallpaperPath);
         if (selectedIndex < 0) selectedIndex = 0;
         currentImagePath = imagePaths.at(selectedIndex);
+        if (autoTimer) updateAutoTimer();   // new folder: restart the countdown
 
         buildNextCardBatch();       // initial visible cards before first paint
     }
@@ -969,10 +1008,10 @@ QPushButton { background: #3c3836; border: 1px solid #504945; border-radius: 8px
 QPushButton:pressed { background: #504945; }
 QPushButton:checked { background: #458588; color: #fbf1c7; border-color: #83a598; }
 QPushButton:disabled { color: #7c6f64; }
-QPushButton#shuffleBtn { padding: 0px 8px; }
-QPushButton#shuffleBtn QLabel { background: transparent; }
-QPushButton#shuffleBtn:checked QLabel { color: #fbf1c7; }
-QLineEdit#shuffleMinutes { padding: 2px 4px; border-radius: 6px; }
+QPushButton#autoBtn { padding: 0px 8px; }
+QPushButton#autoBtn QLabel { background: transparent; }
+QPushButton#autoBtn:checked QLabel { color: #fbf1c7; }
+QLineEdit#autoMinutes { padding: 2px 4px; border-radius: 6px; }
 QLineEdit { background: #1d2021; color: #ebdbb2; border: 1px solid #3c3836; border-radius: 8px; padding: 8px; selection-background-color: #458588; }
 QScrollArea#wallpaperScroll { background: #1d2021; border: 1px solid #3c3836; border-radius: 8px; }
 QWidget#wallpaperGrid { background: #1d2021; }
