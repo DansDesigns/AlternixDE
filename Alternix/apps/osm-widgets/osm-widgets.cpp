@@ -46,6 +46,8 @@
 #include <QList>
 #include <QMenu>
 #include <QAction>
+#include <QPointer>
+#include <QStyle>
 #include <QDebug>
 
 #include "osm-widget-plugin.h"
@@ -620,17 +622,74 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
-//  Non-intercepting desktop swipe observer (XInput2)
+//  Touch long-press indicator
+// ─────────────────────────────────────────────────────────────
+// Matches osm-notify's hold affordance: the ring appears after 500 ms and
+// fills over the following second. It is click-through so the desktop and
+// applications continue receiving their normal pointer/touch input.
+class DesktopHoldIndicator : public QWidget {
+public:
+    DesktopHoldIndicator() : QWidget(nullptr) {
+        setWindowFlags(Qt::FramelessWindowHint
+                       | Qt::Tool
+                       | Qt::WindowStaysOnTopHint
+                       | Qt::WindowDoesNotAcceptFocus
+                       | Qt::X11BypassWindowManagerHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFixedSize(110, 110);
+        hide();
+    }
+
+    void showAt(const QPoint &globalPos) {
+        m_progress = 0.0;
+        move(globalPos - QPoint(width() / 2, height() / 2));
+        show();
+        raise();
+        // WA_TransparentForMouseEvents is the Qt-side safeguard; an empty
+        // XShape input region also guarantees that this topmost visual never
+        // intercepts the touchscreen or mouse event being observed by XI2.
+        setInputRects(winId(), QList<QRect>());
+        update();
+    }
+
+    void setProgress(qreal progress) {
+        m_progress = qBound<qreal>(0.0, progress, 1.0);
+        if (m_progress > 0.0) update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        if (m_progress <= 0.0) return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF ring(5.0, 5.0, 100.0, 100.0);
+        painter.setPen(QPen(QColor(255, 255, 255, 90), 4,
+                            Qt::SolidLine, Qt::RoundCap));
+        painter.drawEllipse(ring);
+        painter.setPen(QPen(QColor(255, 255, 255, 240), 4,
+                            Qt::SolidLine, Qt::RoundCap));
+        painter.drawArc(ring, 90 * 16,
+                        -int(360.0 * m_progress * 16.0));
+    }
+
+private:
+    qreal m_progress = 0.0;
+};
+
+// ─────────────────────────────────────────────────────────────
+//  Non-intercepting desktop swipe / context observer (XInput2)
 // ─────────────────────────────────────────────────────────────
 // The XShape mask above deliberately passes non-widget mouse/touch clicks
-// straight to the desktop. A transparent full-screen QWidget would break
-// root-window clicks and Qtile. XI2 raw events are delivered independently
-// of the window that actually receives the click/touch, so we only *observe*
-// the gesture and do not synthesize or swallow any pointer input.
+// straight to the desktop. XI2 raw events are delivered independently of the
+// window that actually receives the click/touch, so this class observes input
+// without synthesising or swallowing ordinary pointer events.
 class DesktopSwipeMonitor : public QObject {
 public:
     explicit DesktopSwipeMonitor(WidgetHost *host, QObject *parent = nullptr)
-        : QObject(parent), m_host(host) {
+        : QObject(parent), m_host(host), m_holdIndicator(new DesktopHoldIndicator()) {
         m_display = XOpenDisplay(nullptr);  // Separate queue, not Qt's XCB queue.
         if (!m_display) {
             qWarning("osm-widgets: swipes unavailable (no X display)");
@@ -672,16 +731,34 @@ public:
                                         QSocketNotifier::Read, this);
         connect(m_socket, &QSocketNotifier::activated,
                 this, [this](int) { drainEvents(); });
+        m_touchHoldTimer.setInterval(16);
+        connect(&m_touchHoldTimer, &QTimer::timeout,
+                this, [this]() { updateTouchHoldProgress(); });
         m_clock.start();
-        qInfo("osm-widgets: desktop swipes enabled (XInput2)");
+        qInfo("osm-widgets: desktop swipes and context menu enabled (XInput2)");
     }
 
     void showDesktopContextMenu(const QPoint &globalPos) {
         if (!m_host) return;
 
+        // Keep a single live popup. A second right-click while it is visible
+        // leaves the existing menu alone rather than creating another menu.
+        if (m_contextMenu && m_contextMenu->isVisible()) return;
+        if (m_contextMenu) {
+            m_contextMenu->deleteLater();
+            m_contextMenu = nullptr;
+        }
+
         QMenu *menu = new QMenu();
+        m_contextMenu = menu;
         menu->setAttribute(Qt::WA_DeleteOnClose);
         menu->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+
+        // Do not apply a QMenu stylesheet here. Explicitly inherit the
+        // application's active Qt style and palette so qt5ct/Kvantum can
+        // paint the popup using the user's configured theme.
+        menu->setStyle(QApplication::style());
+        menu->setPalette(QApplication::palette());
 
         QAction *toggle = menu->addAction("Toggle widgets");
         toggle->setCheckable(true);
@@ -710,6 +787,9 @@ public:
     }
 
     ~DesktopSwipeMonitor() override {
+        cancelTouchHold();
+        if (m_contextMenu) m_contextMenu->close();
+        delete m_holdIndicator;
         delete m_socket; // Must detach before closing the display fd.
         if (m_display) XCloseDisplay(m_display);
     }
@@ -725,11 +805,27 @@ private:
         qint64 startMs = 0;
     } m_swipe;
 
+    struct TouchHold {
+        bool active = false;
+        bool ready = false;
+        int source = -1;
+        int detail = -1;
+        QPoint start;
+        qint64 startMs = 0;
+    } m_touchHold;
+
+    static constexpr int HOLD_REVEAL_DELAY_MS = 500;
+    static constexpr int HOLD_PROGRESS_MS = 1000;
+    static constexpr int HOLD_MOVE_CANCEL_PX = 28;
+
     Display *m_display = nullptr;
     WidgetHost *m_host = nullptr;
     QSocketNotifier *m_socket = nullptr;
     QElapsedTimer m_clock;
     QSet<quint64> m_contacts;
+    QTimer m_touchHoldTimer;
+    DesktopHoldIndicator *m_holdIndicator = nullptr;
+    QPointer<QMenu> m_contextMenu;
     int m_opcode = -1;
     qint64 m_lastActivatedMs = -100000;
 
@@ -737,6 +833,13 @@ private:
         // The touch ID is unique *per device*, not necessarily globally.
         return (quint64(quint32(event->sourceid)) << 32) |
                quint32(event->detail);
+    }
+
+    void closeContextMenuForOutsidePress(const QPoint &globalPos) {
+        if (!m_contextMenu || !m_contextMenu->isVisible()) return;
+        // QWidget::geometry() for a top-level QMenu is in global coordinates.
+        if (!m_contextMenu->frameGeometry().contains(globalPos))
+            m_contextMenu->close();
     }
 
     // Only the desktop root (or a desktop-type background window) qualifies.
@@ -782,6 +885,75 @@ private:
                                        &winX, &winY, &mask))
             return QPoint(x, y);
         return QCursor::pos();
+    }
+
+    void cancelTouchHold() {
+        m_touchHoldTimer.stop();
+        m_touchHold = TouchHold();
+        if (m_holdIndicator) m_holdIndicator->hide();
+    }
+
+    void beginTouchHold(int source, int detail, const QPoint &position) {
+        cancelTouchHold();
+        if (!m_clock.isValid() || !pointOnDesktop(position, true)) return;
+        m_touchHold.active = true;
+        m_touchHold.source = source;
+        m_touchHold.detail = detail;
+        m_touchHold.start = position;
+        m_touchHold.startMs = m_clock.elapsed();
+        if (m_holdIndicator) m_holdIndicator->showAt(position);
+        m_touchHoldTimer.start();
+    }
+
+    bool sameTouchHold(int source, int detail) const {
+        return m_touchHold.active && m_touchHold.source == source &&
+               m_touchHold.detail == detail;
+    }
+
+    void updateTouchHoldPosition(int source, int detail) {
+        if (!sameTouchHold(source, detail)) return;
+        const QPoint delta = cursorPosition() - m_touchHold.start;
+        const int distanceSquared = delta.x() * delta.x() + delta.y() * delta.y();
+        if (distanceSquared > HOLD_MOVE_CANCEL_PX * HOLD_MOVE_CANCEL_PX)
+            cancelTouchHold();
+    }
+
+    void updateTouchHoldProgress() {
+        if (!m_touchHold.active || !m_clock.isValid()) {
+            cancelTouchHold();
+            return;
+        }
+        const qint64 elapsed = m_clock.elapsed() - m_touchHold.startMs;
+        qreal progress = 0.0;
+        if (elapsed > HOLD_REVEAL_DELAY_MS) {
+            progress = qBound<qreal>(0.0,
+                qreal(elapsed - HOLD_REVEAL_DELAY_MS) / HOLD_PROGRESS_MS, 1.0);
+        }
+        if (m_holdIndicator) m_holdIndicator->setProgress(progress);
+        if (progress >= 1.0) {
+            // Keep the completed ring visible until the finger is lifted.
+            // Showing the menu on release avoids the release itself selecting
+            // an item underneath the finger.
+            m_touchHold.ready = true;
+            m_touchHoldTimer.stop();
+        }
+    }
+
+    bool finishTouchHold(int source, int detail) {
+        if (!sameTouchHold(source, detail)) return false;
+        const QPoint delta = cursorPosition() - m_touchHold.start;
+        const int distanceSquared = delta.x() * delta.x() + delta.y() * delta.y();
+        const bool stayedInPlace =
+            distanceSquared <= HOLD_MOVE_CANCEL_PX * HOLD_MOVE_CANCEL_PX;
+        const bool shouldOpen = m_touchHold.ready && stayedInPlace && m_host &&
+                                m_host->contextMenuAllowed(m_touchHold.start);
+        const QPoint position = m_touchHold.start;
+        cancelTouchHold();
+        if (shouldOpen) {
+            showDesktopContextMenu(position);
+            return true;
+        }
+        return false;
     }
 
     void begin(bool touch, int source, int detail) {
@@ -851,18 +1023,36 @@ private:
         case XI_RawTouchBegin: {
             const quint64 key = contactKey(event);
             m_contacts.insert(key);
-            if (m_contacts.size() == 1) begin(true, source, event->detail);
-            else m_swipe = Swipe(); // never activate on two/three-finger gestures
+            if (m_contacts.size() == 1) {
+                const QPoint p = cursorPosition();
+                closeContextMenuForOutsidePress(p);
+                begin(true, source, event->detail);
+                beginTouchHold(source, event->detail, p);
+            } else {
+                cancelTouchHold();
+                m_swipe = Swipe(); // never activate on two/three-finger gestures
+            }
             break;
         }
         case XI_RawTouchUpdate:
-            if (m_contacts.size() == 1)
+            if (m_contacts.size() == 1) {
+                updateTouchHoldPosition(source, event->detail);
                 move(true, source, event->detail);
+            }
             break;
         case XI_RawTouchEnd: {
             const quint64 key = contactKey(event);
             const bool sole = m_contacts.size() == 1 && m_contacts.contains(key);
-            if (sole) finish(true, source, event->detail);
+            bool openedContextMenu = false;
+            if (sole) openedContextMenu = finishTouchHold(source, event->detail);
+            else if (m_contacts.size() > 1) cancelTouchHold();
+            if (sole && openedContextMenu) {
+                // A completed long-press is a context action, not a swipe.
+                // Clear the pending swipe so later mouse gestures still work.
+                m_swipe = Swipe();
+            } else if (sole) {
+                finish(true, source, event->detail);
+            }
             m_contacts.remove(key);
             break;
         }
@@ -873,8 +1063,11 @@ private:
                     showDesktopContextMenu(p);
                 break;
             }
-            if (event->detail == 1 && m_contacts.isEmpty() && !m_swipe.active)
-                begin(false, source, event->detail);
+            if (event->detail == 1 && m_contacts.isEmpty()) {
+                const QPoint p = cursorPosition();
+                closeContextMenuForOutsidePress(p);
+                if (!m_swipe.active) begin(false, source, event->detail);
+            }
             break;
         case XI_RawMotion:
             if (m_swipe.active && !m_swipe.touch && m_contacts.isEmpty())
