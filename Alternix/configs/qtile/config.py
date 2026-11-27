@@ -424,7 +424,7 @@ keys = [
     Key([mod], "n", lazy.spawn("osm-rocker")),
     Key([mod], "Return", lazy.spawn(terminal), desc="Launch terminal"),
     Key([mod], "Tab", lazy.next_layout(), desc="Toggle between layouts"),
-    Key([mod], "c", lazy.window.kill(), desc="Kill focused window"),
+    Key([mod, "shift"], "c", lazy.window.kill(), desc="Kill focused window"),
     Key([mod], "f", lazy.window.toggle_fullscreen(), desc="Toggle fullscreen on the focused window",),
     Key([mod], "t", lazy.window.toggle_floating(), desc="Toggle floating on the focused window"),
     Key([mod, "control"], "r", lazy.reload_config(), desc="Reload the config"),
@@ -446,7 +446,7 @@ keys = [
     Key([mod], "right", lazy.layout.scroll_right()),
     Key([mod], "equal", lazy.layout.grow()),
     Key([mod], "minus", lazy.layout.shrink()),
-    Key([mod], "@", lazy.layout.centre()),
+    Key([mod], "c", lazy.layout.centre()),
 ]
 
 # Add key bindings to switch VTs in Wayland.
