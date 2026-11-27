@@ -353,13 +353,18 @@ def _is_osm_launcher_window(client):
 
 
 def _force_osm_launcher_fullscreen(client):
-    """Keep OSM Launcher fullscreen and out of Qtile's floating layer."""
+    """Keep OSM Launcher fullscreen without fighting Qtile's float state.
+
+    Qtile represents fullscreen windows using its floating-window state.
+    Calling disable_floating() on a fullscreen client therefore exits
+    fullscreen; immediately enabling fullscreen again causes visible flicker.
+    Only request fullscreen when the client is not already fullscreen.
+    """
     if not _is_osm_launcher_window(client):
         return False
     try:
-        if getattr(client, "floating", False):
-            client.disable_floating()
-        client.enable_fullscreen()
+        if not getattr(client, "fullscreen", False):
+            client.enable_fullscreen()
         return True
     except (AttributeError, RuntimeError):
         # A client can disappear while Qtile is processing a hook.
