@@ -324,6 +324,77 @@ def _is_android_window(client):
     return any(c.startswith("weston") for c in _wm_classes(client))
 
 
+def _is_osm_launcher_window(client):
+    """Identify the OSM launcher by its X11 identity or owning process."""
+    identity = " ".join(
+        (*_wm_classes(client), str(getattr(client, "name", "") or "").lower())
+    )
+    if any(token in identity for token in ("osm-launcher", "osm_launcher", "osm launcher")):
+        return True
+
+    # Some GTK/Qt wrappers publish a generic WM_CLASS. Check the process as a
+    # fallback so the rule still catches the launcher window in those builds.
+    try:
+        pid = int(client.get_pid())
+        if pid <= 0:
+            return False
+        proc_exe = os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read().replace(b"\0", b" ").decode("utf-8", "ignore").lower()
+        with open(f"/proc/{pid}/comm", encoding="utf-8") as f:
+            comm = f.read().strip().lower()
+        process_identity = " ".join((proc_exe, comm, cmdline))
+        return any(
+            token in process_identity
+            for token in ("osm-launcher", "osm_launcher", "osm launcher")
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _force_osm_launcher_fullscreen(client):
+    """Keep OSM Launcher fullscreen and out of Qtile's floating layer."""
+    if not _is_osm_launcher_window(client):
+        return False
+    try:
+        if getattr(client, "floating", False):
+            client.disable_floating()
+        client.enable_fullscreen()
+        return True
+    except (AttributeError, RuntimeError):
+        # A client can disappear while Qtile is processing a hook.
+        return False
+
+
+def _toggle_fullscreen(qtile_obj):
+    """Preserve the global fullscreen shortcut, except for locked OSM Launcher."""
+    client = getattr(qtile_obj, "current_window", None)
+    if client is None:
+        return
+    if _force_osm_launcher_fullscreen(client):
+        return
+    client.toggle_fullscreen()
+
+
+def _toggle_floating(qtile_obj):
+    """Do not allow OSM Launcher to be moved out of its fullscreen state."""
+    client = getattr(qtile_obj, "current_window", None)
+    if client is None:
+        return
+    if _force_osm_launcher_fullscreen(client):
+        return
+    client.toggle_floating()
+
+
+@hook.subscribe.client_managed
+@hook.subscribe.client_focus
+def _keep_osm_launcher_fullscreen(client):
+    # Run both when a window first enters Qtile and whenever it regains focus.
+    # This also repairs the state if the application tries to withdraw its
+    # fullscreen hint while the user is working elsewhere.
+    _force_osm_launcher_fullscreen(client)
+
+
 def _is_windows_window(client):
     classes = _wm_classes(client)
     if any(c.endswith(".exe") or c.startswith("wine") or
@@ -425,8 +496,8 @@ keys = [
     Key([mod], "Return", lazy.spawn(terminal), desc="Launch terminal"),
     Key([mod], "Tab", lazy.next_layout(), desc="Toggle between layouts"),
     Key([mod, "shift"], "c", lazy.window.kill(), desc="Kill focused window"),
-    Key([mod], "f", lazy.window.toggle_fullscreen(), desc="Toggle fullscreen on the focused window",),
-    Key([mod], "t", lazy.window.toggle_floating(), desc="Toggle floating on the focused window"),
+    Key([mod], "f", lazy.function(_toggle_fullscreen), desc="Toggle fullscreen (except OSM Launcher)",),
+    Key([mod], "t", lazy.function(_toggle_floating), desc="Toggle floating (except OSM Launcher)"),
     Key([mod, "control"], "r", lazy.reload_config(), desc="Reload the config"),
     #Key([mod, "control"], "q", lazy.shutdown(), desc="Shutdown Qtile"),
     Key([mod], "r", lazy.spawncmd(), desc="Spawn a command using a prompt widget"),
@@ -540,7 +611,7 @@ close_button = widget.TextBox(
 float_button = widget.TextBox(
     text="",
     fontsize=35,
-    mouse_callbacks={'Button1': lazy.window.toggle_floating()},
+    mouse_callbacks={'Button1': lazy.function(_toggle_floating)},
 )
 
 # --- Floating indicator glyphs (edit to taste) ---

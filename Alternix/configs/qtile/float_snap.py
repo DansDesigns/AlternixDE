@@ -9,6 +9,11 @@
 # This module deliberately uses Qtile's internal-window/drawer API. It is
 # intended for the X11 (Xlibre) backend used by Alternix.
 
+import configparser
+import os
+import re
+from pathlib import Path
+
 from libqtile.command.base import expose_command
 from libqtile.layout.base import Layout
 
@@ -54,6 +59,9 @@ class FloatSnap(Layout):
     ]
 
     def __init__(self, **config):
+        # Explicit layout settings always win; otherwise colours and font are
+        # read from the user's active GTK/Kvantum theme.
+        self._explicit_theme_options = set(config)
         Layout.__init__(self, **config)
         self.add_defaults(FloatSnap.defaults)
         self.clients = []
@@ -63,6 +71,126 @@ class FloatSnap(Layout):
         self._rect = None
         self._drag = None
         self._groups = []
+        self._load_desktop_theme()
+
+    @staticmethod
+    def _read_ini(path):
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.optionxform = str
+        try:
+            parser.read(str(path), encoding="utf-8")
+        except (OSError, configparser.Error, UnicodeError):
+            pass
+        return parser
+
+    @staticmethod
+    def _opaque_colour(value, fallback):
+        """Return an opaque #RRGGBB colour from common GTK/Kvantum formats."""
+        if not value:
+            return fallback
+        value = str(value).strip().strip('"\'')
+        match = re.fullmatch(r"#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?", value)
+        if match:
+            rgb = tuple(int(match.group(1)[i:i + 2], 16) for i in (0, 2, 4))
+            alpha = int(match.group(2), 16) / 255.0 if match.group(2) else 1.0
+        else:
+            match = re.fullmatch(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([0-9.]+))?\s*\)", value)
+            if not match:
+                return fallback
+            rgb = tuple(max(0, min(255, int(match.group(i)))) for i in (1, 2, 3))
+            alpha = float(match.group(4)) if match.group(4) is not None else 1.0
+        base_match = re.fullmatch(r"#([0-9a-fA-F]{6})", fallback)
+        base = tuple(int(base_match.group(1)[i:i + 2], 16) for i in (0, 2, 4)) if base_match else (40, 40, 40)
+        alpha = max(0.0, min(1.0, alpha))
+        rgb = tuple(round(c * alpha + b * (1.0 - alpha)) for c, b in zip(rgb, base))
+        return "#%02X%02X%02X" % rgb
+
+    @staticmethod
+    def _gtk_theme_details():
+        home = Path.home()
+        theme_name = ""
+        font_name = ""
+        for settings in (home / ".config/gtk-4.0/settings.ini",
+                         home / ".config/gtk-3.0/settings.ini"):
+            parser = FloatSnap._read_ini(settings)
+            if parser.has_section("Settings"):
+                theme_name = parser.get("Settings", "gtk-theme-name", fallback=theme_name)
+                font_name = parser.get("Settings", "gtk-font-name", fallback=font_name)
+        roots = [home / ".themes", home / ".local/share/themes", Path("/usr/share/themes")]
+        css_files = []
+        if theme_name:
+            for root in roots:
+                for version in ("gtk-4.0", "gtk-3.0"):
+                    css = root / theme_name / version / "gtk.css"
+                    if css.is_file():
+                        css_files.append(css)
+        colours = {}
+        # Read later files first so GTK4 definitions take precedence.
+        for css in reversed(css_files):
+            try:
+                data = css.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for name, value in re.findall(
+                    r"@define-color\s+([\w-]+)\s+([^;]+);", data):
+                colours[name] = value.strip()
+        return colours, font_name
+
+    @staticmethod
+    def _kvantum_theme_details():
+        home = Path.home()
+        active = ""
+        main = FloatSnap._read_ini(home / ".config/Kvantum/kvantum.kvconfig")
+        for section in main.sections():
+            active = main.get(section, "theme", fallback=active).strip()
+        if not active:
+            return {}
+        roots = [home / ".config/Kvantum", home / ".local/share/Kvantum",
+                 home / ".themes", home / ".local/share/themes",
+                 Path("/usr/share/Kvantum"), Path("/usr/share/themes")]
+        candidates = []
+        for root in roots:
+            candidates.extend((root / active / (active + ".kvconfig"),
+                               root / active / "Kvantum" / (active + ".kvconfig")))
+        for path in candidates:
+            if path.is_file():
+                parser = FloatSnap._read_ini(path)
+                for section in parser.sections():
+                    if section.lower() == "generalcolors":
+                        return {key.lower(): value for key, value in parser.items(section)}
+        return {}
+
+    def _load_desktop_theme(self):
+        gtk, gtk_font = self._gtk_theme_details()
+        kv = self._kvantum_theme_details()
+        # GTK headerbar colours are the closest match for a native desktop
+        # titlebar; Kvantum's active window palette is the fallback.
+        window = gtk.get("headerbar_bg_color") or gtk.get("theme_bg_color") or                  gtk.get("window_bg_color") or kv.get("window.color") or "#30343B"
+        text = gtk.get("headerbar_fg_color") or gtk.get("theme_fg_color") or                gtk.get("window_fg_color") or kv.get("window.text.color") or "#EEEEEE"
+        accent = gtk.get("accent_color") or gtk.get("theme_selected_bg_color") or                  kv.get("highlight.color") or "#5B8DEF"
+        inactive = gtk.get("theme_unfocused_bg_color") or                    kv.get("inactive.window.color") or window
+        inactive_text = gtk.get("theme_unfocused_fg_color") or                         kv.get("inactive.window.text.color") or text
+        window = self._opaque_colour(window, "#30343B")
+        text = self._opaque_colour(text, "#EEEEEE")
+        accent = self._opaque_colour(accent, "#5B8DEF")
+        inactive = self._opaque_colour(inactive, window)
+        inactive_text = self._opaque_colour(inactive_text, text)
+        values = {
+            "titlebar_bg": inactive,
+            "titlebar_focus": window,
+            "titlebar_text": inactive_text,
+            "titlebar_text_focus": text,
+            "joint_titlebar_bg": window,
+            "joint_titlebar_text": text,
+            "border_focus": accent,
+        }
+        for option, value in values.items():
+            if option not in self._explicit_theme_options:
+                setattr(self, option, value)
+        if gtk_font and "titlebar_font" not in self._explicit_theme_options:
+            # GTK's font setting may include a trailing point size; the
+            # configured titlebar_fontsize remains authoritative.
+            self.titlebar_font = re.sub(r"\s+[0-9.]+(?:px|pt)?$", "", gtk_font).strip() or self.titlebar_font
 
     def clone(self, group):
         c = Layout.clone(self, group)
@@ -76,7 +204,12 @@ class FloatSnap(Layout):
         return c
 
     def add_client(self, client):
-        self.clients.append(client)
+        # This is a layout-managed free-positioning mode, not Qtile's floating
+        # layer. A client left in Qtile's floating layer is excluded from the
+        # normal layout lifecycle and will not be arranged by other layouts.
+        self._ensure_tiled(client)
+        if client not in self.clients:
+            self.clients.append(client)
         sr = self._rect
         if sr:
             w = max(self.min_width, int(sr.width * self.default_width))
@@ -149,26 +282,57 @@ class FloatSnap(Layout):
     def _qtile(self):
         return getattr(self._group, "qtile", None) if self._group else None
 
+    @staticmethod
+    def _ensure_tiled(client):
+        """Keep clients in Qtile's layout-managed layer."""
+        try:
+            if getattr(client, "floating", False):
+                client.disable_floating()
+        except Exception:
+            pass
+
     def _create_decoration(self, key, x, y, width, height, draw, click, motion):
         qtile = self._qtile()
         if qtile is None or getattr(qtile.core, "name", "") != "x11":
             return None
+        win = None
+        drawer = None
         try:
             depth = qtile.core.conn.default_screen.root_depth
-            win = qtile.core.create_internal(int(x), int(y), max(1, int(width)),
-                                             max(1, int(height)), depth)
-            win.unhide()
-            # Qtile calls these as (x, y, button) / (x, y), not with an event.
+            win = qtile.core.create_internal(
+                int(x), int(y), max(1, int(width)), max(1, int(height)), depth
+            )
+            # Qtile's Internal callbacks use positional (x, y, button) values.
             win.process_window_expose = lambda: draw(key)
             win.process_button_click = lambda x, y, button: click(
-                key, _Ev(x, y, button))
+                key, _Ev(x, y, button)
+            )
             win.process_button_release = lambda x, y, button: self._release()
             win.process_pointer_motion = lambda x, y: motion(
-                key, _Ev(x, y, 0))
+                key, _Ev(x, y, 0)
+            )
             drawer = win.create_drawer(max(1, int(width)), max(1, int(height)))
-            item = {"window": win, "drawer": drawer, "size": (int(width), int(height))}
+            item = {
+                "window": win,
+                "drawer": drawer,
+                "size": (int(width), int(height)),
+            }
+            # Keep it unmapped until _draw_titlebar/_draw_joint has painted
+            # an opaque background into its drawer.
             return item
         except Exception:
+            # Do not leave an unmanaged internal X window behind if drawer
+            # creation fails part-way through.
+            if win is not None:
+                try:
+                    win.kill()
+                except Exception:
+                    pass
+            if drawer is not None:
+                try:
+                    drawer.finalize()
+                except Exception:
+                    pass
             return None
 
     def _destroy_item(self, item):
@@ -213,6 +377,7 @@ class FloatSnap(Layout):
                        max(0, (h - self.titlebar_fontsize) // 2 - 2),
                        fg, self.titlebar_font, self.titlebar_fontsize + 3)
             d.draw()
+            item["window"].unhide()
         except Exception:
             pass
 
@@ -230,6 +395,7 @@ class FloatSnap(Layout):
                    self.joint_titlebar_text, self.titlebar_font,
                    self.titlebar_fontsize)
             d.draw()
+            item["window"].unhide()
         except Exception:
             pass
 
@@ -400,20 +566,54 @@ class FloatSnap(Layout):
         if not item:
             return
         try:
-            item["window"].place(int(x), int(y), max(1, int(width)),
-                                 max(1, int(height)), 0, None)
+            item["window"].place(
+                int(x), int(y), max(1, int(width)), max(1, int(height)),
+                0, None, above=True
+            )
             item["drawer"].width = max(1, int(width))
             item["drawer"].height = max(1, int(height))
         except Exception:
             pass
 
+    def show(self, screen_rect):
+        """Restore decorations and geometry whenever this layout is activated."""
+        self._rect = screen_rect
+        self._load_desktop_theme()
+        for client in self.clients:
+            self._ensure_tiled(client)
+        self._relayout()
+
+    def hide(self):
+        """Remove our internal titlebars and return clients to tiled management."""
+        self._drag = None
+        for client in list(self.clients):
+            self._ensure_tiled(client)
+        for client in list(self.decorations):
+            self._destroy_decoration(client)
+        for key in list(self.joint):
+            self._destroy_joint(key)
+
+    def finalize(self):
+        self.hide()
+        try:
+            Layout.finalize(self)
+        except AttributeError:
+            pass
+
     def layout(self, windows, screen_rect):
         self._rect = screen_rect
         Layout.layout(self, windows, screen_rect)
+        # Reconcile the layout's client list with Qtile's current visible set.
+        # This also handles clients restored after a layout/group switch.
+        for client in windows:
+            self._ensure_tiled(client)
+            if client not in self.clients:
+                self.add_client(client)
         self._refresh_groups()
         self._relayout()
 
     def configure(self, client, screen_rect):
+        self._ensure_tiled(client)
         if client not in self.clients:
             client.hide()
             return
@@ -487,6 +687,12 @@ class FloatSnap(Layout):
         for key in list(self.joint):
             if key not in active:
                 self._destroy_joint(key)
+
+    @expose_command()
+    def reload_theme(self):
+        """Reload active GTK/Kvantum colours and repaint all titlebars."""
+        self._load_desktop_theme()
+        self._relayout()
 
     @expose_command()
     def move(self, dx, dy):

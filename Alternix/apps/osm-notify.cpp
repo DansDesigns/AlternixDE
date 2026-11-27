@@ -1199,7 +1199,7 @@ public:
             addToggle("wifi", "wifi.png", "Wi-Fi");
             addToggle("bluetooth", "bt.png", "Bluetooth");
             addToggle("ethernet", "enet.png", "Ethernet");
-            addToggle("mobile", "mobile.png", "Mobile");
+            addToggle("mobile", "data.png", "Mobile");
             addToggle("gps", "gps.png", "GPS chip");
             addToggle("rotation", "rotate.png", "Auto-Rotate");
 
