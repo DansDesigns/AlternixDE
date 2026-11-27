@@ -77,7 +77,6 @@ class FloatSnap(Layout):
         else:
             x, y, w, h = 80, 80, 800, 600
         self.geometry[client] = [x, y, w, h]
-        self._relayout()
 
     def remove(self, client):
         if client not in self.clients:
@@ -115,8 +114,28 @@ class FloatSnap(Layout):
     def focus_previous(self, win):
         if win in self.clients:
             i = self.clients.index(win) - 1
-            return self.clients[i] if i > 0 else None
+            return self.clients[i] if 0 <= i < len(self.clients) else None
         return None
+
+    def next(self):
+        if not self.clients or self._group is None:
+            return
+        current = self._group.current_window
+        client = self.focus_next(current) if current in self.clients else None
+        if client is None:
+            client = self.focus_first()
+        if client is not None:
+            self._group.focus(client, True)
+
+    def previous(self):
+        if not self.clients or self._group is None:
+            return
+        current = self._group.current_window
+        client = self.focus_previous(current) if current in self.clients else None
+        if client is None:
+            client = self.focus_last()
+        if client is not None:
+            self._group.focus(client, True)
 
     def _qtile(self):
         return getattr(self._group, "qtile", None) if self._group else None
@@ -415,12 +434,13 @@ class FloatSnap(Layout):
             self._draw_titlebar(client)
 
     def _relayout(self):
-        if self._group is None:
-            return
-        try:
-            self._group.layout_all()
-        except Exception:
-            pass
+        if self._rect is not None:
+            # Configure clients directly. Calling group.layout_all() here would
+            # re-enter this layout's layout() method and recurse during refresh.
+            for client in list(self.clients):
+                if client in self.geometry:
+                    self.configure(client, self._rect)
+        self._refresh_groups()
         self._update_joint_bars()
 
     def _update_joint_bars(self):
