@@ -453,14 +453,14 @@ private:
     void focusSelectedWallpaper()
     {
         const int index = imagePaths.indexOf(currentImagePath);
-        QPushButton *button = index >= 0 ? buttonGroup->button(index) : nullptr;
+        QAbstractButton *button = index >= 0 ? buttonGroup->button(index) : nullptr;
         if (!button) {
             focusWhenBuilt = true;
             return;
         }
         focusWhenBuilt = false;
         button->setFocus(Qt::OtherFocusReason);
-        QPointer<QPushButton> guard(button);
+        QPointer<QAbstractButton> guard(button);
         QTimer::singleShot(0, this, [this, guard]() {
             if (guard) scrollArea->ensureWidgetVisible(guard);
         });
