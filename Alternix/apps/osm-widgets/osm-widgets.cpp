@@ -48,6 +48,9 @@
 #include <QAction>
 #include <QPointer>
 #include <QStyle>
+#include <QStyleFactory>
+#include <QPalette>
+#include <QColor>
 #include <QDebug>
 
 #include "osm-widget-plugin.h"
@@ -754,11 +757,9 @@ public:
         menu->setAttribute(Qt::WA_DeleteOnClose);
         menu->setWindowFlag(Qt::WindowStaysOnTopHint, true);
 
-        // Do not apply a QMenu stylesheet here. Explicitly inherit the
-        // application's active Qt style and palette so qt5ct/Kvantum can
-        // paint the popup using the user's configured theme.
-        menu->setStyle(QApplication::style());
-        menu->setPalette(QApplication::palette());
+        // No stylesheet or per-menu palette: QMenu inherits the application's
+        // active style. This is important for Kvantum, which paints its menu
+        // frame and items through QStyle rather than a QSS approximation.
 
         QAction *toggle = menu->addAction("Toggle widgets");
         toggle->setCheckable(true);
@@ -1100,9 +1101,157 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────
+//  Qt/Kvantum theme setup
+// ─────────────────────────────────────────────────────────────
+// osm-widgets is a standalone QApplication, so it cannot assume that the
+// desktop's QT_STYLE_OVERRIDE environment variable was passed to its daemon
+// process. Prefer Kvantum when the user has not explicitly chosen another
+// Qt style. Kvantum then reads its normal kvantum.kvconfig theme selection.
+static QString findKvantumThemeConfig()
+{
+    const QString home = QDir::homePath();
+    const QString homeKvantum = home + "/.config/Kvantum";
+    QSettings selection(homeKvantum + "/kvantum.kvconfig", QSettings::IniFormat);
+    QString selectedTheme = selection.value("General/theme").toString().trimmed();
+
+    QStringList themes;
+    if (!selectedTheme.isEmpty()) themes << selectedTheme;
+    if (!themes.contains("AlternixDark")) themes << "AlternixDark";
+
+    QStringList candidates;
+    for (const QString &theme : themes) {
+        QStringList folderNames{theme};
+        // Kvantum also supports a dark variant stored inside its base theme
+        // directory, e.g. Alternix/AlternixDark.kvconfig.
+        if (theme.endsWith("Dark", Qt::CaseInsensitive)) {
+            const QString base = theme.left(theme.size() - 4);
+            if (!base.isEmpty() && !folderNames.contains(base)) folderNames << base;
+        }
+
+        for (const QString &folder : folderNames) {
+            candidates << homeKvantum + "/" + folder + "/" + theme + ".kvconfig";
+            candidates << home + "/.local/share/Kvantum/" + folder + "/" + theme + ".kvconfig";
+            candidates << "/usr/local/share/Kvantum/" + folder + "/" + theme + ".kvconfig";
+            candidates << "/usr/share/Kvantum/" + folder + "/" + theme + ".kvconfig";
+            candidates << home + "/.themes/" + folder + "/Kvantum/" + theme + ".kvconfig";
+            candidates << home + "/.local/share/themes/" + folder + "/Kvantum/" + theme + ".kvconfig";
+            candidates << "/usr/local/share/themes/" + folder + "/Kvantum/" + theme + ".kvconfig";
+            candidates << "/usr/share/themes/" + folder + "/Kvantum/" + theme + ".kvconfig";
+        }
+        candidates << homeKvantum + "/" + theme + ".kvconfig";
+    }
+
+    for (const QString &candidate : candidates)
+        if (QFileInfo::exists(candidate)) return candidate;
+    return QString();
+}
+
+static QPalette loadKvantumFallbackPalette(const QString &configPath)
+{
+    QPalette palette;
+    QMap<QString, QColor> configuredColors;
+    if (!configPath.isEmpty()) {
+        QSettings theme(configPath, QSettings::IniFormat);
+        const QStringList keys = {
+            "window.color", "window.text.color", "base.color", "alt.base.color",
+            "button.color", "button.text.color", "text.color", "highlight.color",
+            "highlight.text.color", "tooltip.base.color", "tooltip.text.color",
+            "light.color", "mid.light.color", "dark.color", "mid.color",
+            "link.color", "link.visited.color", "disabled.text.color"
+        };
+        for (const QString &key : keys) {
+            const QColor configured(theme.value("GeneralColors/" + key).toString());
+            if (configured.isValid()) configuredColors.insert(key, configured);
+        }
+    }
+    auto color = [&configuredColors](const QString &key, const char *fallback) {
+        return configuredColors.value(key, QColor(QString::fromLatin1(fallback)));
+    };
+
+    palette.setColor(QPalette::Window, color("window.color", "#292B2D"));
+    palette.setColor(QPalette::WindowText, color("window.text.color", "#E9EEEA"));
+    palette.setColor(QPalette::Base, color("base.color", "#202225"));
+    palette.setColor(QPalette::AlternateBase, color("alt.base.color", "#2F3235"));
+    palette.setColor(QPalette::Button, color("button.color", "#54575B"));
+    palette.setColor(QPalette::ButtonText, color("button.text.color", "#F2F6F3"));
+    palette.setColor(QPalette::Text, color("text.color", "#E9EEEA"));
+    palette.setColor(QPalette::Highlight, color("highlight.color", "#28DA58"));
+    palette.setColor(QPalette::HighlightedText, color("highlight.text.color", "#101B12"));
+    palette.setColor(QPalette::ToolTipBase, color("tooltip.base.color", "#25272A"));
+    palette.setColor(QPalette::ToolTipText, color("tooltip.text.color", "#E9EEEA"));
+    palette.setColor(QPalette::Light, color("light.color", "#777B7C"));
+    palette.setColor(QPalette::Midlight, color("mid.light.color", "#626568"));
+    palette.setColor(QPalette::Dark, color("dark.color", "#17191B"));
+    palette.setColor(QPalette::Mid, color("mid.color", "#383B3E"));
+    palette.setColor(QPalette::Link, color("link.color", "#43E478"));
+    palette.setColor(QPalette::LinkVisited, color("link.visited.color", "#8DD9A1"));
+
+    const QColor disabled = color("disabled.text.color", "#8C9691");
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
+    palette.setColor(QPalette::Disabled, QPalette::Text, disabled);
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
+    return palette;
+}
+
+static void configureQtTheme(QApplication &app)
+{
+    QString requestedStyle = qEnvironmentVariable("QT_STYLE_OVERRIDE").trimmed();
+    const bool preferKvantum = requestedStyle.isEmpty();
+    if (preferKvantum) requestedStyle = QStringLiteral("kvantum");
+
+    QString styleKey;
+    for (const QString &key : QStyleFactory::keys()) {
+        if (key.compare(requestedStyle, Qt::CaseInsensitive) == 0) {
+            styleKey = key;
+            break;
+        }
+    }
+
+    if (!styleKey.isEmpty()) {
+        if (QStyle *style = QStyleFactory::create(styleKey)) {
+            app.setStyle(style);
+            // Refresh the app palette from the selected style as well. Do not
+            // copy the old light palette onto QMenu later; that can undo the
+            // dark palette supplied by a Kvantum style.
+            app.setPalette(style->standardPalette());
+            qInfo() << "osm-widgets: using Qt style" << styleKey;
+            return;
+        }
+    }
+
+    if (!preferKvantum &&
+        requestedStyle.compare(QStringLiteral("kvantum"), Qt::CaseInsensitive) != 0) {
+        qWarning() << "osm-widgets: requested Qt style is unavailable:" << requestedStyle;
+        return;
+    }
+
+    // A palette fallback prevents a white popup if the Kvantum style plugin
+    // is missing, while retaining the exact colours from AlternixDark's
+    // [GeneralColors] section. Full Kvantum SVG/menu rendering still requires
+    // the Kvantum Qt style plugin to be installed.
+    QStyle *fallbackStyle = QStyleFactory::create(QStringLiteral("Fusion"));
+    if (fallbackStyle) app.setStyle(fallbackStyle);
+    const QString themeConfig = findKvantumThemeConfig();
+    app.setPalette(loadKvantumFallbackPalette(themeConfig));
+    if (!themeConfig.isEmpty()) {
+        qWarning() << "osm-widgets: Kvantum style plugin unavailable; using AlternixDark palette from"
+                   << themeConfig;
+    } else {
+        qWarning() << "osm-widgets: Kvantum style plugin unavailable; using the AlternixDark [GeneralColors] values"
+                      " embedded from the supplied theme config";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 int main(int argc, char **argv)
 {
+    // Qt only reads QT_STYLE_OVERRIDE during QApplication startup. Preserve
+    // an explicit user override, but default this desktop daemon to Kvantum.
+    if (qEnvironmentVariableIsEmpty("QT_STYLE_OVERRIDE"))
+        qputenv("QT_STYLE_OVERRIDE", QByteArrayLiteral("kvantum"));
+
     QApplication app(argc, argv);
+    configureQtTheme(app);
 
     QLockFile lock(QDir::temp().absoluteFilePath("osm-widgets.lock"));
     lock.setStaleLockTime(0);
