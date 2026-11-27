@@ -40,12 +40,9 @@
 #include <QCollator>
 #include <QPointer>
 #include <QLockFile>
-#include <QPainter>
 #include <QGuiApplication>
-#include <QScreen>
 #include <QShowEvent>
 #include <algorithm>
-#include <atomic>
 #include <sys/resource.h>
 #include <functional>
 #include <utility>
@@ -161,48 +158,6 @@ static QImage loadWallpaperThumbnail(const QString &path, const QSize &size)
     return thumbnail;
 }
 
-// Renders a wallpaper the way xwallpaper would lay it out on a frame of the
-// given size. `scale` is the frame's size relative to the real screen, so
-// tiles shrink with it. The image is decoded directly at the size needed
-// (JPEG can do this very cheaply) rather than full-size and then shrunk.
-// Runs on a worker thread.
-static QImage renderWallpaperFrame(const QString &path, const QString &mode,
-                                   const QSize &size, qreal scale)
-{
-    QImage out(size, QImage::Format_RGB32);
-    out.fill(Qt::black);
-
-    QImageReader reader(path);
-    const QSize native = reader.size();
-    if (!native.isValid()) return out;
-
-    QPainter painter(&out);
-    if (mode == "tile") {
-        const QSize tile(qMax(1, qRound(native.width() * scale)),
-                         qMax(1, qRound(native.height() * scale)));
-        reader.setScaledSize(tile);
-        const QImage src = reader.read();
-        if (src.isNull()) return out;
-        for (int y = 0; y < size.height(); y += src.height())
-            for (int x = 0; x < size.width(); x += src.width())
-                painter.drawImage(x, y, src);
-    } else if (mode == "zoom") {
-        QSize scaled = native;
-        scaled.scale(size, Qt::KeepAspectRatioByExpanding);
-        reader.setScaledSize(scaled);
-        const QImage src = reader.read();
-        if (src.isNull()) return out;
-        painter.drawImage((size.width() - src.width()) / 2,
-                          (size.height() - src.height()) / 2, src);
-    } else {  // fill
-        reader.setScaledSize(size);
-        const QImage src = reader.read();
-        if (src.isNull()) return out;
-        painter.drawImage(0, 0, src);
-    }
-    return out;
-}
-
 class ThumbnailJob final : public QRunnable
 {
 public:
@@ -237,20 +192,16 @@ static AutoConfig readAutoConfig()
 }
 
 // Headless background mode (`osm-paper --daemon`). It owns the timed
-// Shuffle / Sequential changes and their crossfade, so they keep working
-// after the window is closed. It follows the settings file written by the
-// GUI and exits by itself once auto-change is switched off.
+// Shuffle / Sequential changes, so they keep working after the window is
+// closed. It follows the settings file written by the GUI and exits by
+// itself once auto-change is switched off.
 class WallpaperDaemon : public QObject
 {
 public:
     WallpaperDaemon()
     {
-        fadePool.setMaxThreadCount(1);
         tickTimer = new QTimer(this);
         connect(tickTimer, &QTimer::timeout, this, [this]() { tick(); });
-        fadeTimer = new QTimer(this);
-        fadeTimer->setInterval(kFadeFrameMs);
-        connect(fadeTimer, &QTimer::timeout, this, [this]() { playFadeFrame(); });
         pollTimer = new QTimer(this);
         pollTimer->setInterval(2000);
         connect(pollTimer, &QTimer::timeout, this, [this]() { poll(); });
@@ -258,29 +209,11 @@ public:
         pollTimer->start();
     }
 
-    ~WallpaperDaemon() override
-    {
-        ++fadeGeneration;
-        fadePool.waitForDone();
-    }
-
 private:
-    static constexpr int kFadeSteps   = 10;    // intermediate frames
-    static constexpr int kFadeFrameMs = 150;   // about 1.6 s in total
-    static constexpr double kFadeScale = 0.5;  // frames are half size; xwallpaper stretches them
-
     QTimer *tickTimer{};
-    QTimer *fadeTimer{};
     QTimer *pollTimer{};
-    QThreadPool fadePool;
-    std::atomic<int> fadeGeneration{0};
     QString activeMode;
     int     activeMinutes = 0;
-    bool    fadeActive = false;
-    QStringList fadeFrames;
-    int     fadeFrameIndex = 0;
-    QString fadeFinalPath;
-    QString fadeFinalMode;
 
     static void quitApp()
     {
@@ -297,9 +230,6 @@ private:
             activeMinutes = c.minutes;
             tickTimer->start(c.minutes * 60 * 1000);
         }
-        // A manual change made in the GUI wins over a fade in progress.
-        if (fadeActive && (c.wallpaper != fadeFinalPath || c.wallpaperMode != fadeFinalMode))
-            cancelFade();
     }
 
     void tick()
@@ -319,103 +249,12 @@ private:
             next = current < 0 ? 0 : (current + 1) % paths.size();
         }
 
-        // Remember it right away so a restart (or the GUI) sees the new one.
-        {
-            QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
-            s.setValue("last/wallpaper", paths.at(next));
-            s.sync();
-        }
-        crossfade(c.wallpaper, paths.at(next), c.wallpaperMode);
-    }
+        if (!applyWallpaperFile(c.wallpaperMode, paths.at(next))) return;
 
-    static void removeFramesLater(const QStringList &files)
-    {
-        if (files.isEmpty()) return;
-        // xwallpaper may still be reading the last frame it was handed.
-        QTimer::singleShot(1500, qApp, [files]() {
-            for (const QString &file : files) QFile::remove(file);
-        });
-    }
-
-    void cancelFade()
-    {
-        ++fadeGeneration;
-        fadeTimer->stop();
-        fadeActive = false;
-        removeFramesLater(fadeFrames);
-        fadeFrames.clear();
-        fadeFrameIndex = 0;
-    }
-
-    // xwallpaper has no transitions, so blended frames are rendered on a
-    // worker thread and applied in quick succession, ending with the real
-    // wallpaper. Any failure falls back to an instant change.
-    void crossfade(const QString &fromPath, const QString &toPath, const QString &mode)
-    {
-        cancelFade();
-        fadeFinalPath = toPath;
-        fadeFinalMode = mode;
-        QScreen *screen = QGuiApplication::primaryScreen();
-        const QString dirPath = QDir::tempPath() + QStringLiteral("/osm-paper-fade");
-        if (fromPath.isEmpty() || fromPath == toPath || !screen || !QDir().mkpath(dirPath)) {
-            applyWallpaperFile(mode, toPath);
-            return;
-        }
-
-        fadeActive = true;
-        const QSize screenSize = (screen->size() * screen->devicePixelRatio())
-                                     .expandedTo(QSize(2, 2));
-        const QSize size(qMax(1, qRound(screenSize.width() * kFadeScale)),
-                         qMax(1, qRound(screenSize.height() * kFadeScale)));
-        const int generation = fadeGeneration.load();
-        fadePool.start(new ThumbnailJob([this, generation, fromPath, toPath, mode, size, dirPath]() {
-            const QImage from = renderWallpaperFrame(fromPath, mode, size, kFadeScale);
-            const QImage to = renderWallpaperFrame(toPath, mode, size, kFadeScale);
-            QStringList files;
-            for (int i = 1; i <= kFadeSteps; ++i) {
-                if (generation != fadeGeneration.load()) {
-                    for (const QString &file : files) QFile::remove(file);
-                    return;
-                }
-                const double x = double(i) / (kFadeSteps + 1);
-                const double t = x * x * (3.0 - 2.0 * x);     // smoothstep ease
-                QImage frame = from;
-                QPainter painter(&frame);
-                painter.setOpacity(t);
-                painter.drawImage(0, 0, to);
-                painter.end();
-                const QString file = QStringLiteral("%1/frame-%2-%3.jpg")
-                                         .arg(dirPath).arg(generation).arg(i);
-                if (!frame.save(file, "JPEG", 90)) break;
-                files << file;
-            }
-            QMetaObject::invokeMethod(this, [this, generation, files, toPath, mode]() {
-                if (generation != fadeGeneration.load()) {
-                    removeFramesLater(files);
-                    return;
-                }
-                fadeFrames = files;
-                fadeFrameIndex = 0;
-                playFadeFrame();
-                fadeTimer->start();
-            }, Qt::QueuedConnection);
-        }));
-    }
-
-    void playFadeFrame()
-    {
-        if (fadeFrameIndex < fadeFrames.size()) {
-            QProcess::startDetached(
-                "xwallpaper", QStringList{"--stretch", fadeFrames.at(fadeFrameIndex)});
-            ++fadeFrameIndex;
-            return;
-        }
-        fadeTimer->stop();
-        fadeActive = false;
-        applyWallpaperFile(fadeFinalMode, fadeFinalPath);   // exact final result
-        removeFramesLater(fadeFrames);
-        fadeFrames.clear();
-        fadeFrameIndex = 0;
+        // Remember it so a restart (and the GUI) sees the new one.
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+        s.setValue("last/wallpaper", paths.at(next));
+        s.sync();
     }
 };
 
@@ -1294,7 +1133,7 @@ QScrollBar::handle:vertical { background: #504945; border-radius: 6px; min-heigh
 
 int main(int argc, char *argv[])
 {
-    // Background mode: timed Shuffle / Sequential with crossfade, no window.
+    // Background mode: timed Shuffle / Sequential changes, no window.
     for (int i = 1; i < argc; ++i) {
         if (QString::fromLocal8Bit(argv[i]) != QLatin1String("--daemon")) continue;
         // Background housekeeping must never compete with the desktop. Set
