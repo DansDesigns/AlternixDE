@@ -189,7 +189,7 @@ QString getEthernetStatus() {
 // ------------------------------------------------------
 class SettingsHub : public QMainWindow {
 public:
-    SettingsHub() {
+    explicit SettingsHub(const QString &initialPage = QString()) {
         QScreen *screen = QGuiApplication::primaryScreen();
         QRect avail = screen->availableGeometry();
 
@@ -214,6 +214,16 @@ public:
         setCentralWidget(stack);
 
         stack->addWidget(makeMainMenu());
+
+        // Allow desktop integrations (such as the desktop context menu) to
+        // open a specific settings page without first showing the hub menu.
+        // The page is created through the same plugin factory used by the
+        // normal Display card.
+        if (initialPage.compare("display", Qt::CaseInsensitive) == 0) {
+            QWidget *page = loadPage("display", "Display");
+            stack->addWidget(page);
+            stack->setCurrentIndex(1);
+        }
 
         // Real device status, updated while the hub is displayed. Queries
         // are asynchronous so old tablets never freeze while a daemon wakes.
@@ -544,7 +554,17 @@ int main(int argc, char *argv[]) {
         a.setFont(f);
     }
 
-    SettingsHub w;
+    QString initialPage;
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        if (arg == "--page" && i + 1 < argc) {
+            initialPage = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg.startsWith("--page=")) {
+            initialPage = arg.mid(7);
+        }
+    }
+
+    SettingsHub w(initialPage);
     w.show();
 
     return a.exec();

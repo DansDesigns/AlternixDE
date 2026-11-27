@@ -44,6 +44,8 @@
 #include <QDateTime>
 #include <QMap>
 #include <QList>
+#include <QMenu>
+#include <QAction>
 #include <QDebug>
 
 #include "osm-widget-plugin.h"
@@ -360,6 +362,18 @@ public:
         return true;
     }
 
+    bool isContextMenuPoint(const QPoint &global) const {
+        if (!geometry().contains(global)) return false;
+        // When widgets are disabled the overlay is hidden, but the menu
+        // must remain available so the user can turn them back on.
+        if (!isVisible()) return true;
+        const QPoint local = mapFromGlobal(global);
+        for (WidgetFrame *frame : m_frames)
+            if (frame && frame->isVisible() && frame->geometry().contains(local))
+                return false;
+        return true;
+    }
+
 private:
     QScreen           *m_screen;
     int                m_index;
@@ -379,6 +393,22 @@ public:
         if (!m_enabled || m_edit) return false;
         for (const DesktopOverlay *overlay : m_overlays)
             if (overlay && overlay->isBareDesktopPoint(at)) return true;
+        return false;
+    }
+
+    bool widgetsEnabled() const { return m_enabled; }
+
+    void setWidgetsEnabled(bool enabled) {
+        QSettings cfg(osmWidgetConfigPath(), QSettings::IniFormat);
+        cfg.setValue("General/Enabled", enabled);
+        cfg.sync();
+        reload();
+        watchConfig();
+    }
+
+    bool contextMenuAllowed(const QPoint &at) const {
+        for (const DesktopOverlay *overlay : m_overlays)
+            if (overlay && overlay->isContextMenuPoint(at)) return true;
         return false;
     }
 
@@ -646,6 +676,39 @@ public:
         qInfo("osm-widgets: desktop swipes enabled (XInput2)");
     }
 
+    void showDesktopContextMenu(const QPoint &globalPos) {
+        if (!m_host) return;
+
+        QMenu *menu = new QMenu();
+        menu->setAttribute(Qt::WA_DeleteOnClose);
+        menu->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+
+        QAction *toggle = menu->addAction("Toggle widgets");
+        toggle->setCheckable(true);
+        toggle->setChecked(m_host->widgetsEnabled());
+        connect(toggle, &QAction::toggled, menu, [this](bool enabled) {
+            if (m_host) m_host->setWidgetsEnabled(enabled);
+        });
+
+        menu->addAction("Open widgets", menu, [this]() {
+            QProcess::startDetached("osm-widgets", QStringList());
+        });
+        menu->addAction("Wallpaper", menu, []() {
+            QProcess::startDetached("osm-paper", QStringList());
+        });
+        menu->addAction("Display settings", menu, []() {
+            // Open the Display page directly inside the existing settings hub.
+            QProcess::startDetached("osm-settings",
+                                    QStringList{"--page", "display"});
+        });
+        menu->addAction("Power menu", menu, []() {
+            QProcess::startDetached("osm-power", QStringList());
+        });
+
+        menu->popup(globalPos);
+        menu->raise();
+    }
+
     ~DesktopSwipeMonitor() override {
         delete m_socket; // Must detach before closing the display fd.
         if (m_display) XCloseDisplay(m_display);
@@ -678,8 +741,10 @@ private:
 
     // Only the desktop root (or a desktop-type background window) qualifies.
     // In particular a NORMAL app, popup, dock, and a widget are excluded.
-    bool pointOnDesktop(const QPoint &p) const {
-        if (!m_host || !m_host->gesturesAllowed(p)) return false;
+    bool pointOnDesktop(const QPoint &p, bool contextMenu = false) const {
+        if (!m_host ||
+            !(contextMenu ? m_host->contextMenuAllowed(p)
+                          : m_host->gesturesAllowed(p))) return false;
         const Window root = DefaultRootWindow(m_display);
         Window returnedRoot = None, child = None;
         int rx = 0, ry = 0, wx = 0, wy = 0;
@@ -802,6 +867,12 @@ private:
             break;
         }
         case XI_RawButtonPress:
+            if (event->detail == 3 && m_contacts.isEmpty()) {
+                const QPoint p = cursorPosition();
+                if (m_host && pointOnDesktop(p, true))
+                    showDesktopContextMenu(p);
+                break;
+            }
             if (event->detail == 1 && m_contacts.isEmpty() && !m_swipe.active)
                 begin(false, source, event->detail);
             break;
