@@ -37,6 +37,7 @@ import threading
 import time
 # from pathlib import Path
 # import configparser
+from float_snap import FloatSnap
 from scroller import Scroller
 import scrollerbar
 import re
@@ -423,11 +424,11 @@ keys = [
     Key([mod], "n", lazy.spawn("osm-rocker")),
     Key([mod], "Return", lazy.spawn(terminal), desc="Launch terminal"),
     Key([mod], "Tab", lazy.next_layout(), desc="Toggle between layouts"),
-    Key([mod], "w", lazy.window.kill(), desc="Kill focused window"),
+    Key([mod], "c", lazy.window.kill(), desc="Kill focused window"),
     Key([mod], "f", lazy.window.toggle_fullscreen(), desc="Toggle fullscreen on the focused window",),
     Key([mod], "t", lazy.window.toggle_floating(), desc="Toggle floating on the focused window"),
     Key([mod, "control"], "r", lazy.reload_config(), desc="Reload the config"),
-    Key([mod, "control"], "q", lazy.shutdown(), desc="Shutdown Qtile"),
+    #Key([mod, "control"], "q", lazy.shutdown(), desc="Shutdown Qtile"),
     Key([mod], "r", lazy.spawncmd(), desc="Spawn a command using a prompt widget"),
 
     Key([], "XF86AudioRaiseVolume", lazy.spawn("amixer -q set Master 5%+")),
@@ -445,7 +446,7 @@ keys = [
     Key([mod], "right", lazy.layout.scroll_right()),
     Key([mod], "equal", lazy.layout.grow()),
     Key([mod], "minus", lazy.layout.shrink()),
-    Key([mod], "c", lazy.layout.centre()),
+    Key([mod], "@", lazy.layout.centre()),
 ]
 
 # Add key bindings to switch VTs in Wayland.
