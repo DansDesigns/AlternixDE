@@ -39,6 +39,7 @@
 #include <QRandomGenerator>
 #include <QCollator>
 #include <QPointer>
+#include <QLockFile>
 #include <QPainter>
 #include <QGuiApplication>
 #include <QScreen>
@@ -61,6 +62,59 @@ static QString expandWallpaperHome(const QString &rawPath)
     if (path == "~") return QDir::homePath();
     if (path.startsWith("~/")) return QDir::homePath() + path.mid(1);
     return path;
+}
+
+static QString wallpaperStartDir()
+{
+    const QString alt = QDir::homePath() + "/Alternix/Wallpapers";
+    if (QDir(alt).exists()) return alt;
+    const QString pics = QDir::homePath() + "/Pictures/wallpapers";
+    if (QDir(pics).exists()) return pics;
+    return QDir::homePath();
+}
+
+// Images in a folder, in natural alphanumeric order (img2 before img10).
+static QStringList listWallpapers(const QString &dirPath)
+{
+    QDir dir(dirPath);
+    if (!dir.exists()) return {};
+    const QStringList filters = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.webp"};
+    QFileInfoList files = dir.entryInfoList(filters, QDir::Files);
+    QCollator collator;
+    collator.setNumericMode(true);
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    std::sort(files.begin(), files.end(), [&collator](const QFileInfo &a, const QFileInfo &b) {
+        return collator.compare(a.fileName(), b.fileName()) < 0;
+    });
+    QStringList paths;
+    paths.reserve(files.size());
+    for (const QFileInfo &file : files) paths << file.absoluteFilePath();
+    return paths;
+}
+
+static QString normalizeWallpaperMode(const QString &mode)
+{
+    if (mode == "fit" || mode == "fill") return "fill";   // "fit" was the old name
+    if (mode == "tile") return "tile";
+    return "zoom";                                          // also maps old "center"
+}
+
+static QString wallpaperModeArgument(const QString &mode)
+{
+    const QString m = normalizeWallpaperMode(mode);
+    if (m == "fill") return "--stretch";
+    if (m == "tile") return "--tile";
+    return "--zoom";
+}
+
+// Always clear the previous X root pixmap. After a screen rotation it may
+// still have the old dimensions, leading to corrupted margins.
+static bool applyWallpaperFile(const QString &mode, const QString &path)
+{
+    if (path.isEmpty()) return false;
+    // Arguments are passed directly: filenames may contain spaces or quotes.
+    return QProcess::startDetached(
+        "xwallpaper", QStringList{"--clear", wallpaperModeArgument(mode), path});
 }
 
 // Decode and cache small thumbnails on worker threads, never on Qt's GUI thread.
@@ -139,6 +193,210 @@ public:
     void run() override { m_task(); }
 private:
     std::function<void()> m_task;
+};
+
+struct AutoConfig
+{
+    QString mode;          // "shuffle", "sequential" or empty (off)
+    int     minutes = 5;
+    QString folder;
+    QString wallpaper;     // wallpaper currently applied
+    QString wallpaperMode; // fill / tile / zoom
+    bool active() const { return mode == "shuffle" || mode == "sequential"; }
+};
+
+static AutoConfig readAutoConfig()
+{
+    QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+    AutoConfig c;
+    c.mode = s.value("auto/mode").toString();
+    c.minutes = qBound(1, s.value(c.mode == "shuffle" ? "auto/shuffleMinutes"
+                                                      : "auto/sequentialMinutes", 5).toInt(), 1440);
+    c.folder = expandWallpaperHome(s.value("last/folder").toString());
+    if (c.folder.isEmpty()) c.folder = wallpaperStartDir();
+    c.wallpaper = expandWallpaperHome(s.value("last/wallpaper").toString());
+    c.wallpaperMode = normalizeWallpaperMode(s.value("last/mode").toString());
+    return c;
+}
+
+// Headless background mode (`osm-paper --daemon`). It owns the timed
+// Shuffle / Sequential changes and their crossfade, so they keep working
+// after the window is closed. It follows the settings file written by the
+// GUI and exits by itself once auto-change is switched off.
+class WallpaperDaemon : public QObject
+{
+public:
+    WallpaperDaemon()
+    {
+        fadePool.setMaxThreadCount(1);
+        tickTimer = new QTimer(this);
+        connect(tickTimer, &QTimer::timeout, this, [this]() { tick(); });
+        fadeTimer = new QTimer(this);
+        fadeTimer->setInterval(kFadeFrameMs);
+        connect(fadeTimer, &QTimer::timeout, this, [this]() { playFadeFrame(); });
+        pollTimer = new QTimer(this);
+        pollTimer->setInterval(2000);
+        connect(pollTimer, &QTimer::timeout, this, [this]() { poll(); });
+        poll();
+        pollTimer->start();
+    }
+
+    ~WallpaperDaemon() override
+    {
+        ++fadeGeneration;
+        fadePool.waitForDone();
+    }
+
+private:
+    static constexpr int kFadeSteps   = 10;    // intermediate frames
+    static constexpr int kFadeFrameMs = 150;   // about 1.6 s in total
+
+    QTimer *tickTimer{};
+    QTimer *fadeTimer{};
+    QTimer *pollTimer{};
+    QThreadPool fadePool;
+    std::atomic<int> fadeGeneration{0};
+    QString activeMode;
+    int     activeMinutes = 0;
+    bool    fadeActive = false;
+    QStringList fadeFrames;
+    int     fadeFrameIndex = 0;
+    QString fadeFinalPath;
+    QString fadeFinalMode;
+
+    static void quitApp()
+    {
+        QMetaObject::invokeMethod(qApp, []() { QCoreApplication::quit(); }, Qt::QueuedConnection);
+    }
+
+    // Picks up changes made in the GUI (mode, minutes, turning it off).
+    void poll()
+    {
+        const AutoConfig c = readAutoConfig();
+        if (!c.active()) { quitApp(); return; }
+        if (c.mode != activeMode || c.minutes != activeMinutes) {
+            activeMode = c.mode;
+            activeMinutes = c.minutes;
+            tickTimer->start(c.minutes * 60 * 1000);
+        }
+        // A manual change made in the GUI wins over a fade in progress.
+        if (fadeActive && (c.wallpaper != fadeFinalPath || c.wallpaperMode != fadeFinalMode))
+            cancelFade();
+    }
+
+    void tick()
+    {
+        const AutoConfig c = readAutoConfig();
+        if (!c.active()) { quitApp(); return; }
+        const QStringList paths = listWallpapers(c.folder);
+        if (paths.size() < 2) return;
+
+        const int current = paths.indexOf(c.wallpaper);
+        int next = 0;
+        if (c.mode == "shuffle") {
+            do {
+                next = QRandomGenerator::global()->bounded(paths.size());
+            } while (next == current);
+        } else {
+            next = current < 0 ? 0 : (current + 1) % paths.size();
+        }
+
+        // Remember it right away so a restart (or the GUI) sees the new one.
+        {
+            QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+            s.setValue("last/wallpaper", paths.at(next));
+            s.sync();
+        }
+        crossfade(c.wallpaper, paths.at(next), c.wallpaperMode);
+    }
+
+    static void removeFramesLater(const QStringList &files)
+    {
+        if (files.isEmpty()) return;
+        // xwallpaper may still be reading the last frame it was handed.
+        QTimer::singleShot(1500, qApp, [files]() {
+            for (const QString &file : files) QFile::remove(file);
+        });
+    }
+
+    void cancelFade()
+    {
+        ++fadeGeneration;
+        fadeTimer->stop();
+        fadeActive = false;
+        removeFramesLater(fadeFrames);
+        fadeFrames.clear();
+        fadeFrameIndex = 0;
+    }
+
+    // xwallpaper has no transitions, so blended frames are rendered on a
+    // worker thread and applied in quick succession, ending with the real
+    // wallpaper. Any failure falls back to an instant change.
+    void crossfade(const QString &fromPath, const QString &toPath, const QString &mode)
+    {
+        cancelFade();
+        fadeFinalPath = toPath;
+        fadeFinalMode = mode;
+        QScreen *screen = QGuiApplication::primaryScreen();
+        const QString dirPath = QDir::tempPath() + QStringLiteral("/osm-paper-fade");
+        if (fromPath.isEmpty() || fromPath == toPath || !screen || !QDir().mkpath(dirPath)) {
+            applyWallpaperFile(mode, toPath);
+            return;
+        }
+
+        fadeActive = true;
+        const QSize size = (screen->size() * screen->devicePixelRatio())
+                               .expandedTo(QSize(1, 1));
+        const int generation = fadeGeneration.load();
+        fadePool.start(new ThumbnailJob([this, generation, fromPath, toPath, mode, size, dirPath]() {
+            const QImage from = renderWallpaperFrame(fromPath, mode, size);
+            const QImage to = renderWallpaperFrame(toPath, mode, size);
+            QStringList files;
+            for (int i = 1; i <= kFadeSteps; ++i) {
+                if (generation != fadeGeneration.load()) {
+                    for (const QString &file : files) QFile::remove(file);
+                    return;
+                }
+                const double x = double(i) / (kFadeSteps + 1);
+                const double t = x * x * (3.0 - 2.0 * x);     // smoothstep ease
+                QImage frame = from;
+                QPainter painter(&frame);
+                painter.setOpacity(t);
+                painter.drawImage(0, 0, to);
+                painter.end();
+                const QString file = QStringLiteral("%1/frame-%2-%3.png")
+                                         .arg(dirPath).arg(generation).arg(i);
+                if (!frame.save(file, "PNG")) break;
+                files << file;
+            }
+            QMetaObject::invokeMethod(this, [this, generation, files, toPath, mode]() {
+                if (generation != fadeGeneration.load()) {
+                    removeFramesLater(files);
+                    return;
+                }
+                fadeFrames = files;
+                fadeFrameIndex = 0;
+                playFadeFrame();
+                fadeTimer->start();
+            }, Qt::QueuedConnection);
+        }));
+    }
+
+    void playFadeFrame()
+    {
+        if (fadeFrameIndex < fadeFrames.size()) {
+            QProcess::startDetached(
+                "xwallpaper", QStringList{"--stretch", fadeFrames.at(fadeFrameIndex)});
+            ++fadeFrameIndex;
+            return;
+        }
+        fadeTimer->stop();
+        fadeActive = false;
+        applyWallpaperFile(fadeFinalMode, fadeFinalPath);   // exact final result
+        removeFramesLater(fadeFrames);
+        fadeFrames.clear();
+        fadeFrameIndex = 0;
+    }
 };
 
 class WallpaperBrowser : public QWidget
@@ -350,36 +608,38 @@ public:
             setVisorBackground();
         });
 
-        fadePool.setMaxThreadCount(1);
-        fadeTimer = new QTimer(this);
-        fadeTimer->setInterval(kFadeFrameMs);
-        connect(fadeTimer, &QTimer::timeout, this, [this]() { playFadeFrame(); });
-        autoTimer = new QTimer(this);
-        connect(autoTimer, &QTimer::timeout, this, [this]() {
-            advanceWallpaper(shuffleBtn->isChecked());
-        });
+        // Shuffle / Sequential run in the background process (--daemon), so
+        // here the buttons only show and save the settings.
         connect(shuffleBtn, &QPushButton::toggled, this, [this](bool on) {
             shuffleMinutesEdit->setVisible(on);
             shuffleMinutesLabel->setVisible(on);
             if (on && sequentialBtn->isChecked()) sequentialBtn->setChecked(false);
-            updateAutoTimer();
         });
         connect(sequentialBtn, &QPushButton::toggled, this, [this](bool on) {
             sequentialMinutesEdit->setVisible(on);
             sequentialMinutesLabel->setVisible(on);
             if (on && shuffleBtn->isChecked()) shuffleBtn->setChecked(false);
-            updateAutoTimer();
         });
         // Only user clicks are saved, so an empty or missing folder at
         // startup can never overwrite the remembered choice.
-        connect(shuffleBtn, &QPushButton::clicked, this, [this]() { saveAutoSettings(); });
-        connect(sequentialBtn, &QPushButton::clicked, this, [this]() { saveAutoSettings(); });
+        auto autoClicked = [this]() {
+            saveAutoSettings();
+            if (shuffleBtn->isChecked() || sequentialBtn->isChecked())
+                startDaemon();
+        };
+        connect(shuffleBtn, &QPushButton::clicked, this, autoClicked);
+        connect(sequentialBtn, &QPushButton::clicked, this, autoClicked);
         connect(shuffleMinutesEdit, &QLineEdit::editingFinished, this, [this]() {
             commitAutoMinutes(shuffleMinutesEdit, shuffleMinutes);
         });
         connect(sequentialMinutesEdit, &QLineEdit::editingFinished, this, [this]() {
             commitAutoMinutes(sequentialMinutesEdit, sequentialMinutes);
         });
+
+        // Keep the selection in step with wallpapers the daemon applies.
+        syncTimer = new QTimer(this);
+        syncTimer->setInterval(2000);
+        connect(syncTimer, &QTimer::timeout, this, [this]() { syncWithDaemon(); });
 
         // Load initial folder
         QString defaultDir = lastFolder.isEmpty() ? defaultStartDir() : lastFolder;
@@ -391,29 +651,22 @@ public:
         // Restore the remembered auto-change mode (starts its timer).
         if (savedAutoMode == "shuffle") shuffleBtn->setChecked(true);
         else if (savedAutoMode == "sequential") sequentialBtn->setChecked(true);
+        // Make sure the background process is running if auto-change is on.
+        if (shuffleBtn->isChecked() || sequentialBtn->isChecked()) startDaemon();
+        configWallpaperSeen = lastWallpaperPath;
+        syncTimer->start();
     }
 
     ~WallpaperBrowser() override
     {
         // Each worker posts its result only while this widget is alive.
         // At most two image decodes can be running when closing.
-        ++fadeGeneration;           // tell a running fade render to stop
         thumbPool.waitForDone();
-        fadePool.waitForDone();
     }
 
 private:
     // ───────────────────── DEFAULT START DIR ─────────────────────
-    QString defaultStartDir()
-    {
-        QString alt = QDir::homePath() + "/Alternix/Wallpapers";
-        if (QDir(alt).exists()) return alt;
-
-        QString pics = QDir::homePath() + "/Pictures/wallpapers";
-        if (QDir(pics).exists()) return pics;
-
-        return QDir::homePath();
-    }
+    QString defaultStartDir() { return wallpaperStartDir(); }
 
     // Widgets
     QLineEdit   *pathEdit{};
@@ -423,7 +676,7 @@ private:
     QPushButton *sequentialBtn{};
     QLineEdit   *sequentialMinutesEdit{};
     QLabel      *sequentialMinutesLabel{};
-    QTimer      *autoTimer{};
+    QTimer      *syncTimer{};
     QScrollArea *scrollArea{};
     QWidget     *gridWidget{};
     QGridLayout *gridLayout{};
@@ -437,13 +690,6 @@ private:
     QTimer      *thumbRequestTimer{};
     QTimer      *cardBuildTimer{};
     QThreadPool  thumbPool;
-    QThreadPool  fadePool;
-    QTimer      *fadeTimer{};
-    std::atomic<int> fadeGeneration{0};   // bumped to cancel a crossfade
-    QStringList fadeFrames;
-    int         fadeFrameIndex = 0;
-    QString     fadeFinalPath;
-    QString     fadeFinalMode;
 
     // State
     QStringList imagePaths;
@@ -460,6 +706,7 @@ private:
     int         shuffleMinutes = 5;
     int         sequentialMinutes = 5;
     QString     savedAutoMode;           // "shuffle", "sequential" or empty
+    QString     configWallpaperSeen;     // last wallpaper value seen in the settings file
     bool        focusWhenBuilt = false;  // focus the selected card once it exists
     bool        initialFocusDone = false;
 
@@ -564,134 +811,30 @@ private:
     {
         bool ok = false;
         const int typed = edit->text().toInt(&ok);
-        const int old = minutes;
         minutes = qBound(1, ok ? typed : minutes, 1440);
         edit->setText(QString::number(minutes));
-        saveAutoSettings();
-        if (minutes != old) updateAutoTimer();
+        saveAutoSettings();   // the daemon notices the new value within seconds
     }
 
-    // (Re)start the single auto-change timer from the toggle states.
-    void updateAutoTimer()
+    // Start the background process. If one is already running it finds the
+    // lock held and exits at once, so calling this repeatedly is harmless.
+    void startDaemon()
     {
-        autoTimer->stop();
-        const bool shuffle = shuffleBtn->isChecked();
-        const bool sequential = sequentialBtn->isChecked();
-        if (!shuffle && !sequential) return;
-        if (imagePaths.size() < 2) return;   // restarted once a folder is loaded
-        const int minutes = shuffle ? shuffleMinutes : sequentialMinutes;
-        autoTimer->start(qBound(1, minutes, 1440) * 60 * 1000);
+        QProcess::startDetached(QCoreApplication::applicationFilePath(),
+                                QStringList{QStringLiteral("--daemon")});
     }
 
-    void advanceWallpaper(bool random)
+    // Reflect a wallpaper the daemon applied: move the selection to it.
+    void syncWithDaemon()
     {
-        if (imagePaths.size() < 2) return;
-        const QString previousPath = currentImagePath;
-        const int currentIndex = imagePaths.indexOf(currentImagePath);
-        int nextIndex = 0;
-        if (random) {
-            do {
-                nextIndex = QRandomGenerator::global()->bounded(imagePaths.size());
-            } while (nextIndex == currentIndex);
-        } else {
-            nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % imagePaths.size();
-        }
-        selectWallpaper(nextIndex);
-        const QString mode = lastMode.isEmpty() ? QStringLiteral("zoom") : lastMode;
-        crossfadeWallpaper(previousPath, currentImagePath, mode);
-        // Remember the new wallpaper right away, even though the fade is
-        // still playing, so quitting mid-fade restores the right image.
-        saveLastWallpaper(mode, currentImagePath);
-    }
-
-    // ───────────────────── Crossfade (auto-change modes) ─────────────────────
-    // xwallpaper has no transitions, so blended frames are rendered on a
-    // worker thread and applied in quick succession, ending with the real
-    // wallpaper. Any failure falls back to an instant change.
-    static constexpr int kFadeSteps   = 10;    // intermediate frames
-    static constexpr int kFadeFrameMs = 150;   // ≈1.6 s in total
-
-    static void removeFramesLater(const QStringList &files)
-    {
-        if (files.isEmpty()) return;
-        // xwallpaper may still be reading the last frame it was handed.
-        QTimer::singleShot(1500, qApp, [files]() {
-            for (const QString &file : files) QFile::remove(file);
-        });
-    }
-
-    void cancelFade()
-    {
-        ++fadeGeneration;
-        if (fadeTimer) fadeTimer->stop();
-        removeFramesLater(fadeFrames);
-        fadeFrames.clear();
-        fadeFrameIndex = 0;
-    }
-
-    void crossfadeWallpaper(const QString &fromPath, const QString &toPath, const QString &mode)
-    {
-        cancelFade();
-        QScreen *screen = QGuiApplication::primaryScreen();
-        const QString dirPath = QDir::tempPath() + QStringLiteral("/osm-paper-fade");
-        if (fromPath.isEmpty() || fromPath == toPath || !screen
-            || !QDir().mkpath(dirPath)) {
-            redrawWallpaper(mode, toPath);
-            return;
-        }
-
-        const QSize size = (screen->size() * screen->devicePixelRatio())
-                               .expandedTo(QSize(1, 1));
-        const int generation = fadeGeneration.load();
-        fadePool.start(new ThumbnailJob([this, generation, fromPath, toPath, mode, size, dirPath]() {
-            const QImage from = renderWallpaperFrame(fromPath, mode, size);
-            const QImage to = renderWallpaperFrame(toPath, mode, size);
-            QStringList files;
-            for (int i = 1; i <= kFadeSteps; ++i) {
-                if (generation != fadeGeneration.load()) {
-                    for (const QString &file : files) QFile::remove(file);
-                    return;
-                }
-                const double x = double(i) / (kFadeSteps + 1);
-                const double t = x * x * (3.0 - 2.0 * x);     // smoothstep ease
-                QImage frame = from;
-                QPainter painter(&frame);
-                painter.setOpacity(t);
-                painter.drawImage(0, 0, to);
-                painter.end();
-                const QString file = QStringLiteral("%1/frame-%2-%3.png")
-                                         .arg(dirPath).arg(generation).arg(i);
-                if (!frame.save(file, "PNG")) break;
-                files << file;
-            }
-            QMetaObject::invokeMethod(this, [this, generation, files, toPath, mode]() {
-                if (generation != fadeGeneration.load()) {
-                    removeFramesLater(files);
-                    return;
-                }
-                fadeFrames = files;
-                fadeFrameIndex = 0;
-                fadeFinalPath = toPath;
-                fadeFinalMode = mode;
-                playFadeFrame();
-                fadeTimer->start();
-            }, Qt::QueuedConnection);
-        }));
-    }
-
-    void playFadeFrame()
-    {
-        if (fadeFrameIndex < fadeFrames.size()) {
-            QProcess::startDetached(
-                "xwallpaper", QStringList{"--stretch", fadeFrames.at(fadeFrameIndex)});
-            ++fadeFrameIndex;
-            return;
-        }
-        fadeTimer->stop();
-        redrawWallpaper(fadeFinalMode, fadeFinalPath);   // exact final result
-        removeFramesLater(fadeFrames);
-        fadeFrames.clear();
-        fadeFrameIndex = 0;
+        QSettings s(osmPaperConfigPath(), QSettings::IniFormat);
+        const QString path = expandWallpaperHome(s.value("last/wallpaper").toString());
+        if (path.isEmpty() || path == configWallpaperSeen) return;
+        configWallpaperSeen = path;
+        const int index = imagePaths.indexOf(path);
+        if (index < 0) return;
+        lastWallpaperPath = path;
+        selectWallpaper(index);
     }
 
     // ───────────────────── Persistence ───────────────────────
@@ -721,6 +864,7 @@ private:
         s.endGroup();
 
         lastWallpaperPath = path;
+        configWallpaperSeen = path;
         lastMode = modeName;
         selectedModeButton(modeName)->setChecked(true);
     }
@@ -733,8 +877,7 @@ private:
         lastMode = s.value("mode").toString();
         s.endGroup();
         // Older versions stored "fit" (now Fill) and "center" (removed).
-        if (lastMode == "fit") lastMode = "fill";
-        else if (lastMode == "center") lastMode = "zoom";
+        if (!lastMode.isEmpty()) lastMode = normalizeWallpaperMode(lastMode);
     }
 
     void applyLastWallpaperOnStartup()
@@ -747,23 +890,9 @@ private:
 
     // ───────────────────── Wallpaper apply ───────────────────────
 
-    QString modeToArgument(const QString &modeName) const
-    {
-        if (modeName == "fill" || modeName == "fit") return "--stretch";
-        if (modeName == "tile") return "--tile";
-        return "--zoom";
-    }
-
-    // Always clear the previous X root pixmap. After a screen rotation it
-    // may still have the old landscape/portrait dimensions, leading to
-    // corrupted margins until the entire wallpaper is redrawn.
     bool redrawWallpaper(const QString &modeName, const QString &path)
     {
-        if (path.isEmpty()) return false;
-        // Pass arguments directly: wallpaper filenames can contain spaces,
-        // shell quotes and other characters that must not be interpreted.
-        return QProcess::startDetached(
-            "xwallpaper", QStringList{"--clear", modeToArgument(modeName), path});
+        return applyWallpaperFile(modeName, path);
     }
 
     void applyWallpaperDirect(const QString &modeName, const QString &path)
@@ -773,7 +902,6 @@ private:
 
     bool applyWallpaper(const QString &modeName)
     {
-        cancelFade();
         if (currentImagePath.isEmpty()) {
             selectedModeButton(lastMode)->setChecked(true);
             return false;
@@ -909,30 +1037,14 @@ private:
         focusWhenBuilt = true;
         scrollArea->verticalScrollBar()->setValue(0);
 
-        QDir dir(dirPath);
-        if (!dir.exists()) return;
-
-        const QStringList filters = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.webp"};
-        QFileInfoList files = dir.entryInfoList(filters, QDir::Files);
-        QCollator collator;
-        collator.setNumericMode(true);
-        collator.setCaseSensitivity(Qt::CaseInsensitive);
-        std::sort(files.begin(), files.end(), [&collator](const QFileInfo &a, const QFileInfo &b) {
-            return collator.compare(a.fileName(), b.fileName()) < 0;
-        });
-        imagePaths.reserve(files.size());
-        for (const QFileInfo &file : files)
-            imagePaths << file.absoluteFilePath();
+        imagePaths = listWallpapers(dirPath);
 
         buildPlaceholdersAndStartLoader();
     }
 
     void buildPlaceholdersAndStartLoader()
     {
-        if (imagePaths.isEmpty()) {
-            if (autoTimer) autoTimer->stop();
-            return;
-        }
+        if (imagePaths.isEmpty()) return;
 
         // The image list is cheap. Construct the actual button widgets in
         // small chunks so large wallpaper folders cannot block startup.
@@ -942,7 +1054,6 @@ private:
             ? 0 : imagePaths.indexOf(lastWallpaperPath);
         if (selectedIndex < 0) selectedIndex = 0;
         currentImagePath = imagePaths.at(selectedIndex);
-        if (autoTimer) updateAutoTimer();   // new folder: restart the countdown
 
         buildNextCardBatch();       // initial visible cards before first paint
     }
@@ -1163,6 +1274,19 @@ QScrollBar::handle:vertical { background: #504945; border-radius: 6px; min-heigh
 
 int main(int argc, char *argv[])
 {
+    // Background mode: timed Shuffle / Sequential with crossfade, no window.
+    for (int i = 1; i < argc; ++i) {
+        if (QString::fromLocal8Bit(argv[i]) != QLatin1String("--daemon")) continue;
+        QGuiApplication app(argc, argv);
+        app.setApplicationName(QStringLiteral("osm-paper"));
+        QLockFile lock(QFileInfo(osmPaperConfigPath()).absolutePath()
+                       + QStringLiteral("/osm-paper-daemon.lock"));
+        lock.setStaleLockTime(0);              // stale only if its owner died
+        if (!lock.tryLock(0)) return 0;        // a daemon is already running
+        WallpaperDaemon daemon;
+        return app.exec();
+    }
+
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("osm-paper"));
