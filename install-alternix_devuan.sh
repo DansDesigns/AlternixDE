@@ -944,6 +944,8 @@ flatpak install -y flathub org.kde.qrca
 flatpak install -y flathub com.freerdp.FreeRDP
 flatpak install -y flathub com.github.tchx84.Flatseal
 flatpak install -y flathub io.github.leolost2605.emergency-alerts
+flatpak remote-add --if-not-exists opentubex https://flatpak.opentubex.org/opentubex.flatpakrepo
+flatpak install -y opentubex org.opentubex.OpenTubeX
 
 # Optional Flatpaks are deliberately excluded from the ISO prebuilt preview.
 # Only ask during an interactive installation, never in live-build's chroot.
