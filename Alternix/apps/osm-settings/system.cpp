@@ -58,6 +58,10 @@ static QString getAlternixDEVersion()
 
 static QString getAlternixOSVersion()
 {
+    // Written by install-update.sh from the latest version file on GitHub.
+    const QString v = readInstalledVersion("/usr/share/alternix/os-version.txt");
+    if (v != "Unknown")
+        return v;
     return readInstalledVersion(QDir::home().filePath("Alternix/version"));
 }
 

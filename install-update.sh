@@ -2018,6 +2018,29 @@ fi
 echo "• Updating Version Number..."
 sudo cp "$ALT_ROOT/update/version.txt" /usr/share/alternix/version.txt
 
+# Update AlternixOS Version Number (latest published version on GitHub).
+# Note: this must be the RAW file; the github.com/.../blob/... page is HTML.
+echo "• Updating AlternixOS Version Number..."
+ALT_OS_VERSION_URL="https://raw.githubusercontent.com/DansDesigns/AlternixOS/main/version"
+ALT_OS_VERSION_TMP="$(mktemp)"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 20 "$ALT_OS_VERSION_URL" -o "$ALT_OS_VERSION_TMP" 2>/dev/null || true
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 20 -O "$ALT_OS_VERSION_TMP" "$ALT_OS_VERSION_URL" 2>/dev/null || true
+fi
+ALT_OS_VERSION_NEW="$(head -n 1 "$ALT_OS_VERSION_TMP" 2>/dev/null | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+rm -f -- "$ALT_OS_VERSION_TMP"
+# Only accept a short, plain-text version string (never an HTML error page).
+if [ -n "$ALT_OS_VERSION_NEW" ] && [ "${#ALT_OS_VERSION_NEW}" -le 32 ] && \
+   [[ "$ALT_OS_VERSION_NEW" != *[\<\>]* ]]; then
+    sudo install -d -m 0755 /usr/share/alternix
+    printf '%s\n' "$ALT_OS_VERSION_NEW" | sudo tee /usr/share/alternix/os-version.txt >/dev/null
+    sudo chmod 0644 /usr/share/alternix/os-version.txt
+    echo "[✓] AlternixOS version set to: $ALT_OS_VERSION_NEW"
+else
+    echo "WARNING: Could not download the latest AlternixOS version; keeping the existing one." >&2
+fi
+
 
 echo "• Updating udev rules..."
 # Symlink qtile binary to where udev rules expect it
