@@ -586,7 +586,7 @@ layouts = [
     #layout.RatioTile(margin=6),
     layout.MonadWide(border_width=0, margin=6),
     layout.MonadTall(border_width=0, margin=6),
-    # commented out below due to osm-launcher rapid switching form fullscreen to floating window, resulting in a broken desktop - TO FIX..
+    # commented out below due to osm-launcher rapid switching from fullscreen to floating window, resulting in a broken desktop - TO FIX..
     #FloatSnap(
     #    border_width=2,
     #    titlebar_height=25,
