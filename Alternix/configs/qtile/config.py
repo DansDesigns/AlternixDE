@@ -509,6 +509,14 @@ layouts = [
     #layout.RatioTile(margin=6),
     layout.MonadWide(border_width=0, margin=6),
     layout.MonadTall(border_width=0, margin=6),
+    FloatSnap(
+        border_width=2,
+        titlebar_height=25,
+        joint_titlebar_height=20,
+        snap_distance=10,
+        snap_to_edges=True,
+        snap_to_windows=True,
+    ),
 ]
 
 widget_defaults = dict(
