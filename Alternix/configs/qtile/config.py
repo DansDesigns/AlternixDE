@@ -222,7 +222,6 @@ def lock_on_resume():
 def autostart():
     # Autostart Programs
     subprocess.Popen(['osm-paper-restore'])
-    subprocess.Popen(['osm-paper --daemon'])
     subprocess.Popen(['picom', '-b'])
     subprocess.Popen(['osm-lockd'])
     subprocess.Popen(['osm-powerd'])
@@ -232,6 +231,7 @@ def autostart():
     subprocess.Popen(['osm-status'])
     subprocess.Popen(['osm-running'])
     subprocess.Popen(['osm-launcher --daemon'])
+    subprocess.Popen(['osm-paper --daemon'])
 
 
 @hook.subscribe.startup_complete
