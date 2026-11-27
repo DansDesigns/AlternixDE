@@ -283,9 +283,25 @@ class FloatSnap(Layout):
         return getattr(self._group, "qtile", None) if self._group else None
 
     @staticmethod
-    def _ensure_tiled(client):
-        """Keep clients in Qtile's layout-managed layer."""
+    def _is_fullscreen(client):
+        """Return whether Qtile currently owns this client as fullscreen."""
         try:
+            return bool(getattr(client, "fullscreen", False))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _ensure_tiled(client):
+        """Keep ordinary clients tiled without breaking Qtile fullscreen.
+
+        Qtile implements fullscreen using its floating layer. FloatSnap must
+        therefore leave fullscreen clients alone; disabling their floating
+        state here makes Qtile repeatedly enter and leave fullscreen, which
+        appears as the window jumping around the screen.
+        """
+        try:
+            if FloatSnap._is_fullscreen(client):
+                return
             if getattr(client, "floating", False):
                 client.disable_floating()
         except Exception:
@@ -302,7 +318,31 @@ class FloatSnap(Layout):
             win = qtile.core.create_internal(
                 int(x), int(y), max(1, int(width)), max(1, int(height)), depth
             )
-            # Qtile's Internal callbacks use positional (x, y, button) values.
+
+            # Internal windows must be mapped before their Drawer copies its
+            # backing pixmap to the X window. Give the X window an opaque theme
+            # colour first so mapping it cannot reveal the wallpaper beneath.
+            initial_bg = (
+                self.joint_titlebar_bg if isinstance(key, tuple)
+                else self.titlebar_bg
+            )
+            try:
+                pixel = qtile.core.conn.default_screen.default_colormap.alloc_color(
+                    initial_bg
+                ).pixel
+                win.window.set_attribute(backpixel=pixel)
+            except Exception:
+                # The Drawer still paints the full opaque background below.
+                pass
+            try:
+                win.opacity = 1.0
+            except Exception:
+                pass
+
+            # Qtile's own Bar follows this order: create the internal X window,
+            # map it, then attach callbacks and create its Drawer.
+            win.unhide()
+            # Qtile calls these as (x, y, button) / (x, y), not with an event.
             win.process_window_expose = lambda: draw(key)
             win.process_button_click = lambda x, y, button: click(
                 key, _Ev(x, y, button)
@@ -317,8 +357,6 @@ class FloatSnap(Layout):
                 "drawer": drawer,
                 "size": (int(width), int(height)),
             }
-            # Keep it unmapped until _draw_titlebar/_draw_joint has painted
-            # an opaque background into its drawer.
             return item
         except Exception:
             # Do not leave an unmanaged internal X window behind if drawer
@@ -509,7 +547,8 @@ class FloatSnap(Layout):
                 y = sr.y + sr.height - h - gap
         if self.snap_to_windows:
             for other in self.clients:
-                if other is client or other not in self.geometry:
+                if (other is client or other not in self.geometry
+                        or self._is_fullscreen(other)):
                     continue
                 ox, oy, ow, oh = self.geometry[other]
                 vertical_overlap = y < oy + oh and y + h > oy
@@ -531,11 +570,11 @@ class FloatSnap(Layout):
         # Existing groups persist while their members remain geometrically joined.
         joined = []
         for i, a in enumerate(self.clients):
-            if a not in self.geometry:
+            if a not in self.geometry or self._is_fullscreen(a):
                 continue
             ax, ay, aw, ah = self.geometry[a]
             for b in self.clients[i + 1:]:
-                if b not in self.geometry:
+                if b not in self.geometry or self._is_fullscreen(b):
                     continue
                 bx, by, bw, bh = self.geometry[b]
                 tol = int(self.group_snap_distance)
@@ -568,10 +607,17 @@ class FloatSnap(Layout):
         try:
             item["window"].place(
                 int(x), int(y), max(1, int(width)), max(1, int(height)),
-                0, None, above=True
+                0, None
             )
             item["drawer"].width = max(1, int(width))
             item["drawer"].height = max(1, int(height))
+            # Internal windows have no Qtile group, so place(above=True) cannot
+            # restack them through Qtile's normal layer manager. Raise the X11
+            # window directly so a focused application cannot cover its bar.
+            try:
+                item["window"].window.configure(stackmode=0)  # StackMode.Above
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -613,6 +659,14 @@ class FloatSnap(Layout):
         self._relayout()
 
     def configure(self, client, screen_rect):
+        # Fullscreen windows are managed by Qtile's fullscreen layer, not by
+        # FloatSnap's free-positioning geometry. Do not move, resize, decorate,
+        # or change their floating state. In particular this prevents the
+        # OSM Launcher fullscreen lock from fighting FloatSnap on every pass.
+        if self._is_fullscreen(client):
+            self._destroy_decoration(client)
+            return
+
         self._ensure_tiled(client)
         if client not in self.clients:
             client.hide()
