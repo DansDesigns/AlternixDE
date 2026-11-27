@@ -13,6 +13,15 @@ from libqtile.command.base import expose_command
 from libqtile.layout.base import Layout
 
 
+class _Ev:
+    """Minimal event object built from qtile's (x, y, button) callbacks."""
+
+    def __init__(self, x, y, button):
+        self.event_x = x
+        self.event_y = y
+        self.detail = button
+
+
 class FloatSnap(Layout):
     defaults = [
         ("border_width", 2, "Client border width."),
@@ -149,9 +158,13 @@ class FloatSnap(Layout):
             win = qtile.core.create_internal(int(x), int(y), max(1, int(width)),
                                              max(1, int(height)), depth)
             win.unhide()
-            win.process_window_expose = lambda event=None: draw(key)
-            win.process_button_click = lambda event: click(key, event)
-            win.process_pointer_motion = lambda event: motion(key, event)
+            # Qtile calls these as (x, y, button) / (x, y), not with an event.
+            win.process_window_expose = lambda: draw(key)
+            win.process_button_click = lambda x, y, button: click(
+                key, _Ev(x, y, button))
+            win.process_button_release = lambda x, y, button: self._release()
+            win.process_pointer_motion = lambda x, y: motion(
+                key, _Ev(x, y, 0))
             drawer = win.create_drawer(max(1, int(width)), max(1, int(height)))
             item = {"window": win, "drawer": drawer, "size": (int(width), int(height))}
             return item
@@ -265,6 +278,9 @@ class FloatSnap(Layout):
             "origin": tuple(g),
             "last": (px, py),
         }
+
+    def _release(self):
+        self._drag = None
 
     def _joint_click(self, key, event):
         if getattr(event, "detail", 1) != 1:
